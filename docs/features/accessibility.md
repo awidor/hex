@@ -6,8 +6,7 @@ Access), NSAccessibility on macOS (VoiceOver, Voice Control), and AT-SPI on
 Linux (Orca). Rune builds the tree with AccessKit from what each element
 already is (role, label, text, key, focus) and the builders Hex adds
 (`description`, `checked`, `disabled`, `a11y_value`, `live_region`,
-`position_in_set`, `a11y_hidden`). The same tree is what strobe drives in
-[the interaction benches](../perf.md#interaction-cases).
+`position_in_set`, `a11y_hidden`).
 
 Nothing is built until an assistive client asks, so Hex pays nothing for it
 until then. Names and descriptions go through `desktop::i18n` like the visible
@@ -29,7 +28,7 @@ Settings window                               // a11y.window
 │   │   its note, checked or unchecked; Toggle flips it as a press does
 │   ├── Held by policy or locked on -> the switch is disabled
 │   ├── A row with a choice -> the choice is named by the row's title and
-│   │   reads its current choice as its value (Speech model, Language,
+│   │   reads its current choice as its value (Language, Final text, Numbers,
 │   │   Microphone, Vocabulary, Sounds, Shortcut mode, Keep meetings, …)
 │   └── Icons, separators, status dots, level bars -> left out
 ├── History                                                         // a11y.history
@@ -39,10 +38,7 @@ Settings window                               // a11y.window
 │   ├── Search -> a text field named "Search history"
 │   └── Keep -> "History retention" with the retention as its value
 ├── Meetings -> the same list shape, named Meetings, day headings level 3
-├── Speech model picker -> a modal dialog named by its title       // a11y.picker
-│   ├── The window behind it leaves the tree while it is open
-│   ├── Compare -> one group per model column, named by the model
-│   └── Every model -> lists per group, each model a list item with its place
+├── The API key field -> a secure text field named "ElevenLabs API key"
 └── Icon-only buttons -> named (Close, Copy, Delete, Remove, Back, More, …)
 ```
 
@@ -52,7 +48,7 @@ Sources: [controls.rs](../../src/rune_ui/controls.rs) (`copy_row_tagged`,
 [list_detail.rs](../../src/rune_ui/list_detail.rs),
 [lists.rs](../../src/rune_ui/lists.rs),
 [history.rs](../../src/rune_ui/history.rs), and
-[picker.rs](../../src/rune_ui/picker.rs).
+[general/transcription.rs](../../src/rune_ui/general/transcription.rs).
 
 Checks: [accessibility_tests.rs](../../src/rune_ui/accessibility_tests.rs)
 reads `Runtime::accessibility_json` for every `--snap` scene but `live`:
@@ -61,10 +57,14 @@ focus action, or a control role, has a non-empty name),
 `the_sidebar_says_which_pane_shows_and_switches_through_accessibility`,
 `history_lists_its_entries_with_their_place`,
 `settings_switches_say_whether_they_are_on`,
-`choices_name_what_they_choose_and_read_their_value`,
-`the_model_picker_is_a_named_modal_dialog`, and
-`the_pane_title_is_its_heading`. They run on every OS in CI. They read the tree
-Rune would send; they don't prove what a screen reader says.
+`choices_name_what_they_choose_and_read_their_value`, and
+`the_pane_title_is_its_heading`. The CI workflows run the test suite on every
+OS for pull requests and manual runs. They read the tree Rune would send; they
+don't prove what a screen reader says. No test names the Transcription
+section's rows or the API key field apart from the every-control check, and
+no run of these checks is recorded in this fork (Linux: compiled and
+unit-tested; Windows: type-checked by cross compilation only; macOS: not
+compiled).
 
 ## HUD and capsules
 
@@ -91,21 +91,11 @@ Sources: `IndicatorModel::status` in
 `the_status_says_recording_then_transcribing` (the model only). The capsules'
 and HUD's trees have no test.
 
-## Keys automation uses
-
-strobe's selectors are element keys, which the tree exposes as UI Automation
-`AutomationId`s. Keep these stable; `perf/interaction.bench.ts` uses them:
-`nav-general`, `nav-history`, `nav-output`, `basics`, `output-content`,
-`history-list`, `history-scroll`, `history-search`, `transcription-control`,
-`transcription-picker`, `more-models`, `all-view`, `picker-back`,
-`compare-view`, `close-picker`.
-
 ## Not verified
 
 - No live screen reader session: Narrator, NVDA, VoiceOver, or Orca reading
   the window has not been observed.
-- No live UI Automation read of a running Hex: the interaction benches' first
-  runs need an unlocked Windows session.
+- No live UI Automation read of a running Hex.
 - The meeting and Annotate capsules and the HUD have no tree test.
 - The onboarding story and practice game are covered only by the
   every-control-has-a-name check, not by a reading-order review.

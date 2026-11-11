@@ -2,26 +2,23 @@
 
 One shared list of names Hex should know (people, projects, products), each
 with optional "sounds like" spellings a transcript may show instead. An empty
-list (the default) changes nothing. The window edits the list on macOS,
-Linux, and Windows; the `hex vocabulary` commands are macOS only for now.
+list (the default) changes nothing. The window and the `hex vocabulary`
+commands edit the list on macOS, Linux, and Windows.
 
 ```ts
-General › Vocabulary   // vocabulary.settings; after Language
+General › Vocabulary   // vocabulary.settings; in the basics card, after the shortcut
 ├── Row value -> "None", "1 term", "N terms" -> opens the Vocabulary sheet
-├── Selected model takes no vocabulary (ModelDefinition::vocabulary_use)
-│   -> muted note on the row and under the sheet's description: "SenseVoice
-│   Small doesn't use these terms; rewriting and search still do"; Parakeet,
-│   Underdog Bark, Whisper, and Qwen3-ASR (QwenCleo too) show none
-├── Parakeet-based model with Labs › Vocabulary biasing off -> the sheet says
-│   transcription uses the terms only with it on
-├── Selected model reads fewer terms than the list holds -> muted line under
-│   the sheet's description: "This model reads the first 38 of 52 terms"
-│   (dictation::vocabulary::terms_read: Parakeet's 64-term cap or the
-│   prompt's character budget, the same count transcription takes; scene
-│   vocabulary-budget)
-├── Sheet description -> what the list does, then "Terms with spaces match
-│   only when said in full" (a term is matched whole; "Dax Rad" doesn't help
-│   "Dax" said alone, so a name also said alone gets its own row)
+├── Sheet description -> "Transcription and rewriting spell them right, and
+│   search finds them when misheard", then "Terms with spaces match only when
+│   said in full"
+├── Use in transcription (switch)                // vocabulary.boost
+│   ├── On unless `vocabulary_boost` is off; turning it off saves off, on saves normal
+│   ├── Labs › Vocabulary biasing off -> "Transcription uses these only with
+│   │   Labs › Vocabulary biasing on; rewriting and search always do"
+│   ├── On, and ElevenLabs takes fewer terms than the list holds ->
+│   │   "Transcription uses 40 of 41 terms; ElevenLabs doesn't take the rest"
+│   │   (ModelDefinition::vocabulary_terms_read, the same count a request takes)
+│   └── Else -> "Sends these terms to ElevenLabs with each dictation so it favors them"
 ├── Sheet rows -> Term | Sounds like (comma-separated) | ×; scroll past 8
 ├── Empty list -> Opens with one blank row focused; opening never animates rows
 ├── Add term -> New empty row, focused; the list glides to its end and the row
@@ -33,63 +30,25 @@ General › Vocabulary   // vocabulary.settings; after Language
 ├── Done, Escape, or a press outside -> Saves, drops blank rows, closes
 ├── Past the limits -> Keep the term (cut to 64 characters) and the spellings
 │   that fit; inline danger note    // never drops the term
-└── Boost -> no control in the window: Normal (default) unless changed with
-    `hex settings set vocabulary_boost off|light|normal|strong`
-    (settings.json `vocabulary_boost`)  // vocabulary.boost
+└── `hex settings set vocabulary_boost off|light|normal|strong`
+    (settings.json `vocabulary_boost`, default normal) -> off sends no terms;
+    light, normal, and strong send the same terms
 
-Transcription (Parakeet: RNN-T and TDT, Underdog Bark and Nemotron 3.5 ASR too)  // vocabulary.transcription; transcription::gguf_session::with_vocabulary
+Transcription (ElevenLabs Scribe keyterms)  // vocabulary.transcription; dictation::vocabulary::keyterms
 ├── Only with Labs › Vocabulary biasing on (`labs.vocabulary_biasing`, off by
-│   default; labs.md) -> off: no run takes the list; the sheet says so, and
-│   rewriting and search still use it
-├── Every run and live stream reads the list and the boost at its start:
+│   default; labs.md) AND Use in transcription on -> else no request carries
+│   the list; ElevenLabs bills keyterms extra
+├── Every batch request and live session reads the list at its start:
 │   dictation, meetings, captures, the local API
-├── First 64 terms (the engine's cap) and their spellings; empty or Off -> unchanged
-├── Whole-clip run on an RNN-T model (Parakeet unified): meetings, captures,
-│   the local API, dictation that falls back to the whole clip
-│   ├── The greedy words stand; where the audio could also spell a term, the
-│   │   decoder follows the term alongside them, and the term replaces them
-│   │   when its score plus the boost per term piece beats theirs at the word
-│   │   boundary (0.6 × the boost when the words don't sound like it)
-│   └── After the tree decode, a separate pass replaces exact "sounds like"
-│       spelling matches with their term, with no scoring; a longer spelling
-│       is not split by a shorter spelling of the same term inside it
-├── Live stream or TDT model -> after the greedy decode, spans of up to 4 words
-│   that look or sound like a term are rescored on the same audio frames from
-│   the same decoder state: the term replaces the span when its score plus the
-│   boost per term piece beats the heard words'
-│   └── Exact "sounds like" spellings resolve first with no scoring (longest
-│       span, then earliest; a longer spelling is not split by a shorter
-│       spelling of the same term inside it; ordinary candidates overlapping
-│       one are skipped), and the pass runs even when a stream kept no frames
-├── Left alone: case-only differences, inflections ("Cappuccinos"), addresses
-│   and paths ("opencode.ai"), and "sounds like" spellings under 2 characters
-│   (Unicode code points, counted after lowercasing and dropping ASCII spaces
-│   and punctuation), which are ignored entirely; rescoring also skips terms
-│   under 5 letters without a spelling, which the RNN-T decoder can still write
-│   ("Kip" -> Kit)
-└── SenseVoice, Cohere, GigaAM, Granite, Apple Speech -> no vocabulary in transcription
-
-Context prompt (Whisper incl. ivrit.ai and NB-Whisper, Qwen3-ASR, QwenCleo)  // vocabulary.prompt-transcription; transcription::gguf_session::with_vocabulary
-├── Always on (not Labs): replaced the per-model Recognition hints box (#129)
-├── Every whole-clip run reads the list at its start: dictation, meetings,
-│   captures, the local API; live streams run without it
-├── "Term, Term, …": the first terms in list order, as many as fit 500
-│   characters (Whisper: its prompt slot holds 223 tokens and trims an
-│   overlong one from the front) or 1,000 (Qwen3-ASR's system message); the
-│   64-term cap is Parakeet's bias array only (#1246)
-├── The sheet says how many terms the selected model reads when that is
-│   fewer than the list; the 64-term vs full-budget hit rate is unmeasured
-├── Whisper: transcribe.cpp's generic context prompt in the <|startofprev|>
-│   slot; Qwen3-ASR: the system message
-├── Output that only repeats the prompt (two or more terms) is dropped, as
-│   both models return it on silence or noise (README.md#get-ready)
+├── The terms Scribe accepts, in list order; limits, what is skipped, and the
+│   proof are in transcription.md#vocabulary-as-keyterms
 └── "Sounds like" spellings are not sent; rewriting and search use them
 
 Recognition hints, folded in                // vocabulary.hints
-├── Loading settings.json -> `recognition_hints` of the selected model and the
-│   recent models (newest first), split on commas, semicolons, and line
-│   breaks, become terms; names already listed (any case) are skipped, and
-│   the rewritten file drops the field
+├── Loading settings.json -> `recognition_hints` of the saved selection and
+│   of `transcription_recents` (newest first), split on commas, semicolons,
+│   and line breaks, become terms; names already listed (any case) are
+│   skipped, and the rewritten file drops the field
 └── `hex settings get|set transcription.recognition_hints` -> deprecated alias:
     reads the terms comma-separated; set adds names (cli.md)
 
@@ -105,17 +64,17 @@ A mode's own vocabulary                  // vocabulary.modes; DictationMode::voc
 │   window editor yet (Output lists it as the mode's first step; Edit with
 │   agent's prompt explains it)
 ├── Its terms come first, then the shared list's, each term once (any case),
-│   so the 64-term cap keeps them
+│   so the keyterm limits keep them
 ├── OpenCode rewriting -> every OS, the mode chosen for the dictation
 └── Transcription -> macOS dictation only: the mode of the app and page the
-    context monitor last saw when the stream or whole-clip run starts. The app
-    is polled every 0.5 s; a scriptable browser's page is read when the browser
-    comes to the front and once more when a dictation capture is real (held
-    past its hold threshold, at a finish that lands earlier, or at the control
-    command's start), never on every press. A live stream starts with the page
-    cached when the browser came to the front; the refresh applies to the
-    finished text. Meetings, captures, the local API, Linux, and Windows hear with the
-    shared list
+    context monitor last saw when the live session or whole-clip request
+    starts. The app is polled every 0.5 s; a scriptable browser's page is read
+    when the browser comes to the front and once more when a dictation capture
+    is real (held past its hold threshold, at a finish that lands earlier, or
+    at the control command's start), never on every press. A live session
+    starts with the page cached when the browser came to the front; the
+    refresh applies to the whole-clip request. Meetings, captures, the local
+    API, Linux, and Windows hear with the shared list
 
 OpenCode rewriting (Modes)               // vocabulary.prompt
 └── Prompt gains "Vocabulary (spell these exactly when the speaker means them):
@@ -151,19 +110,7 @@ or migrate settings.
 
 Short names with few consonant sounds (Rune, Dax) would sound like too many
 words, so search finds their mis-transcriptions only through "sounds like"
-spellings, and rescoring changes them only where a spelling matches.
-An exact match of one of your "sounds like" spellings (at least 2 characters) is
-replaced by the term in a separate pass after decoding, with no acoustic
-scoring; other near matches still go in only when the model scores the term
-close to what it heard on the same audio. Because that pass never asks how the
-term sounds, a spelling that is also an ordinary word is replaced whenever it's
-heard, so keep spellings distinctive. Exact spellings count toward the 16
-candidate spans per decode and sort first. Both live in Hex's transcribe.cpp fork
-(branch `hex/vocabulary-sounds-like`: `decode_rnnt_tree` and
-`rescore_vocabulary` in `src/arch/parakeet/decoder.cpp`, while `vocabulary.cpp`
-finds candidates, classifies spans, and runs the exact-spelling pass,
-`force_vocabulary_spellings`); measurements are in
-[vocabulary-boost-results.md](../research/vocabulary-boost-results.md).
+spellings.
 
 Provisional defaults, each changed in one place:
 
@@ -172,29 +119,31 @@ hex vocabulary listed in --help          // control/cli.rs: add #[command(hide =
 Prompt wording                           // dictation/processor.rs: vocabulary_lines
 Chapter prompt wording                   // meeting/chapters.rs: vocabulary_line
 Short-name rule                          // meeting/query.rs: SOUND_ALIKE_MIN_CONSONANTS
-Suggested terms                          // dictation/vocabulary.rs: SUGGESTED
-Boost strengths (nats per term piece)    // dictation/vocabulary.rs: VocabularyBoost::nats
 ```
 
 Sources: [dictation/vocabulary.rs](../../src/dictation/vocabulary.rs),
 [rune_ui/vocabulary.rs](../../src/rune_ui/vocabulary.rs),
 [meeting/query.rs](../../src/meeting/query.rs) (`vocabulary_aliases`,
 `sounds_alike`), [dictation/processor.rs](../../src/dictation/processor.rs)
-(`vocabulary_lines`), and [control.rs](../../src/control.rs)
-(`edit_vocabulary`).
+(`vocabulary_lines`), [control.rs](../../src/control.rs)
+(`edit_vocabulary`), and [control/host.rs](../../src/control/host.rs) (the
+Linux and Windows `hex vocabulary` host).
 
-Checks: `dictation::vocabulary::tests` (dedupe and merge, clamping, case-insensitive removal,
-comma splitting, reading the saved list without settings, the
-first 64 terms and their spellings reaching transcription, the prompt bounded
-by characters alone (`the_prompt_keeps_the_first_terms_that_fit`), the
-sheet's count matching both (`terms_read_counts_exactly_what_transcription_takes`),
-folding hints, boost names);
+Checks: `dictation::vocabulary::tests` (`plain_terms_load_and_save_as_strings`,
+`adding_dedupes_by_case_and_merges_spellings`,
+`clamped_adds_keep_the_term_and_the_spellings_that_fit`,
+`removing_ignores_case`, `sounds_like_splits_on_commas`,
+`saved_entries_read_without_loading_settings`,
+`keyterms_are_the_terms_scribe_accepts_in_list_order`,
+`every_saved_term_fits_scribes_keyterm_limit`,
+`a_modes_terms_come_first_and_each_term_once`,
+`only_dictation_hears_with_the_focused_modes_terms`,
+`hints_fold_into_the_list_without_duplicates`,
+`boost_reads_and_writes_as_its_name`);
 `loading_folds_saved_recognition_hints_into_the_vocabulary_once` in
 [app_settings.rs](../../src/app_settings.rs);
 `recognition_hints_alias_the_vocabulary` in
 [control/settings.rs](../../src/control/settings.rs);
-`whisper_and_qwen3_asr_read_the_vocabulary_as_a_prompt_and_parakeet_biases` in
-[transcription/models.rs](../../src/transcription/models.rs);
 `vocabulary_round_trips_and_stays_out_of_files_without_one` in
 [app_settings.rs](../../src/app_settings.rs);
 `a_vocabulary_term_finds_its_mis_transcriptions_below_exact_hits`,
@@ -211,20 +160,19 @@ trip in control.rs; `vocabulary_lists_terms_with_their_spellings` in
 `the_sheet_starts_empty_lists_with_a_row_and_saves_on_close`,
 `removing_a_focused_row_leaves_the_others_and_late_edits_touch_nothing`,
 `removing_the_last_row_then_editing_it_is_harmless`,
-`rapid_removals_from_one_frame_remove_only_their_own_rows`, and
-`a_reload_retires_the_old_rows` in
+`rapid_removals_from_one_frame_remove_only_their_own_rows`,
+`the_switch_says_how_many_terms_transcription_uses`,
+`the_switch_saves_off_or_normal`, and `a_reload_retires_the_old_rows` in
 [rune_ui/vocabulary.rs](../../src/rune_ui/vocabulary.rs);
-`the_vocabulary_row_opens_its_sheet`,
-`add_term_scrolls_the_new_row_into_view`, and
-`the_vocabulary_row_says_when_the_model_ignores_the_list` in [rune_ui/tests.rs](../../src/rune_ui/tests.rs);
-`only_parakeet_based_models_use_the_vocabulary` in
-[transcription/models.rs](../../src/transcription/models.rs); transcribe.cpp's
-`tests/parakeet_vocabulary_unit.cpp` (fork branch
-`hex/vocabulary-sounds-like`) covers the pure spelling pass, overlap order
-(longest span, then earliest), the 1-character rule, and the span rules, but
-Hex CI does not run it. Not observed: an end-to-end audio check of a forced
-spelling replacement. Scenes:
-`mac-settings-vocabulary`, `mac-settings-vocabulary-empty`,
-`vocabulary-unused` (Whisper, no golden). Passed on macOS on
-2026-10-23; the unused-model note's checks have not been observed running. Not yet observed: the sheet edited in a running Hex, a CLI edit
-against a running Hex, or a rewrite with a live provider.
+`the_vocabulary_row_opens_its_sheet` and
+`add_term_scrolls_the_new_row_into_view` in
+[rune_ui/tests.rs](../../src/rune_ui/tests.rs). Scenes:
+`mac-settings-vocabulary`, `mac-settings-vocabulary-empty`.
+
+No test covers the Labs gate or the switch inside `keyterms()`. Unverified in
+this fork: the sheet and its switch (macOS: not compiled; Windows:
+type-checked by cross compilation only; Linux: compiled and unit-tested), and
+any effect of keyterms on a transcript, since no request was made to
+ElevenLabs ([transcription.md](transcription.md#not-verified)). Not yet
+observed: the sheet edited in a running Hex, a CLI edit against a running Hex,
+or a rewrite with a live provider.

@@ -1,44 +1,163 @@
-# Hex
+# Hex (ElevenLabs Scribe fork)
 
-Hex is local voice dictation for Mac, Windows and Linux. Hold a key, speak, and
-it pastes.
+Voice dictation for Linux: hold a key, speak, let go, and the text is pasted
+into whatever app you're in. This is a personal fork of
+[anomalyco/hex](https://github.com/anomalyco/hex) (MIT) that transcribes
+through the [ElevenLabs Scribe](https://elevenlabs.io/speech-to-text) cloud API
+instead of speech models on the computer.
 
-## How it works
+It is developed on Linux (KDE Plasma on Wayland): there it compiles, its unit
+tests pass, and the `hex` command line was run against a local fake ElevenLabs
+server. The app itself has not been launched since the change (see
+[Not verified](#not-verified)). The Windows and macOS code from upstream is
+still in the tree, but in this fork the Windows code has only been type-checked
+by cross compilation and never run, and the macOS code was edited without being
+compiled or run.
 
-- hold the shortcut, speak, then let go
-- Hex transcribes on your device and pastes into whatever app you're in
-- the first run downloads a speech model; after that nothing leaves your machine
-- experimental features live in Labs, at the bottom of the sidebar
+## Privacy
 
-## Downloads
+Hex sends your audio to ElevenLabs for every transcription: each dictation,
+each chunk of a recorded meeting, an Annotate narration, History's "Transcribe
+again", a request to the local HTTP API, and `hex model transcribe`. It is not
+private and it does not work offline. Nothing is transcribed on the computer.
+ElevenLabs handles the audio and the transcripts under its normal retention
+policy; its zero-retention mode is for enterprise customers only. Recording a
+meeting sends the other participants' audio to ElevenLabs too.
 
-Stable is the current release. Dev is the newest build of `dev` and updates
-itself from the dev channel.
+## Requirements
 
-| Platform | Stable | Dev |
-| --- | --- | --- |
-| macOS (Apple silicon) | [DMG](https://anoma.ly/hex/download/macos-arm64-dmg) | [DMG](https://anoma.ly/hex/download/dev/macos-arm64-dmg) |
-| Windows x64 | [Installer](https://anoma.ly/hex/download/windows-x64-setup) | [Installer](https://anoma.ly/hex/download/dev/windows-x64-setup) |
-| Windows ARM64 | [Installer](https://anoma.ly/hex/download/windows-arm64-setup) | [Installer](https://anoma.ly/hex/download/dev/windows-arm64-setup) |
-| Linux x86_64 | [Executable](https://anoma.ly/hex/download/linux-x64) | [Executable](https://anoma.ly/hex/download/dev/linux-x64) |
-| Linux x86_64 (Debian, Ubuntu) | [.deb](https://anoma.ly/hex/download/linux-x64-deb) | [.deb](https://anoma.ly/hex/download/dev/linux-x64-deb) |
-| Linux x86_64 (Fedora, openSUSE) | [.rpm](https://anoma.ly/hex/download/linux-x64-rpm) | [.rpm](https://anoma.ly/hex/download/dev/linux-x64-rpm) |
-| Linux ARM64 | [Executable](https://anoma.ly/hex/download/linux-arm64) | [Executable](https://anoma.ly/hex/download/dev/linux-arm64) |
-| Linux ARM64 (Debian, Ubuntu) | [.deb](https://anoma.ly/hex/download/linux-arm64-deb) | [.deb](https://anoma.ly/hex/download/dev/linux-arm64-deb) |
-| Linux ARM64 (Fedora, openSUSE) | [.rpm](https://anoma.ly/hex/download/linux-arm64-rpm) | [.rpm](https://anoma.ly/hex/download/dev/linux-arm64-rpm) |
+- An ElevenLabs API key. Without one Hex shows "API key required" and does not
+  listen.
+- A network connection whenever you dictate.
+- A Vulkan driver, for the window only (the UI draws through wgpu).
+- On Wayland, `wl-clipboard`, and `wtype` on wlroots compositors and niri.
 
-Or install with:
+## Build and install (Linux)
 
-- Homebrew: `brew install --cask anomalyco/tap/hex`
-- AUR: `yay -S hex-bin`
-- install script (Linux): `curl -fsSL https://anoma.ly/hex/install-linux.sh | sh`
-- Nix (Linux): `nix profile add github:anomalyco/hex`
+Nothing is published from this fork: no downloads, packages, releases, or
+automatic updates. Install it from a checkout of this repository (branch
+`scribe`), as your desktop user. You need a stable Rust toolchain and the
+libraries listed in [docs/linux.md](docs/linux.md#dependencies).
 
-More docs are in [`docs/`](docs/README.md).
+```sh
+./scripts/install-linux.sh
+~/.local/bin/hex key set    # paste your ElevenLabs API key
+~/.local/bin/hex
+```
 
-## Contributing
+`scripts/install-linux.sh` runs `cargo build --locked --release` and installs
+the result for the current user, without root: the executable under
+`~/.local/share/hex/versions/<version>/`, a `~/.local/bin/hex` link, a launcher
+entry, an autostart entry, and a `hex.service` systemd user unit. Run it again
+to install a newer build. `./scripts/install-linux.sh uninstall` removes the
+application and keeps settings, logs, and the saved key.
 
-We don't take pull requests. [Open an issue](https://github.com/anomalyco/hex/issues)
-describing the bug or idea, and our agents usually turn it around fast.
+`scripts/build-linux.sh` only builds: it copies the release executable to
+`dist/` and installs nothing.
 
-MIT licensed.
+The updater is permanently off. Upstream's update channels publish upstream
+Hex, which would replace this fork, so Hex never checks for, downloads, or
+installs an update. To update, pull and run the install script again.
+
+## API key
+
+Set the key in one of these ways:
+
+- `hex key set`, then paste the key at the prompt (or `hex key set < key.txt`).
+- Settings › General › Transcription in the window.
+- The environment variable `ELEVENLABS_API_KEY`, which wins over a saved key.
+
+The saved key is the file `elevenlabs.key` in Hex's data folder
+(`~/.local/share/hex`), readable only by you. It is never written to
+`settings.json` or logged, and Hex shows only its last four characters.
+`hex key status` says which key is in use, `hex key check` asks ElevenLabs
+whether it accepts the key without sending audio, and `hex key clear` removes
+the saved one.
+
+On Linux, save the key rather than exporting the variable. Hex normally runs
+as a systemd user service that does not inherit your shell's environment, so
+an `ELEVENLABS_API_KEY` exported in a terminal reaches the commands you run
+there (`hex model transcribe`, `hex key check`, a foreground `hex dictate`)
+but not the background service that handles the shortcut. To use the variable
+anyway, add it to the unit with `systemctl --user edit hex.service`. The same
+applies to `HEX_ELEVENLABS_URL`, which replaces the ElevenLabs base URL (for
+example with a data-residency host). Details are in
+[docs/linux.md](docs/linux.md#api-key).
+
+## Transcription settings
+
+There is one model, `scribe_v3`. Its language is `auto` by default; set
+another in Settings or with `hex model use scribe_v3 --language de`. Three
+more settings are in Settings › General › Transcription and in `hex settings`:
+
+| Setting | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `scribe.no_verbatim` | `on`, `off` | `off` | Leaves out filler words and false starts. |
+| `scribe.numbers_format` | `auto`, `digits`, `words` | `auto` | How numbers are written. |
+| `scribe.final_text` | `batch`, `live` | `batch` | Which model's text is pasted. |
+
+With `batch`, the whole clip is uploaded when you release the shortcut and
+transcribed by `scribe_v3`. With `live`, the audio is streamed to the realtime
+model `scribe_v3_live` while you speak and its text is pasted; if that session
+fails, the whole clip is transcribed by the batch model instead. A realtime
+session is also opened when Labs › Live text or Live typing shows the words as
+you speak.
+
+When a transcription fails for a reason the audio could survive (no network, a
+timeout, an ElevenLabs error, a rate limit, a missing or refused key, no
+quota), Hex keeps the clip in `~/.local/share/hex/failed-dictations/` (at most
+20 clips, for at most 7 days) and names the command that retries it:
+`hex model transcribe <file>`.
+
+## Cost
+
+ElevenLabs bills the key's account for the audio it receives. From its
+published pricing in November 2026: Scribe v3 (batch) about $0.20 per hour of
+audio and Scribe v3 Live about $0.22 per hour. Silence is billed like speech.
+Keyterm prompting costs extra, so the vocabulary is sent as keyterms only
+while Labs › Vocabulary biasing is on. Check ElevenLabs' current prices before
+relying on these numbers.
+
+## Not verified
+
+- No real request was ever made to ElevenLabs while this fork was developed,
+  because no API key was available. How Hex behaves against the real service,
+  and how long a transcription takes, are unmeasured.
+  `scripts/scribe-latency.py` measures both paths once you have a key; each
+  run is billed.
+- The app was never launched after the change, on any OS: the window, the
+  shortcuts, the microphone path, pasting, and a real first run are untested.
+  What was run: the unit tests, the rendered UI scenes, and the `hex` command
+  line against a local fake ElevenLabs server.
+- Windows: type-checked by cross compilation only, never run.
+- macOS: edited without being compiled or run.
+
+## What changed from upstream
+
+- Every transcript comes from ElevenLabs. The speech models that ran on the
+  computer, and everything for choosing, downloading, verifying, importing,
+  and benchmarking them, are gone, along with the GPU/CPU speech engine
+  setting, the AVX2 CPU requirement, and the Apple Speech backend.
+- An ElevenLabs API key is required: `hex key set|status|clear|check`.
+- `hex model` keeps `list`, `use`, `status`, `check`, and `transcribe`, with
+  `scribe_v3` as the only model. `install`, `cancel`, `devices`, `import`,
+  `rename`, `repair`, and `remove` are gone.
+- No voice-activity model. Dictation keeps its level-only silence gate, and a
+  meeting chunk that never reaches speech level is not sent.
+- Vocabulary terms are sent as Scribe keyterms; "sounds like" spellings are
+  not.
+- The updater never runs.
+- The website, the iOS app, the TypeScript SDK, the benchmarks, the release
+  and signing tooling, and the Homebrew, AUR, `.deb`/`.rpm`, DMG, and Windows
+  installer packaging were removed from the repository.
+
+A `settings.json` written by upstream Hex still loads: its saved model name is
+read as `scribe_v3`, its language is kept, and settings that no longer exist
+are ignored.
+
+More documentation is in [docs/](docs/README.md).
+
+## License
+
+MIT, like upstream. See [LICENSE](LICENSE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

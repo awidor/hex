@@ -1,74 +1,69 @@
 # Project Documentation
 
-Start with the document for your task. Plans and archived prototypes do not
-override shipped behavior.
+This fork of Hex transcribes through the ElevenLabs Scribe cloud API. Start
+with the document for your task. Plans do not override current behavior.
 
 ## User Guides
 
-- [`../README.md`](../README.md): install and use Hex on macOS, Windows, and Linux.
-- [`windows.md`](windows.md): Windows x64 and ARM64 beta requirements, installation, and source builds.
-- [`linux.md`](linux.md): Linux X11 and native Wayland beta requirements and installation.
-- [`nix.md`](nix.md): Nix packaging for Linux, development, and per-user autostart.
-- [`../ios/README.md`](../ios/README.md): build and test the iOS prototype.
-- [`../sdk/typescript/README.md`](../sdk/typescript/README.md): use the public
-  TypeScript transcription SDK with an explicitly supplied native helper.
+- [`../README.md`](../README.md): what the fork is, privacy, cost, and how to
+  build, install, and set the API key.
+- [`linux.md`](linux.md): Linux X11 and Wayland requirements, the source
+  install, the API key, shortcuts, and paste. Linux is the platform this fork
+  is developed and verified on.
+- [`nix.md`](nix.md): the Nix package, development shell, and per-user
+  autostart for Linux.
+- [`windows.md`](windows.md): building and running on Windows x64 and ARM64.
+  The Windows code is type-checked only and has never been run in this fork.
+- [`cli.md`](cli.md): the `hex` control commands, their JSON replies, and the
+  settings keys.
+- [`transcript-cli.md`](transcript-cli.md): the read-only `hex history` and
+  `hex meetings` commands and their JSON.
+
+There is no macOS guide: the macOS code was edited without being compiled or
+run in this fork.
 
 ## Engineering Reference
 
 - [`../AGENTS.md`](../AGENTS.md): architecture, invariants, development
   commands, and diagnostics. This is the implementation authority.
-- [`../ROADMAP.md`](../ROADMAP.md): prioritized product and engineering work.
+- [`../ROADMAP.md`](../ROADMAP.md): the work list, including what this fork has
+  not verified.
+- [`features/README.md`](features/README.md): existing user-facing capabilities,
+  entry points, available verification, and gaps.
+  [`features/transcription.md`](features/transcription.md) covers what is sent
+  to ElevenLabs, the API key, cost, and privacy.
 - [`design-system.md`](design-system.md): Rune + `rune-kit` + OpenCode theme
   components, Hex pieces, copy rules, and `--snap` scene verification.
-- [`features/README.md`](features/README.md): existing user-facing capabilities,
-  entry points, available verification, and gaps; detailed dictation and recovery maps.
-- [`perf.md`](perf.md): strobe benchmarks, the cases that drive the window
-  through its accessibility tree, and how a benchmarked copy of Hex stays
-  isolated.
-- [`downloads.md`](downloads.md): public download paths, R2 custom domains,
-  GitHub release mirrors, and network recovery.
+- [`streams.md`](streams.md): the local HTTP API's `/streams` routes, for
+  another app that pushes audio to be transcribed.
 - [`opencode-compatibility.md`](opencode-compatibility.md): audited OpenCode V2
   source and CLI baseline, integration contract, and validation limits.
-- [`plans/personal-commands.md`](plans/personal-commands.md): shipped personal
-  command contract and remaining lifecycle work.
-- [`plans/quickjs.md`](plans/quickjs.md): why and how configs run in embedded
-  QuickJS instead of Bun, with size and latency measurements.
-- [`specs/local-transcription-service.md`](specs/local-transcription-service.md):
-  implemented macOS local-service protocol and lifecycle guarantees.
+- [`perf.md`](perf.md): how to run a copy of Hex that stays away from your own
+  data, for a test or a measurement.
 
-## Architecture Decisions And Active Plans
+## Plans And Decision Records
+
+Written for upstream Hex and kept where the thing they describe still exists.
 
 - [`plans/rune-ui.md`](plans/rune-ui.md): implemented; Rune desktop UI port,
-  surfaces, goldens, and remaining real-window checklist.
+  surfaces, goldens, and the real-window checklist.
 - [`plans/single-process.md`](plans/single-process.md): implemented; one Hex
   process per user on macOS, Windows, and Linux hosting Rune windows and overlays.
 - [`plans/rune-dependency.md`](plans/rune-dependency.md): decision record for
   Rune as a public MIT Git dependency and Nix output-hash updates.
 - [`plans/shared-desktop-ui.md`](plans/shared-desktop-ui.md): implemented; how
   macOS, Windows, and Linux share one window and one settings file.
-- [`plans/swift-app-handoff.md`](plans/swift-app-handoff.md): manual download
-  handoff from Swift, without data import or automatic replacement.
-- [`plans/typescript-sdk.md`](plans/typescript-sdk.md): published SDK status,
-  remaining signed-helper packaging, and first-consumer validation.
-- [`plans/linux.md`](plans/linux.md): Linux X11/Wayland validation and later capability
-  slices.
-- [`plans/meeting-live-transcription.md`](plans/meeting-live-transcription.md):
-  evaluation of Apple SpeechTranscriber vs Moonshine for live meeting drafts.
+- [`plans/capture-in-hex.md`](plans/capture-in-hex.md) and
+  [`plans/capture-handover-spec.md`](plans/capture-handover-spec.md): Annotate,
+  Scrawl's capture engine hosted in Hex.
+- [`plans/personal-commands.md`](plans/personal-commands.md): the personal
+  command contract and remaining lifecycle work.
+- [`plans/quickjs.md`](plans/quickjs.md): why and how configs run in embedded
+  QuickJS instead of Bun, with size and latency measurements.
 - [`plans/granola-import.md`](plans/granola-import.md): research on importing
   historical Granola meetings into `hex mcp`.
+- [`plans/release-service.md`](plans/release-service.md): upstream's release
+  service, which the updater code was written against. The updater is
+  permanently off in this fork and nothing is published.
 
-When a plan disagrees with `AGENTS.md` about shipped behavior, update the plan.
-
-## Research And Archives
-
-- [`research/transcription-benchmark.md`](research/transcription-benchmark.md):
-  historical benchmark method and measurements.
-- [`../prototypes/app-shell/README.md`](../prototypes/app-shell/README.md):
-  archived app-shell comparison prototype.
-
-## Releases
-
-`releases/` contains version-specific release notes and drafts. `../release-notes/` contains legacy inputs from versions
-2.0.0 through 2.0.9. Published notes and the SDK changelog describe their release,
-not current behavior; preserve them as historical records. A draft note is not
-evidence that its release has been published.
+When a plan disagrees with `AGENTS.md` about current behavior, update the plan.

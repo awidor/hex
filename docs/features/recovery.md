@@ -38,7 +38,10 @@ a running app or its devices. The checks below do not prove this entire journey.
 This is a map of existing checks, not a verified end-to-end recovery driver.
 Unless an executed result is dated below, checks are locators rather than passing
 runs. Capture evidence is macOS-specific unless stated otherwise; each sketch
-puts its source and proof limit beside it.
+puts its source and proof limit beside it. Dated results are upstream Hex's:
+this fork has not compiled the macOS code, has only type-checked the Windows
+code by cross compilation, and runs its unit tests on Linux, never against
+ElevenLabs ([transcription.md](transcription.md#not-verified)).
 
 ### Load Settings With Invalid Fields
 
@@ -48,6 +51,10 @@ hand, cannot prevent the app from opening.
 ```ts
 Launch -> read settings.json
 ├── Unknown keys -> ignored
+│   └── Keys this build has no field for (`transcription_device`,
+│       `transcription_recents`) -> ignored, and absent from the next save
+├── File written by upstream Hex -> any saved model name loads as `scribe_v3`;
+│   its language is kept                   // transcription.md#language
 ├── Invalid field -> log its key and reason -> that field's default
 │   └── Valid siblings and unrelated sections stay
 ├── Invalid JSON / not a JSON object -> log why -> defaults in memory
@@ -93,7 +100,12 @@ and its [tests](../../src/app_settings/persistence/tests.rs): old-shape retentio
 invalid enums, nested types, list entries, unknown keys, invalid JSON and
 non-object documents (defaults, refused saves, no backup), a file fixed while
 the process still holds stale settings (refused until the explicit clear),
-exactly-once private backups, interrupted saves, and backup failure. These checks use
+exactly-once private backups, interrupted saves, and backup failure;
+`settings_saved_by_upstream_hex_load_as_scribe_with_their_language` in
+[app_settings.rs](../../src/app_settings.rs) and
+`a_selection_saved_by_upstream_hex_keeps_its_language` in
+[transcription/models.rs](../../src/transcription/models.rs) cover a file
+written by upstream Hex. These checks use
 temporary files; they do not exercise a real app launch or the Linux poll.
 
 ### Finish Without Losing Other Work
@@ -105,7 +117,8 @@ and every accepted job pastes in submission order.
 Escape -> nothing: the capture and every accepted job go on
 older job + fresh capture -> both complete, in order
 ```
-Check in [parakeet.rs](../../src/parakeet.rs):
+Check in [macos_dictation.rs](../../src/macos_dictation.rs) (macOS only; not
+compiled in this fork):
 `cancellation_replaces_waiting_output_and_ignores_late_completion` (ordered
 output). Proof limit: controlled ordered output; not target-app clipboard
 consumption.
@@ -242,9 +255,6 @@ tap thread holds a user-initiated activity  // App Nap cannot throttle it; idle 
 Source: `TapSet::check`, `reenable_disabled_taps`, and `AppNapOptOut` in
 [suppression.rs](../../src/suppression.rs). No check: it needs macOS to disable
 a real tap. Proof limit: reported field failure (#612), not reproduced.
-
-The [2.1.11 release notes](../releases/2.1.11.md) describe the shipped navigation
-and missed-release fix; they are historical context, not a current-tree test.
 
 ### Reopen With Fresh Audio
 
@@ -560,6 +570,9 @@ shortcut held past the hold threshold, or a `hex dictation start` capture
   -> final text copied, never pasted              // the disrupting app may hold focus
      -> Paste Last Dictation and History keep it
   -> no error tone or Failed HUD; the HUD transcribes, processes, completes
+  -> its request to ElevenLabs fails -> the failure says why, and the clip is
+     kept when the same audio could succeed later
+                                           // transcription.md#kept-failed-clips
   -> no audio after the start, or a near-silent clip
      -> the previous failure, "Microphone capture was interrupted"
   -> release or finishing press queued before the listener reads the loss
@@ -589,11 +602,13 @@ cold capture keeps what it delivered), and
 `a_release_queued_behind_a_microphone_loss_copies_the_kept_audio_before_the_next_press`
 (with Release microphone while idle, the release and the next press queued
 behind the loss: one salvaged submission, and the next press records). In
-[parakeet.rs](../../src/parakeet.rs):
+[macos_dictation.rs](../../src/macos_dictation.rs) (macOS only; not compiled
+in this fork):
 `a_salvaged_dictation_is_copied_and_kept_for_paste_last_and_history` (normal
 and raw clips are both copied, with normal and raw history). Proof limit:
 channel-backed audio and the output worker, not a physical microphone taken by
-a call app or a target app's clipboard.
+a call app or a target app's clipboard; a salvaged clip has not been sent to
+ElevenLabs ([transcription.md](transcription.md#not-verified)).
 
 ### Fence Late Capture Notifications
 
@@ -614,35 +629,19 @@ cross-thread or native event ordering.
 
 ### Degrade Only The Failing Dependency
 
-Command-model preparation must not make hotkey dictation wait or fail with it.
-
-```ts
-command model loads in background
-  ├── slow/failing loader -> command preparation unavailable
-  └── listener remains responsive -> fresh hotkey capture -> expected output
-```
-Check in [recognition.rs](../../src/recognition.rs):
-`command_preparation_does_not_block_the_listener_or_propagate_failure`.
-Proof limit: controlled loader responsiveness, not a full model download or
-microphone session. See the [index](README.md) for dependency recovery actions.
-
-`recover.gpu-full`: on Linux and Windows a model, language, or Speech engine
-change loads beside the running model, so a small GPU (2 GB) can run out of
-memory for the second copy (#1170).
-
-```ts
-new model loads beside the running one -> GPU out of memory -> CPU copy loads
-  -> the CPU copy is dropped (not swapped in); the GPU isn't remembered as failed
-  -> once nothing records or transcribes -> engine drops its model, then loads
-     the new one in its place (GPU again, CPU only if it still doesn't fit)
-  -> commands sent meanwhile wait for the load; nothing recorded is lost
-```
-Source: `ModelSwap::place`/`take_reload` in
-[transcription/local_transcriber.rs](../../src/transcription/local_transcriber.rs)
-and `Command::Reload` in [transcription/engine.rs](../../src/transcription/engine.rs).
-Check: `a_model_without_room_on_the_gpu_reloads_in_place_once` (swap state
-only). Not observed on a real 2 GB GPU. A second process (another `hex`
-command that loads a model itself) still loads its own copy.
+Every transcript is a request to ElevenLabs, so the network, the account, and
+the API key are dependencies of each dictation. A request that fails fails
+that dictation alone: its message names the cause
+([Retry And Failures](transcription.md#retry-and-failures)), its clip is kept
+to transcribe later when the same audio could succeed
+([Kept Failed Clips](transcription.md#kept-failed-clips)), and the engine
+takes the next job. With no API key the listener does not start, and starts by
+itself once one is set ([API Key](transcription.md#api-key)). Check:
+`work_runs_in_order_and_failures_reach_the_caller` in
+[transcription/engine.rs](../../src/transcription/engine.rs) (a real engine
+thread with a stand-in offline run; no request is sent). None of this has been
+observed against ElevenLabs ([Not Verified](transcription.md#not-verified)). See the
+[index](README.md) for dependency recovery actions.
 
 `recover.command-pressure`: command recognition is best-effort; dictation
 audio is not.
@@ -689,6 +688,10 @@ listener worker fails -> reap worker -> show failure
   ├── Retry -> new managed listener -> fresh capture -> expected output
   └── Dismiss -> clear error                            // not evidence of recovery
 
+no ElevenLabs API key -> listener not started; status "API key required"
+  └── a key is set (Settings or `hex key set`) -> the next refresh starts it
+                                                        // transcription.md#api-key
+
 Wayland listener starts without wl-copy -> process.log warns once; Settings and
 `hex status` carry the warning
   -> capture and transcription still run; copy and paste fail naming wl-clipboard
@@ -706,7 +709,11 @@ Sources/checks: [linux/app.rs](../../src/linux/app.rs),
 [test-wayland-paste.sh](../../scripts/test-wayland-paste.sh), and
 [test-linux-service.py](../../scripts/test-linux-service.py).
 Proof limit: source and available headless checks, not current supported-host
-behavior. Native compositor/device validation remains separate. The
+behavior. Native compositor/device validation remains separate. The API-key
+gate has no check of its own: the host tests in linux/app.rs run without a key
+and stop at it (`a_settings_parse_note_does_not_block_capture` asserts the
+"API key required" status); a listener starting once a key appears is
+unobserved. The
 single-instance socket is same-user only; bounded I/O and queues keep client
 stalls off the audio loop.
 
@@ -790,7 +797,8 @@ pure cached misses prevent later GUI workers from querying native layout APIs.
 Until t1304 the GUI snapshot stayed fixed until restart: launched on Dvorak and
 switched to U.S., ⌘V posted keycode 47 (U.S. `.`), so dictations logged
 "pasted" but nothing appeared. One input-source observer now runs for the
-app's life (keyboard model switching reads the same one while it is on), and
+app's life (the `keyboard-model-switching` lab, which switches the
+transcription language, reads the same one while it is on), and
 each change rebuilds the snapshot on the main thread.
 `a_published_layout_replaces_the_one_before`,
 `readers_see_a_whole_layout_while_it_is_replaced`, and
@@ -838,8 +846,7 @@ After explicit initialization -> further hits AND misses add zero native queries
 
 Run `cargo test --locked --test keyboard_layout` on macOS with the repository's
 native build dependencies; add `--release` for the optimized run. These runs used
-macOS 26.5.1 (25F80), arm64, Rust 1.95.0,
-and the locally installed CMake executable via `CMAKE`. The harness has a
+macOS 26.5.1 (25F80), arm64, and Rust 1.95.0. The harness has a
 20-second child deadline and confines a native abort to its child process.
 It posts no key events and does not launch the installed app or capture audio.
 
@@ -851,40 +858,15 @@ Option-dictations pasted into the focused app; the retained
 fallback mirrors AppKit's own resolution of shortcuts such as ⌘V on
 non-Latin layouts, so a Latin-active snapshot is unchanged.
 
-**Local startup check, September 1, 2026:** Developer ID-signed version 2.1.11,
-local build `20111.1`, was installed and launched from `/Applications/Hex.app`.
-Bundle identity/signature and the installed executable's match to the signed
-build were validated. The new process reported resolved keyboard layout,
-loaded transcription model, and Listening, with no startup errors or panic.
-The settings file's SHA-256 was unchanged after restart. This local build was
-not notarized or published; the previous notarized app was retained for rollback.
-
-**Release verification for 2.1.12:** release commit `f76c115`, build `20112`,
-passed 435 Rust tests (nine ignored), all twelve layout-regression child runs in
-both debug and release profiles, 46 command-SDK tests, Clippy, formatting, and
-identity guards. Linux and Nix CI passed for source commit `f556f9b`; the release
-commit changes only the version and release notes.
-
-The app and DMG were Developer ID signed, notarized, and stapled; Gatekeeper
-accepted the DMG and its app. The DMG and Sparkle ZIP matched across 207 payload
-entries, including file bytes, permissions, and symlink targets. After
-artifact-first/feed-last publication, the public DMG, ZIP, and latest-DMG link
-matched the prepared SHA-256 checksums. The ZIP's Ed25519 signature verified
-against the app's public key, and the public appcast led with build `20112`.
-See [release notes](../releases/2.1.12.md) and
-[release checks](../../scripts/release-app.sh).
-
-Proof limit: these are native layout-query, local app-startup, and distribution
-artifact checks, not physical shortcut/paste acceptance or an exercised Sparkle
-installation. The signed release preview created a window, but screenshot
-capture failed with Screen Recording permission unavailable; no screenshot
-verification is claimed. The installed local app and its settings were not changed.
-Changing layouts during a running GUI session still requires a restart to
-refresh its snapshot; live GUI layout refresh is not part of this fix.
+Proof limit: these are upstream Hex's native layout-query runs on code this
+fork does not change ([keyboard.rs](../../src/keyboard.rs),
+[keyboard_layout.rs](../../tests/keyboard_layout.rs)), not physical
+shortcut/paste acceptance. The harness has not run in this fork, and no
+startup of this fork's macOS app has been observed (macOS: not compiled).
 
 ## Gaps And Constraints
 
-These five known gaps still limit recovery claims; they are not proposed features.
+These known gaps still limit recovery claims; they are not proposed features.
 
 ### Remapped Control
 
@@ -956,7 +938,7 @@ Sources: [script.rs](../../src/personal_commands/script.rs),
 check `runaway_scripts_stop_at_the_time_limit_and_the_config_keeps_working`,
 `the_transformation_timeout_ends_the_whole_process_tree` (Linux), and
 `a_throwing_or_slow_transformation_pastes_the_text_unchanged` in
-[tests/host_apis.rs](../../src/personal_commands/tests/host_apis.rs).
+[src/personal_commands/tests/host_apis.rs](../../src/personal_commands/tests/host_apis.rs).
 Handlers return actions instead of awaiting native results, so the old late
 native tool reply ([#20](https://github.com/anomalyco/hex/issues/20)) cannot
 occur.

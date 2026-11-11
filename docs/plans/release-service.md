@@ -1,8 +1,17 @@
 # Hex on the Anomaly release service
 
-Contract between Hex's release workflow (publishing) and Hex's in-app updater
-(client). The service and its rules are `anomalyco/release`
-(`docs/protocol.md`, `docs/publishing.md`); this file pins Hex's names.
+**Status in this fork: unused.** The updater is permanently off
+(`has_update_channel` in `src/updater.rs` returns false), so no build of this
+fork ever requests a manifest, and this fork publishes nothing: it has no
+release workflow, installers, signing, or package feeds. This file is kept
+because the updater code under `src/updater/` and its test vectors in
+`tests/fixtures/release-protocol` still implement the client side described
+here. Do not point a build of this fork at these channels: they publish
+upstream Hex, which would replace it.
+
+What follows is upstream's contract between its release workflow (publishing)
+and Hex's in-app updater (client). The service and its rules are in upstream's
+`anomalyco/release` repository; this file pins Hex's names.
 
 ## Names
 
@@ -32,7 +41,7 @@ Published names carry no version or target: each file lives at
 serves it with `Content-Disposition: attachment; filename="<name>"`, so a
 download is saved as `hex`, `Hex.dmg`, and so on. The builds and the GitHub
 release mirror keep versioned names (`hex-<v>-macos-arm64.dmg`, …), which
-must be unique there; `.github/release/release-service.sh` maps them.
+must be unique there; upstream's release script maps them.
 (`HexSetup.exe`, not `Hex Setup.exe`: the service's file names allow no
 spaces.)
 
@@ -66,24 +75,16 @@ The installers write `install.json`
 at the root of the user-owned install, and the client self-updates only when
 it is present and the root is writable by this user alone:
 
-- Linux: `~/.local/share/hex/install.json` (`install-linux.sh`;
-  `scripts/install-linux.sh` source builds write none and keep their
-  `source-build` marker).
-- Windows: `%APPDATA%\hex\install.json` (`install-windows.ps1` and
-  the Setup.exe).
+- Linux: `~/.local/share/hex/install.json`, written by upstream's published
+  installer. `scripts/install-linux.sh`, this fork's source install, writes
+  none, removes one it finds, and leaves a `source-build` marker.
+- Windows: `%APPDATA%\hex\install.json`, written by upstream's installers.
 - macOS: the client decides from the bundle's location (a writable,
   non-translocated `Hex.app` is direct).
 
 `HEX_RELEASE_BASE_URL` (HTTPS only) points a build at another service origin
 for local tests against a fixture service; nothing defaults to another
 origin.
-
-## Old clients (2.3.1 and earlier)
-
-`https://anoma.ly/hex/files/{linux-update.json,windows-update.json}` stay
-frozen at 2.3.1 in the `hex-production-files` bucket. `appcast.xml` is
-`packaging/macos/legacy-appcast.xml`, served by the site build: one
-informational item pointing at https://anoma.ly/hex (see `docs/releasing.md`).
 
 ## Client
 

@@ -49,15 +49,16 @@ hex
 │   ├── get <key|prefix>           one setting, or every key under a prefix (`meetings`)
 │   └── set <key> <value>
 ├── model
-│   ├── list                       every model, its languages and size, installed or not
-│   ├── use <id> [--language L]    installed models only; never downloads or repairs
-│   ├── install [id] [--language L] download, then switch to it (default: the selected model)
-│   ├── cancel                     stop a download or load in progress
-│   ├── import <path> [--name N]   Labs: check and copy in a GGUF; prints its custom-… id
-│   ├── rename <id> <name>         Labs: an import's picker name
-│   ├── repair <id>                Labs: rehash Hex's copy; ready again if it still matches
-│   ├── remove <id>                Labs: Hex's copy of an import (not the selected model)
-│   └── status|devices|check|transcribe <wav>  Linux and Windows, run in this process
+│   ├── list                       the one model (scribe_v3), its language, and the API key's state
+│   ├── use scribe_v3 [--language L]  set the transcription language (an ISO 639 code, or auto)
+│   ├── status                     model, language, API key, and the API address; runs in this process
+│   ├── check                      ask ElevenLabs whether it accepts the key (same as `key check`)
+│   └── transcribe <wav> [--language L]  send a WAV file to ElevenLabs and print the text
+├── key
+│   ├── set [KEY|-]                save the ElevenLabs API key (from standard input unless given)
+│   ├── status                     where the key comes from and its last four characters; never the key
+│   ├── clear                      remove the saved key (ELEVENLABS_API_KEY is left alone)
+│   └── check                      ask ElevenLabs whether it accepts the key; sends no audio
 ├── commands
 │   ├── init                       create ~/.config/hex (local, no running Hex needed)
 │   └── check                      validate ~/.config/hex/hex.config.ts transformations
@@ -80,7 +81,7 @@ hex
 ├── screenshot [--pick]           Labs (macOS): shoot the display under the pointer and print the PNG's path; --pick opens the ⌘⇧4 picker
 ├── labs [on|off <feature>]       list Labs features or turn one on/off; edits settings.json (features/labs.md)
 │   └── link <feature>             macOS: print hex://labs/<feature>, the link that opens Hex's Labs page on that lab's group
-├── check-for-updates              check for an update now
+├── check-for-updates              kept from upstream; this fork has no update channel and never updates
 ├── launch-at-login [on|off]       report or change Launch at Login (macOS: installed Hex.app only; Windows Run key; Linux XDG autostart)
 └── logs [--process] [-n N] [-f]   tail live.ndjson (or process.log); no running Hex needed
 ```
@@ -126,9 +127,9 @@ meeting recording.
 `onboarding reset` (or `onboarding restart`) opens the window on the
 first-run onboarding at once, as on a new install, for trying it again, on
 macOS, Linux, and Windows. It removes only the onboarding markers (`onboarding-complete`, `onboarding-step`,
-`onboarding-relaunch`) from the data folder. Settings, history, models, and
-permissions are untouched, so the run finds them ready: the download passes at
-once and the permission step is skipped. Labs' Run setup again row does the
+`onboarding-relaunch`) from the data folder. Settings, history, the saved API
+key, and permissions are untouched, so the run finds them ready: the key step
+passes at once and the permission step is skipped. Labs' Run setup again row does the
 same.
 
 `paste-last` needs a listening Hex (`not-ready` during setup) and is refused
@@ -161,21 +162,25 @@ is read from `settings.json` (`AppSettings::read`), as `hex labs` reads it,
 whether or not Hex is running; a running Hex saves its Labs toggle there at
 once.
 
-`model import`, `rename`, `repair`, and `remove` run in this process on every
-OS; `hex models` is an alias for `hex model`. An import's id is `custom-` and
-the first 16 hex digits of its SHA-256, and every model command takes it. One
-that is missing or changed answers `model-unavailable` with the reason.
-`model list` also looks in the Hugging Face cache and says where each model
-comes from (`download`, `hex`, `imported`, or `found: owner/name@abcdef1`); a
-compatible file there that isn't a catalog model is listed as `custom-<first 16
-hex of its blob>` `(not tested by Hex)`, and `model use` with that id checks it
-in full and uses it where it is. `remove` on a found file only forgets it
-([own models](features/own-models.md)).
+`hex models` is an alias for `hex model`. There is one model, `scribe_v3`
+(ElevenLabs Scribe); any other id answers `unknown-model`. `model use` only sets
+the language Scribe is told to expect, and `auto` lets it detect the language.
+Nothing is downloaded or installed, and every transcription sends audio to
+ElevenLabs. `model list`, `status`, `check`, and `transcribe` run in this
+process and need no running Hex; `model use` goes through the running Hex, and
+edits `settings.json` itself when none is running.
 
-`model use` switches only to a downloaded model and checks it on disk; it never
-downloads or repairs one (`model install` does). It keeps that model's own
-remembered language, as the menu bar does; `--language`
-overrides only the language, and must be one the model supports.
+`hex key` runs in this process on every OS. The running Hex reads the key for
+each request, so a key saved or cleared here applies to its next dictation
+without a restart. `key set` reads the key from standard input unless one is
+given as an argument (`hex key set < key.txt`, or run it and paste); an argument
+ends up in your shell history. The key is saved to the owner-only file
+`elevenlabs.key` in Hex's data folder and is never printed. `ELEVENLABS_API_KEY`
+wins over the saved key for the process that has it in its environment; on
+Linux that is not the background service (see [linux.md](linux.md)). `key check`
+and `model check` exit 1 with `api-key-missing`, `api-key-invalid`, or the
+reason ElevenLabs could not be reached. See
+[features/transcription.md](features/transcription.md).
 
 `vocabulary` edits the [shared vocabulary](features/vocabulary.md) through the
 running Hex, which saves settings and reloads them as a window edit would.
@@ -194,14 +199,6 @@ command and `hex start` then answer `outdated` (exit 1) instead of
 `not-running`, and `hex restart` restarts its systemd unit into the installed
 build and waits for it to answer (#915); one not run by the unit has to be
 quit from its window or tray.
-
-`model install` with Hex running downloads in the background, as Settings
-does; on Linux and Windows with no Hex running it downloads here and then
-selects the model, printing progress (the source-install step `hex model
-install`). A Hex that starts while the download runs makes the switch instead.
-`model status`, `devices`, `check`, and `transcribe` are local tools on Linux
-and Windows and take the selected model unless one is named; macOS answers
-`unsupported`.
 
 `start` and `restart` keep the `HEX_*` environment (`HEX_RETAIN_DICTATION_AUDIO`,
 `HEX_ENABLE_LLM`, and so on): macOS opens apps without the caller's
@@ -283,15 +280,15 @@ with `Content-Type: audio/wav` instead, up to 64 MiB. The route answers the
 transcript (`{"transcript": "…", "durationMs": …}`) or a code such as
 `model-not-ready`, `unsupported-audio`, `queue-full`, or `resource-exhausted`.
 
-## Wire format (version 4)
+## Wire format (version 5)
 
 Requests are flat objects tagged by `command` (kebab-case):
 
 ```json
-{"version": 4, "command": "meeting-record", "title": "Design sync"}
-{"version": 4, "command": "settings-set", "key": "sound_effects", "value": "off"}
-{"version": 4, "command": "dictation", "action": "start"}
-{"version": 4, "command": "dictation", "action": "stop", "print": true}
+{"version": 5, "command": "meeting-record", "title": "Design sync"}
+{"version": 5, "command": "settings-set", "key": "sound_effects", "value": "off"}
+{"version": 5, "command": "dictation", "action": "start"}
+{"version": 5, "command": "dictation", "action": "stop", "print": true}
 ```
 
 ```ts
@@ -320,28 +317,29 @@ it sends the WAV itself to `POST /transcriptions` (see Transport above).
 Replies are tagged by `status`:
 
 ```json
-{"version": 4, "status": "done", "message": "Recording “Design sync”; …", "changed": true}
-{"version": 4, "status": "error", "code": "feature-off", "message": "Meetings are off; …"}
-{"version": 4, "status": "settings", "settings": [{"key": "sound_effects", "value": true,
+{"version": 5, "status": "done", "message": "Recording “Design sync”; …", "changed": true}
+{"version": 5, "status": "error", "code": "feature-off", "message": "Meetings are off; …"}
+{"version": 5, "status": "settings", "settings": [{"key": "sound_effects", "value": true,
   "kind": "bool", "writable": true, "about": "Play recording and error tones"}]}
-{"version": 4, "status": "models", "models": [{"id": "parakeet_v3", "name": "…",
-  "languages": ["en", "…"], "size": "…", "installed": true, "selected": true,
-  "streams": true, "vocabulary": "bias", "supports_recognition_hints": false}]}
-{"version": 4, "status": "vocabulary", "entries": [{"term": "OpenCode",
+{"version": 5, "status": "models", "models": [{"id": "scribe_v3", "name": "Scribe v3",
+  "live": "scribe_v3_live", "selected": true, "language": "auto",
+  "api_key": {"source": "saved", "redacted": "••••abcd"},
+  "api_url": "https://api.elevenlabs.io"}]}
+{"version": 5, "status": "vocabulary", "entries": [{"term": "OpenCode",
   "sounds_like": ["open code"]}, {"term": "Rune"}]}
-{"version": 4, "status": "scrawl-capture", "changed": true, "state": "idle",
+{"version": 5, "status": "scrawl-capture", "changed": true, "state": "idle",
   "bundle": "…/captures/1792933491953.scrawl", "elapsed_ms": null,
   "finishing": ["…/captures/1792933491953.scrawl"], "last": null}
-{"version": 4, "status": "scrawl-captures", "captures": [{"id": "1792933491953.scrawl",
+{"version": 5, "status": "scrawl-captures", "captures": [{"id": "1792933491953.scrawl",
   "bundle": "…", "created_at_ms": 1792933491953, "duration_ms": 4000, "mode": "window",
   "app": "Brave", "words": 12, "sent_to": {"session": "ses_…", "title": "Hex"},
   "queued": false}]}
-{"version": 4, "status": "scrawl-capture-detail", "id": "…", "…": "the list's fields",
+{"version": 5, "status": "scrawl-capture-detail", "id": "…", "…": "the list's fields",
   "window_title": "…", "transcript": "…", "note": null, "missing_transcript": null,
   "marks": 2, "keyframes": 3, "video": "…/video.mp4", "audio": null,
   "contact_sheet": "…/contact-sheet.jpg"}
-{"version": 4, "status": "scrawl-capture-route", "explanation": "Capture   …"}
-{"version": 4, "status": "transcript", "text": "Ship it."}
+{"version": 5, "status": "scrawl-capture-route", "explanation": "Capture   …"}
+{"version": 5, "status": "transcript", "text": "Ship it."}
 ```
 
 `done.changed` is `false` when the command found things already so ("Already
@@ -353,13 +351,13 @@ recording", "The window isn't open"). Setting `kind` is one of `bool`,
 
 ```json
 {
-  "version": 4, "status": "status",
+  "version": 5, "status": "status",
   "app_version": "2.3.1", "pid": 31708, "memory_footprint_bytes": 412000000,
   "listener": {"running": true, "status": "Listening"},
   "capture": {"state": "idle", "recording": null, "pending_jobs": 0},
   "meeting": {"state": "recording", "title": "Design sync", "elapsed_seconds": 723},
-  "model": {"id": "parakeet_v3", "name": "…", "language": "en", "installed": true,
-            "preparing": null, "downloaded_bytes": 0, "error": null},
+  "model": {"id": "scribe_v3", "name": "Scribe v3", "language": "auto",
+            "api_key": {"source": "saved", "redacted": "••••abcd"}, "error": null},
   "features": {"meetings": true, "release_microphone_while_idle": false,
                "history_retention": "week"},
   "permissions": {"ready": true, "microphone": "ready", "accessibility": "ready",
@@ -398,13 +396,12 @@ invalid-value          the value doesn't parse or is out of range
 confirmation-required  clears history; pass --yes
 shortcut-in-use        another Hex shortcut already uses that binding
 not-found              no such capture, or it has no scrawl.json yet
-unknown-model          no such model id (`hex model list`)
-model-unavailable      an imported model that is missing, changed, or behind its Labs toggle,
-                       or one `hex transcribe` named that the running Hex can't use
-not-installed          `model use` on a model that isn't downloaded (`hex model install`)
+unknown-model          any model id but `scribe_v3`
+api-key-missing        no ElevenLabs API key is set (`hex key set`)
+api-key-invalid        ElevenLabs refused the key
 feature-off            the command needs an opt-in that is off (Meetings)
 disabled               a Labs toggle the command needs is off (the message names it)
-not-ready              Hex is waiting for setup (permissions or the dictation model)
+not-ready              Hex is waiting for setup (permissions or the API key)
 meeting-active         quit/restart while a meeting records (pass --force)
 busy                   something is in progress (recording, transcribing, a full queue),
                        or the listener couldn't confirm it's idle
@@ -427,27 +424,25 @@ which then reloads them live; an open window adopts the change unless it has
 an unsaved edit.
 
 On macOS, Windows, and Linux on X11, `keyboard_model_switching.enabled` opts
-into switching the shared speech-model picker on keyboard input-source changes.
+into switching the transcription language on keyboard input-source changes.
 The JSON setting `keyboard_model_switching.mappings` maps enabled input-source
-IDs to a model and a language it supports, for example
-`{"com.apple.keylayout.Spanish":{"model":"parakeet_v3","language":"es"}}`.
+IDs to a language (the model is always `scribe_v3`), for example
+`{"com.apple.keylayout.Spanish":{"model":"scribe_v3","language":"es"}}`.
 Source IDs are macOS input-source IDs, Windows keyboard layout handles
 (`04190419` for Russian), or X11 XKB layouts (`ru`, `de(neo)`). Omit a source
-for "Don't switch"; Apple Speech can't be mapped. Automatic switches load
-installed models only; they never download them. Enabling or editing the active
+for "Don't switch". Enabling or editing the active
 mapping applies it; launching Hex does not reapply it. Wayland has no general
 protocol for the active layout, so there Hex keeps the settings but does not
 observe input-source changes or show these controls.
 
 On macOS and Windows, `labs.app_model_switching` opts into switching the
-shared speech-model picker per dictation mode. Each mode, Global included, may
-carry `speech`, a model and a language it supports, for example
-`{"model":"parakeet_v3","language":"es"}` in
+transcription language per dictation mode. Each mode, Global included, may
+carry `speech`, the language to transcribe in, for example
+`{"model":"scribe_v3","language":"es"}` in
 `dictation_processing.default_mode` or `dictation_processing.modes[]`; omit it
 for "Don't switch". When the app in front changes, Hex matches the mode by
-application, waits 300 ms, then prepares its choice through the same
-installed-only path as a manual pick; it never downloads a model and a
-recording holds a due switch until it is idle. Matching is by application on
+application, waits 300 ms, then applies its language as a manual choice
+would; a recording holds a due switch until it is idle. Matching is by application on
 both macOS and Windows, and a mode's website rules are ignored, so a mode
 chosen only by website never switches. Hex's own window, and a moment with no
 app in front, are ignored: they neither schedule nor cancel a switch, so
@@ -503,11 +498,15 @@ support this lab.
   (follow the system language), the same languages Settings offers. Following
   the system, a Chinese locale with the Hant script or the TW, HK, or MO
   region shows Traditional Chinese; other Chinese locales show Simplified.
-- `updates.channel` takes `stable`, `dev`, or `none` (follow the build: the
-  channel it was published on), and checks for updates at once. Choosing
-  another channel than the build's offers that channel's current release
-  ("Switch to Stable 2.3.1" in the window); Hex installs it only once you
-  confirm there. Versions are never compared.
+- `updates.channel` is kept from upstream and has no effect: this fork has
+  no update channel and never checks for, downloads, or installs an update.
+- `transcription.language` takes an ISO 639-1 or 639-3 code, or `auto`;
+  `transcription.model` takes only `scribe_v3`.
+- `scribe.final_text` takes `batch` (the whole clip is transcribed by
+  `scribe_v3` at release; the default) or `live` (the realtime session's text
+  is pasted, with the whole clip as the fallback). `scribe.no_verbatim`
+  (`on`/`off`) has ElevenLabs leave out filler words and false starts.
+  `scribe.numbers_format` takes `auto`, `digits`, or `words`.
 - With the `capture` experiment, `capture.*` keys appear:
   `capture.enabled`, `capture.hotkey` (default `option+shift+s`),
   `capture.list_hotkey` (the capsule's send-to list, default
@@ -582,4 +581,6 @@ does not. A `hex` from a different version gets `version-mismatch`; use the
 removed `permissions.input_monitoring` from the status reply; version 3 removed
 `voice-action` and `features.voice_action`; version 4 removed `commands-retry`,
 `settings-set.confirm`, `window-show` `commands`, `capture.recording` `voice`,
-`features.commands`, and `features.command_model`.
+`features.commands`, and `features.command_model`; version 5 (this fork)
+removed the model install, cancel, and preparation commands and fields, and
+the `model` reply now carries `language` and `api_key` (see `status` above).

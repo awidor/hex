@@ -1,14 +1,24 @@
 # Meetings (beta)
 
-Record a call locally: Hex captures the other participants (system audio) and
-you (microphone) as separate tracks, transcribes them on this Mac, and saves a
-Markdown transcript with `You` and `Them` turns. Recording starts automatically
-only for calls from a website or app set to Always record, and never stops
-automatically unless Labs › Stop when the call ends is on (see
+Record a call: Hex captures the other participants (system audio) and you
+(microphone) as separate tracks, sends the speech on both tracks to ElevenLabs
+Scribe for transcription ([Transcribe](#transcribe)), and saves a Markdown
+transcript with `You` and `Them` turns. Recording a meeting therefore sends
+the other participants' audio to ElevenLabs too, under its normal retention
+policy ([cost and privacy](transcription.md#cost-and-privacy)); the WAVs,
+transcripts, and notes are stored on this computer. Recording starts
+automatically only for calls from a website or app set to Always record, and
+never stops automatically unless Labs › Stop when the call ends is on (see
 [meetings.auto-stop](#record)). This map describes macOS; [Linux and Windows](#linux-and-windows)
 lists where they differ.
 
 Linked checks are locators unless an executed result is recorded below.
+Proof in this fork: no meeting chunk was ever sent to ElevenLabs. macOS code
+is not compiled, Windows code is type-checked by cross compilation only, and
+Linux is compiled and unit-tested with fake transcribers and synthetic audio
+([transcription.md](transcription.md#not-verified)). Dated observations below
+come from upstream Hex and stand only for code this fork left unchanged
+(detection, capture, capsules, echo signal analysis, notes, queries).
 
 ## How To Get To It
 
@@ -49,7 +59,7 @@ Labs > Meetings switch (macOS)                       // meetings.opt-in; off by 
 │   │           Retry, the saved model kept and shown by its ID (#1107, #1301)
 │   │       // checks: summaries_are_one_choice_with_opencode_s_model_under_it,
 │   │       // on_this_mac_without_apple_intelligence_stays_chosen_with_the_fix
-│   │       // (tests/panes.rs); scenes meetings-summaries,
+│   │       // (src/rune_ui/tests/panes.rs); scenes meetings-summaries,
 │   │       // meetings-summaries-unavailable, meetings-summary-model
 │   ├── Advanced -> Show recording indicator (on by default; corner-snapping
 │   │   capsule) and the System Audio Recording row once allowed
@@ -96,7 +106,8 @@ Live transcript scrolling                           // Labs › Follow live tran
         (follows_live_transcript in rune_ui/meetings.rs; not observed on a real call)
 ```
 
-Requires the selected local dictation model, Microphone, and System Audio
+Requires an ElevenLabs API key ([transcription.md](transcription.md#api-key)),
+Microphone, and System Audio
 Recording (the "System Audio Recording Only" list under Privacy & Security ›
 Screen & System Audio Recording; `NSAudioCaptureUsageDescription`). Screen
 Recording alone still works through the ScreenCaptureKit fallback. The opt-in is `meetings.enabled` in `settings.json`, alongside
@@ -104,6 +115,11 @@ Recording alone still works through the ScreenCaptureKit fallback. The opt-in is
 `meetings.recording_indicator_corner` (default `top_right`)
 ([app_settings.rs](../../src/app_settings.rs) `MeetingSettings`). Recording
 refuses to start without either grant and asks macOS for System Audio Recording.
+Without an API key it refuses before any folder or audio exists, with
+"no ElevenLabs API key is set (Settings › General, or `hex key set`)"
+(`require_api_key` in [meeting.rs](../../src/meeting.rs)); the same check
+stops an import, a pending final pass, and the debug `hex meeting transcribe`.
+No test covers the refusal.
 
 ## Linux and Windows
 
@@ -180,7 +196,7 @@ Notes and live chapters -> After a meeting › Summaries is a switch (off by
     default; on = OpenCode): "Titles and short summaries. Sends the transcript
     to your OpenCode model"; Model nests under it while on, as on macOS
     (migrated from Summarize with OpenCode)
-    // check: summaries_are_a_switch_off_a_mac (tests/panes.rs)
+    // check: summaries_are_a_switch_off_a_mac (src/rune_ui/tests/panes.rs)
     ├── Summarize -> "Writing a title and summary with OpenCode…" (never
     │   Apple Intelligence off a Mac that has it)
     └── No writer (OpenCode not running) -> "Notes could not be written." with
@@ -223,12 +239,12 @@ a real Windows PC has not been observed.
 
 Not on Linux and Windows yet: the Option-Control-V meeting paste shortcut,
 Copy section from the tray, dragging the recording capsule to another corner,
-the `hex meetings` and `hex mcp` commands (shared-control), and website names
-for browser calls. Verified: Linux and Windows x64 build and lint
-(`cargo clippy`, `cargo xwin clippy`); the PipeWire monitor capture and
-pw-dump parsing were checked by hand on Arch/niri. Not verified: a recorded
-call end to end on either OS, Windows loopback and session detection on
-hardware.
+and website names for browser calls. Upstream checked the PipeWire monitor
+capture and pw-dump parsing by hand on Arch/niri (those adapters are
+unchanged here). In this fork Linux is compiled and unit-tested and Windows
+is type-checked by cross compilation only, never run. Not verified: a recorded
+call end to end on either OS, a meeting chunk sent to ElevenLabs, Windows
+loopback and session detection on hardware.
 
 ## Sub-features
 
@@ -451,7 +467,6 @@ Checks: `a_slow_loop_still_offers_an_unknown_browser_call_after_about_20_seconds
 `tab_queries_back_off_after_the_first_thirty_seconds_and_reset`,
 `a_cold_tab_query_then_its_answer_leads_to_a_banshee_offer` and
 `a_snoozed_or_non_browser_application_is_not_queried` (meeting/watcher.rs),
-`the_meeting_tab_query_reads_only_the_active_tab` (dictation/context.rs),
 `a_browser_voice_note_is_not_offered_but_a_sustained_browser_call_is`,
 `offer_titles_name_the_service_site_or_browser_without_repeating_call`,
 `choices_apply_to_the_site_when_known_and_the_app_otherwise`,
@@ -483,7 +498,7 @@ Checks: `resolves_unregistered_chromium_and_electron_audio_helpers_to_their_host
 `classifies_helper_and_host_microphone_applications`,
 `cleans_google_meet_titles_and_ignores_raw_meet_codes`,
 `switching_tabs_during_a_snoozed_browser_call_does_not_re_offer`,
-`parses_brave_tab_url_and_title_output`,
+`parses_tab_url_and_title_output`,
 `requires_stability_and_offers_once_per_session`,
 `a_brief_microphone_release_does_not_re_offer_the_same_call`, and
 `named_meetings_keep_their_title_and_app_calls_use_the_app`.
@@ -650,7 +665,7 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      │   └── The wait runs on its own thread, never on the main thread
      ├── Copy all -> the in-call transcript so far as speaker-turn Markdown;
      │   disabled until there is text
-     │   └── Both read the Parakeet in-call transcript (TranscriptReader) once a
+     │   └── Both read the in-call transcript (TranscriptReader) once a
      │       second on the ticker thread, never on the main thread
      ├── Open -> activates Hex, then opens the active meeting in the Meetings pane
      └── Stop -> Stop & Transcribe
@@ -691,6 +706,7 @@ Labs › Stop when the call ends (macOS, off by default; #835) // meetings.auto-
      └── 30 s pass -> Stop & Transcribe, as the menu bar's; logged
          "meeting recording stopped automatically after its call ended"
   -> Off -> exactly as above: microphone only, nothing stops
+```
 
 ### Import Audio (Labs)
 
@@ -738,8 +754,13 @@ Proof limits: the decoder now has macOS-only unit tests through
 picker is not exercised headlessly, and quitting at each mid-import moment is
 reasoned from the shared cleanup scope and `final.pending` rather than observed.
 The manifest flag, the empty microphone track, the Speaker label, and the lab
-default are unit-checked on every OS that can run them.
+default are unit-checked on every OS that can run them. An import is
+transcribed like a stopped recording: its audio is sent to ElevenLabs in the
+same chunks ([Transcribe](#transcribe)), and it is refused without an API key.
 
+Capture sources of a recording ([Record](#record)):
+
+```ts
 Capture sources (meeting/capture.rs)                // meetings.capture
 ├── Microphone -> dictation's input (saved device, else System default) via cpal, resampled to 16 kHz
 │   ├── Detected call app (macOS 14+) -> the input that app records from, by
@@ -794,7 +815,7 @@ A source fails (display sleep ends SCStream, device unplugged, tap stalls 3 s)
      shared capture clock, recorded in the manifest as track `gaps`
   -> Rolling transcription restarts that source after the gap; the padded WAV
      keeps the final pass on the same timeline
-``````
+```
 
 Starting a recording no longer opens the Settings window; failures still do.
 A failure shows "Meeting could not be recorded." above the recordings until
@@ -814,7 +835,7 @@ call, a muted call, and Zoom or Teams helpers),
 `paste_cursor_counts_coalesced_turns_and_advances_only_on_success` in
 [meeting/tests.rs](../../src/meeting/tests.rs),
 `meeting_delta_coalesces_turns_in_time_order` in
-[parakeet.rs](../../src/parakeet.rs),
+[macos_dictation.rs](../../src/macos_dictation.rs),
 `paste_cursor_neither_repeats_nor_drops_text_when_the_transcript_is_rewritten`, and
 `meeting_menu_offers_one_action_per_state` in
 [macos_rune/status_item.rs](../../src/macos_rune/status_item.rs), and
@@ -834,9 +855,12 @@ call, a muted call, and Zoom or Teams helpers),
 `a_dropped_warning_update_is_not_committed_and_is_retried`,
 `a_warning_is_written_to_the_manifest_as_soon_as_it_is_raised`, and
 `a_device_switch_restarts_the_zero_count_without_clearing_the_warning` in
-[meeting/warning.rs](../../src/meeting/warning.rs). Menu-bar Record Meeting and
-Stop & Transcribe, and the recording and ready capsule buttons, were clicked
-on a real Mac on 2026-10-22; no automated test covers them. The digital
+[meeting/warning.rs](../../src/meeting/warning.rs). Upstream, the recording
+and ready capsule buttons were clicked on a real Mac on 2026-10-22 (capsule
+code unchanged here); no automated test covers them. In this fork the
+menu-bar Record Meeting and Stop & Transcribe items, the API-key check at
+Record, and the transcript a Stop produces are unverified on macOS (not
+compiled). The digital
 silence watch is not verified on a live device or call app that holds the
 microphone with voice processing.
 
@@ -856,10 +880,10 @@ are checked by `the_recording_capsule_rests_compact_and_opens_under_the_pointer`
 `dragging_the_recording_capsule_moves_it_and_snaps_to_a_corner`, and
 `a_released_capsule_snaps_to_the_corner_nearest_its_centre`; neither has been
 tried with a real pointer. A "Never offer" or "Always record" choice is saved and
-also written into the window's live settings. On 2026-10-22 a signed build on a MacBook Pro
+also written into the window's live settings. Upstream, on 2026-10-22, a signed build on a MacBook Pro
 showed the recording capsule (Open opened the meeting while it kept
-recording; Stop transcribed) and the ready capsule (Copy copied the
-Markdown). Before that day's fix the recording capsule never appeared: it
+recording; Stop ended it) and the ready capsule (Copy copied the
+Markdown); the transcript behind them did not come from ElevenLabs. Before that day's fix the recording capsule never appeared: it
 closed and reopened in one overlay batch, and the hide ran last. The offer,
 "left the call", "…" choices, and automatic-recording capsules remain unseen
 on screen. The ready and automatic-recording capsules' ✕ (#996) is checked by
@@ -870,18 +894,32 @@ been clicked on a real Mac.
 
 ### Transcribe
 
+Every chunk below that reaches speech level is uploaded to ElevenLabs
+(`scribe_v3`, [what is sent](transcription.md#what-is-sent-where)), from the
+system track (the other participants) and the microphone track alike. Nothing
+is transcribed on this computer, and a meeting cannot be transcribed without
+a network connection and an API key.
+
 ```ts
 While recording                                      // meetings.rolling
   -> Each track -> one-second blocks -> bounded queue (about 10 minutes)
   -> 16 kHz streaming resampler -> chunker + echo envelope
      ├── First pause after 6 s (pause segmenter; never under 3 s) -> boundary
      ├── No pause by 10 s -> hard cut; next chunk repeats its last 2 s
-     │   (so a chunk is at most 12 s of audio)
-     └── Silent chunk (no 20 ms frame ≥ -60 dB) -> skipped, no inference
-  -> Each chunk runs on dictation's loaded model, only while dictation is idle
-     ├── No speech detected (Silero, once installed) -> empty transcript, no
-     │   inference; coverage still advances
-     └── A dictation request or live stream came first -> retried once idle
+     │   (so a chunk is at most 12 s of audio, and those 2 s are sent twice)
+     └── Silent chunk (no 20 ms frame ≥ -60 dB) -> skipped, no request
+  -> Each chunk is one batch request (scribe_v3, word times), sent on the
+     dictation engine's thread, only while dictation is idle; meetings never
+     open a live session
+     ├── No 20 ms frame above -55 dBFS (MINIMUM_SPEECH_DB, DC removed)
+     │   -> not sent: empty transcript; coverage still advances
+     ├── A dictation request or live session came first -> retried once idle
+     ├── Language -> the one dictation uses when the chunk is sent
+     │   (transcription.md#language)
+     ├── Leave out filler words, Numbers -> applied, as to every batch
+     │   request (transcription.md#scribe-settings)
+     └── Keyterms -> the shared vocabulary, only with Labs › Vocabulary
+         biasing on (transcription.md#vocabulary-as-keyterms)
   -> Timed words joined word by word at a shared word near each overlap's middle
      -> sentences (punctuation or a 600 ms pause)
   -> transcript.rolling.ndjson: per-track coverage line, then entries
@@ -892,7 +930,11 @@ While recording                                      // meetings.rolling
      ├── Capture gap -> the track restarts after the gap; nothing is dropped
      ├── Backlog over 120 s of audio -> oldest chunks skipped, track marked
      │   incomplete; rebuilt from its WAV after Stop
-     └── Model failure -> transcript.rolling.error.txt -> "Live transcript unavailable."
+     └── A chunk's request fails (after its one retry when the failure may
+         pass; transcription.md#retry-and-failures) -> that track's in-call
+         transcript stops and its queued chunks are dropped
+         -> transcript.rolling.error.txt -> "Live transcript unavailable."
+            with the reason; Stop sends the track again from its WAV
   -> Every in-call view reads it: Meetings pane, `hex meetings show`, MCP,
      provisional titles (TranscriptReader)
 
@@ -902,8 +944,9 @@ Copy new or Option-Control-V while recording       // meetings.copy-through-now
   -> The rolling worker answers it before any later audio:
      ├── Queued chunks as usual (published to the snapshot)
      ├── Each track's audio not yet in a chunk (no 6 s minimum), into a copy
-     │   of its transcript: the snapshot and later chunks are unaffected
-     ├── Waits for dictation like every meeting chunk; never a second model
+     │   of its transcript: the snapshot and later chunks are unaffected, so
+     │   that audio is sent once for the copy and again in its chunk
+     ├── Waits for dictation like every meeting chunk
      └── The same echo and You-waits-for-Them rules as the snapshot
      ├── Every sample up to the request, even 100 ms past a hard cut; the
      │   system track counts as transcribed through all its audio
@@ -913,113 +956,94 @@ Copy new or Option-Control-V while recording       // meetings.copy-through-now
      publish as separate entries and the paste cursor neither repeats nor
      drops either. A track rebuilt from its WAV after Stop keeps the cuts
   -> A copy pressed as capture ends is still answered; quitting ends the wait
-  -> Up to 3 s (COPY_TRANSCRIBE_WAIT): usually under 1 s; past that, or with
-     dictation holding the model, copies the in-call transcript as it is and
-     logs a warning
+  -> Up to 3 s (COPY_TRANSCRIBE_WAIT): a request still in flight, dictation
+     holding the engine, or a failed request runs it out; the copy then
+     takes the in-call transcript as it is and logs a warning
   -> After Stop, or in another process: the in-call or final transcript
 
 Stop & Transcribe
-  -> Flush tails -> finish pending chunks           // usually seconds
-  -> Any track that fell behind or failed -> stream its WAV in 1 s blocks
+  -> Flush tails -> finish pending chunks
+  -> Any track that fell behind or failed -> stream its WAV in 1 s blocks,
+     sending every chunk of that track again
+     └── A chunk's request fails -> the final pass stops -> meeting Failed
+         with the error; the WAVs and the rolling draft stay in its folder;
+         nothing sends it again (debug builds: `hex meeting transcribe <id>`)
   -> Join on one timeline -> Echo suppression -> Final publication
 
 Hex quits while recording                           // meetings.quit
-  -> Capture stops; WAVs and manifest finalized; no chunk starts, no model loads
+  -> Capture stops; WAVs and manifest finalized; no chunk request starts
   -> Interrupted with its rolling draft + final.pending beside the manifest
 Hex quits during Stop & Transcribe's final pass (#1284)
   -> Same: Interrupted + final.pending, never Failed with "Hex is quitting"
   -> Next launch, Meetings on, no recording, once the dictation engine is up
      (or 30 s without one) -> full-WAV final pass -> Complete + Markdown + notes
-     ├── Quit again or model not installed -> stays pending
-     └── Other failure -> stays Interrupted with the error and its draft
+     ├── Quit again or no API key -> stays pending for a later launch
+     └── Other failure -> stays Interrupted with the error and its draft;
+         final.pending is removed
 ```
 
 Quitting gives its workers 5 s before `_exit`, and the final pass of a long
-meeting can take longer, or load a model once the dictation engine is gone.
-Sources: `record`, `finish_pending` in [meeting.rs](../../src/meeting.rs),
-`PendingFinals` in [meeting/watcher.rs](../../src/meeting/watcher.rs). Check:
-`quitting_mid_meeting_loads_no_model_and_finishes_in_time`. No repeatable
-driver quits a real recording and relaunches.
+meeting can take longer.
+Sources: `record`, `finish_pending`, and `require_api_key` in
+[meeting.rs](../../src/meeting.rs), `finish_transcription` in
+[meeting/finish.rs](../../src/meeting/finish.rs), `PendingFinals` in
+[meeting/watcher.rs](../../src/meeting/watcher.rs). Check:
+`quitting_mid_meeting_loads_no_model_and_finishes_in_time` (while quitting,
+no transcriber is made and no error file is written). No repeatable
+driver quits a real recording and relaunches. The API-key refusals, the
+Failed outcome of a final pass, and a pending pass left for a later launch
+have no test.
 
 Design choice: chunks are background jobs on the dictation transcription engine
-(`TranscriptionEngine::background`), using whatever model dictation has loaded,
-rather than a second copy of the model (about 0.7 GB). Before each chunk the
-meeting waits (up to 20 s per chunk) while `parakeet::dictation_busy()` reports
-a capture, counted from the shortcut press until its clip is submitted, or
-dictation inference; the engine thread checks again before running the job. A
-job never interrupts a live stream: one that arrives during a stream, or after
+(`TranscriptionEngine::background`), the one thread that sends every request
+([transcription/engine.rs](../../src/transcription/engine.rs)), so a meeting
+chunk never starts ahead of a dictation. Before each chunk the
+meeting waits (up to 20 s per chunk, `DICTATION_WAIT`) while
+`transcription::engine::dictation_busy()` reports
+a capture (macOS: from the shortcut press until its clip is submitted) or a
+dictation stream or finish on the engine; the engine thread checks again
+before running the job. A
+job never interrupts a live session: one that arrives during a session, or after
 a newer dictation request was sent, is turned away and retried 250 ms later,
-once dictation is idle. A chunk already running cannot be aborted
-(transcribe.cpp ignores its cancel callback on Metal), but it can only have
-started before the press, so it finishes during the 300 ms hold threshold and
-200 ms release tail (a chunk of at most 12 s takes well under 0.2 s on the
-Pro). Gating at
-the intentional hold instead let a chunk start just before the threshold; with
-the shortest hold that added about 85 ms at p95 on the Pro. The job runs at utility QoS on
-the engine thread, which returns to user-interactive afterwards. Apple Speech runs outside the process, so with
-Apple Speech selected, and in a process without the engine (the CLI), the
-meeting loads its own transcriber as before.
+once dictation is idle. A chunk request already sent is not aborted: a
+dictation finished meanwhile waits on the engine thread until that request
+answers or fails, and one attempt may take up to 30 s plus the chunk's length
+before it times out ([retry](transcription.md#retry-and-failures)). How long
+dictation waits behind meeting chunks in practice is unmeasured. The job runs
+at utility QoS on the engine thread (macOS), which returns to user-interactive
+afterwards. A process without the engine (the debug CLI) makes its own
+transcriber and sends its chunks itself.
 
 Seams: the two chunks are spliced at a word both heard within 300 ms of the
 middle of the overlap (the same word's timing can shift between chunks);
 without one, words starting before the middle belong to the earlier chunk.
 Repeated words (two to twelve) at the join are removed, and Stop publishes the
 words still waiting on a seam. Joining
-words rather than sentences keeps a sentence that runs across a hard cut whole;
-joining sentences lost its words on one side (10% word error on `You` lines).
+words rather than sentences keeps a sentence that runs across a hard cut whole.
+Scribe's word times at these seams are unobserved: the seam checks use
+synthetic words.
 
-Speechless chunks: models invent text for silence and noise ("Thank you",
-"Grazie a tutti", or the vocabulary prompt), and room or keyboard noise passes
-the -60 dB silent-chunk check, so every chunk that passes it also goes through
-the Silero speech detector used by dictation (see
-[dictation](dictation.md#ongoing-jobs-and-output)). A chunk with no speech of at
-least 160 ms becomes an empty transcript without inference, in rolling
-transcription, the Stop & Transcribe fallback, and `meeting echo`. In a probe
-outside the tree, run on each microphone entry of one 63-minute Italian call,
-the detector found speech in 1 of 152 invented entries (a "Grazie a tutti.")
-and in 32 of 33 real ones (the miss: a 40 ms "Certo." at a chunk boundary), and
-scanned the call in 1.6 s on the CPU. Invented text inside a
-chunk that also holds speech is not addressed. Without the detector only the
--60 dB check applies, as before. A Whisper or Qwen3-ASR chunk that returns only
-the vocabulary prompt is emptied too ([models](README.md#get-ready)).
+Speechless chunks: speech models invent text for silence and noise, and
+ElevenLabs bills every second it is sent. Two level checks keep such chunks
+on this computer; there is no voice-activity model. A chunk with no 20 ms
+frame at -60 dB or above (`SILENT_DB`) is skipped by the rolling worker and
+the copy path, and a chunk whose every full 20 ms frame stays at or below
+-55 dBFS with its DC offset removed (`MINIMUM_SPEECH_DB`,
+`below_speech_level` in
+[transcription/pause_segmenter.rs](../../src/transcription/pause_segmenter.rs))
+becomes an empty transcript without a request in rolling transcription, the
+Stop & Transcribe WAV pass, and `meeting echo`; coverage still advances. Any
+louder chunk is sent whole, its pauses, room noise, and keyboard noise
+included, and billed like speech. Invented text inside a chunk that is sent
+is not addressed. Slow chunks (over 5 s from request to answer) are logged as
+`rolling meeting chunk was slow`.
 
-In-call text was a Moonshine draft until 2026-10-22: the pane showed Parakeet
-only for time rolling had covered, and Option-Control-V and the GPUI capsule's
-Copy new pasted the Moonshine draft alone, which garbled names and jargon. The
-meeting now loads no Moonshine; short Parakeet chunks replace it. Always-on
-streaming Parakeet was rejected because one loaded model cannot serve it:
-transcribe-cpp (0.2.4, and still 0.4.1) allows one active stream per model
-across all sessions, and refuses any other run or stream with `Busy` while it is open
-(`Session::stream`). Two tracks would need a mixed track (losing You/Them and
-echo suppression) or a model copy per track (about 0.7 GB each), and every
-dictation would have to close the meeting stream and lose its 5.6 s left
-context. The buffered stream also re-encodes a 7.7 s window (5.6 s left,
-1.04 s chunk, 1.04 s right) per 1.04 s step, where chunks encode each second
-about once: Studio's 1,619 dictation streams of 3 s or longer (3.2 h of audio,
-2026-10-23 log) spent 44 ms of feed time per second of audio, which for two
-tracks would hold the engine about 9% of the time.
-
-Cost: observed 2026-10-22 on the Pro with `meeting_live_replay`: 10 minutes of
-a recorded speaker-mode call fed at real time to the production recorder beside
-the warm dictation engine (Parakeet unified English), with a 4 s dictation every
-30 s. It feeds packets directly, not through capture. Word error is against the
-final transcript the earlier 30 s chunks produced.
-
-```ts
-                            Moonshine draft +      Parakeet only,
-                            30 s Parakeet chunks   3-12 s chunks
-Meeting CPU                 105% of a core         4.4%
-Footprint, idle ~830 MB     mean 1345, peak 1438   mean 854, peak 869 MB
-Dictation release -> text   p50 80, p95 93 ms      p50 84, p95 89 ms
-Speech end -> copyable      p50 16.5, p95 28.7 s   p50 6.3, p95 11.4 s
-  (Parakeet; the draft showed in about 1 s)
-Option-Control-V text       Moonshine, 17% WER     Parakeet, 5.6% mid-call
-Pasted vs final, Them/You   16.7% / 14.9%          0.0% / 0.0%, no repeats
-Final transcript            after flush            181 ms after Stop, 3.7% WER
-```
-
-Dictation latency stays within run-to-run spread (earlier Parakeet-only runs
-measured p50 87-92 ms, p95 103-104 ms).
+Cost: unmeasured. A recording sends up to two tracks, each hard-cut overlap
+twice, the audio behind each Copy new or Option-Control-V once more, and a
+track rebuilt after Stop a second time, each billed by ElevenLabs
+([cost and privacy](transcription.md#cost-and-privacy)). In-call text trails
+speech by one chunk (3 to 12 s), its request's round trip, and its settling;
+none of this has run against the real service.
 
 ### Echo Suppression
 
@@ -1044,35 +1068,10 @@ Applied in: rolling snapshot (so every in-call view) and the final transcript
 
 Dropped counts are saved as `echo_suppressed_utterances` in the manifest.
 
-Root causes of `You` twins in Kit's 2026-10-16 call (laptop speakers, built-in
-microphone, Pro under load):
-
-- The live worker's bounded queue dropped 10 ms microphone packets under CPU
-  load, and gaps under 20 ms of arrival time were not counted. The draft's
-  microphone timeline drifted up to 6 s ahead of the system track over 18
-  minutes, so the echo envelope compared unrelated audio and bleed read as
-  `Local` (84 lines) or undecided (70). The echoed `You` line appeared before
-  its `Them` twin. Packets now carry their WAV sample position.
-- The rolling snapshot had no coverage, so the draft took over after the last
-  kept `You` entry (616 s) even though rolling had judged that audio as echo.
-- A rolling `You` entry could be published before the system chunk that
-  explained it.
-
-Observed with an opt-in replay of that recording through every layer
-(`meeting_echo_replay`, Mac Studio), before the Moonshine draft was removed
-(the draft rows no longer apply). Echo-like = at least 60% of the words occur
-in remote speech within 6 s. Six utterances where Kit really spoke were
-labeled by hand.
-
-```ts
-Pane as recorded (old code)          77 You entries, 49 echo-like
-Draft only (rolling unavailable)     11 You, 2 echo-like, 2 of 6 local lost*
-Pane, rolling caught up              10 You, 1 echo-like, 0 of 6 lost
-Pane while recording, rolling 25-300 s behind: 25 ever shown, 3 echo-like
-Final transcript                     10 You, 1 echo-like, 0 of 6 lost
-* Moonshine lines that mix bleed with Kit's sentence stay hidden until
-  rolling, which splits them into sentences, covers that time.
-```
+The word test and the sentence grouping read the words and word times
+Scribe returns for each chunk; the signal test reads only the two tracks'
+audio. The thresholds were tuned upstream on transcripts that did not come
+from ElevenLabs and have not been measured with Scribe's ([Gaps](#gaps)).
 
 Acoustic echo cancellation (Voice Processing IO) was evaluated, not adopted:
 it replaces ScreenCaptureKit's raw microphone with an AVAudioEngine/VPIO input,
@@ -1098,6 +1097,7 @@ Other checks:
 `short_recordings_become_one_chunk_and_silence_tails_are_dropped`,
 `overlapping_chunks_join_at_the_middle_of_the_overlap`, `seam_drops_repeated_words`,
 `speechless_chunks_skip_the_model_and_still_advance_coverage`,
+`a_speechless_chunk_skips_the_shared_model`,
 `a_speechless_chunk_after_an_overlap_keeps_earlier_entries`,
 `a_sentence_across_a_hard_cut_keeps_every_word`,
 `rolling_publishes_only_entries_a_later_seam_cannot_replace`,
@@ -1120,18 +1120,8 @@ Other checks:
 `distinct_or_distant_local_speech_is_kept`,
 `discontinuous_packets_are_placed_on_the_timeline`, and
 `streaming_resampler_matches_whole_buffer_conversion`. They use synthetic audio
-and transcripts, not model inference or real speaker echo.
-
-Opt-in measurements (ignored tests; they need a private recording and are never
-part of CI): `meeting_echo_replay` (every layer, cached transcripts, hand
-labels), `moonshine_command_update_latency`, and `dictation_latency` in
-[meeting/echo_replay_tests.rs](../../src/meeting/echo_replay_tests.rs), and
-`meeting_live_replay` in
-[meeting/live_replay_tests.rs](../../src/meeting/live_replay_tests.rs): the
-production recorder fed a recording at real time beside the warm dictation
-engine, with a dictation every 30 s, reporting CPU, footprint, dictation
-latency, speech-to-copyable lag, mid-call Copy all and Option-Control-V text
-against the final transcript.
+and transcripts from fake transcribers, never a request to ElevenLabs or real
+speaker echo.
 
 ### Save And Reuse
 
@@ -1322,7 +1312,7 @@ Checks: `retention_expires_meetings_by_when_they_ended_and_skips_active_ones`,
 `audio_expiry_moves_only_the_wavs_and_records_it`, and
 `audio_expiry_leaves_unfinished_pending_locked_or_annotated_meetings`;
 `keep_audio_shows_with_its_lab_and_saves_its_window` in
-[tests/panes.rs](../../src/rune_ui/tests/panes.rs);
+[src/rune_ui/tests/panes.rs](../../src/rune_ui/tests/panes.rs);
 `a_separate_audio_retention_needs_its_lab_and_a_choice` in
 [app_settings/meetings.rs](../../src/app_settings/meetings.rs), and
 `an_unreadable_setting_keeps_its_default_and_the_rest_loads` in
@@ -1330,6 +1320,10 @@ Checks: `retention_expires_meetings_by_when_they_ended_and_skips_active_ones`,
 against a real Trash has been observed.
 
 ### Titles And Summary (Apple Intelligence)
+
+Notes are written from transcript text that ElevenLabs produced
+([Transcribe](#transcribe)); "on this Mac" below describes only who writes the
+title and summary.
 
 ```ts
 While recording, setting on, model available           // meetings.title.provisional
@@ -1589,12 +1583,13 @@ hex mcp [--meetings-dir <path>]                     // meetings.mcp; release bui
 Resources: hex-meeting://<id> -> Markdown (metadata, notes, transcript)
 ```
 
-Read-only and private: the server opens files for reading only, never writes,
+Read-only: the server opens files for reading only, never writes,
 repairs, or recovers anything in the meetings folder (unlike `meeting::list`,
-which persists recovered statuses), creates no index or cache on disk, runs no
-model, and makes no network request. It never reads the exported Markdown in
-`~/Documents`, so SSH sessions need no Documents access. Transcripts leave the
-Mac only through whatever transport the MCP client uses (stdio, or SSH).
+which persists recovered statuses), creates no index or cache on disk,
+transcribes nothing, and makes no network request. It never reads the exported Markdown in
+`~/Documents`, so SSH sessions need no Documents access. The server hands
+transcripts only to its MCP client's transport (stdio, or SSH); the audio
+behind them went to ElevenLabs when the meeting was transcribed.
 
 Concurrency: a recorder holds `active.lock`; the server probes it with a
 read-only, non-blocking shared `flock` and releases it immediately. Held ->
@@ -1602,8 +1597,9 @@ read-only, non-blocking shared `flock` and releases it immediately. Held ->
 provisional. Not held ->
 the app's recovery rules apply without writing: published `transcript.ndjson`
 is final, an unfinished draft is `interrupted`. Stale lock files from finished
-recordings read as not held. A mirror cannot see the Pro's lock, so a meeting
-still recording there appears `interrupted` with its rolling transcript so far. Unreadable
+recordings read as not held. A mirrored copy (`--meetings-dir`) carries no
+lock, so a meeting still recording on its source computer appears
+`interrupted` with its rolling transcript so far. Unreadable
 manifests are listed as skipped folders; unreadable NDJSON lines are skipped and
 counted; an unterminated last line is treated as a write in progress.
 
@@ -1626,12 +1622,8 @@ required exact (stemmed) phrases; `fuzzy: false` keeps only exact stems.
 `hex history --search` shares this ranker, counting an entry's raw and final
 text as one document.
 
-Semantic search is not shipped. On-device candidates are Apple NaturalLanguage
-`NLContextualEmbedding` (asset download, macOS 14+) or the older static
-`NLEmbedding` sentence model, through a Swift bridge like `apple_speech`, with a
-cache under `~/Library/Caches/hex/meeting-index` keyed by meeting
-fingerprints. Full-text with stemming and fuzzy matching answered the real
-queries below; embeddings wait until a query fails for lack of paraphrase.
+Semantic search is not shipped. Full-text with stemming and fuzzy matching
+answered the real queries below.
 
 Sources: [meeting/query.rs](../../src/meeting/query.rs) (`meeting::query`,
 queries and rendering) and [meeting/mcp.rs](../../src/meeting/mcp.rs) (`rmcp`
@@ -1666,46 +1658,21 @@ meetings without WAVs): first launch of a freshly signed binary 440 ms to
 `initialize` (Gatekeeper), then 8 ms; `list_meetings` 4-7 ms cold; searches
 0.5-1.2 ms; a 51-minute `get_transcript` 0.5 ms; `resources/read` 0.6 ms.
 
-#### Another Mac's Meetings (Mirror)
-
-```ts
-Don't: MCP client config runs `ssh pro hex mcp`         // one SSH per client
-  -> 41 OpenCode instances = 41 SSH sessions -> the Pro's sshd reset connections
-
-Do: one periodic pull, then local servers               // meetings.mcp.mirror
-scripts/sync-meetings-mirror.sh (LaunchAgent template, every 120 s,
-  ProcessType Background, Nice 10, LowPriorityIO)
-├── ONE rsync over ssh (BatchMode, ConnectTimeout 5, --timeout 60)
-│   pro:Library/Application Support/hex/meetings/
-│   -> ~/Library/Caches/hex-meetings-mirror/ (0700)
-├── Skips *.wav, *.lock, *.tmp; --delay-updates (files land together at the
-│   end); --delete-delay (meetings trashed on the Pro disappear)
-└── Pro asleep / unreachable -> exit 0 silently; next run retries
-Each MCP client -> local `hex mcp --meetings-dir <mirror>` (no SSH, no lock)
-└── No lock in the mirror -> a meeting still recording on the Pro reads as
-    `interrupted` with its rolling transcript so far; final once published
-```
-
-Template: [hex-meetings-mirror.plist](../../scripts/launchd/hex-meetings-mirror.plist)
-(placeholders for the checkout and home; not installed automatically).
-
-Observed (2026-10-15, Studio pulling from the Pro): one sync 0.44 s, 8 meetings,
-1.0 MB, no WAVs or locks; unreachable host exits 0 at once, unanswered address
-exits 0 after the 5 s connect timeout. `hex-meetings-mcp --meetings-dir` (release
-build in `~/.local/bin`) over stdio: first launch of the new binary 378 ms to
-`initialize` (Gatekeeper), then 7 ms; `list_meetings` 3.5–11 ms cold, 0.5 ms
-warm; searches 0.6–1.5 ms; a 48,000-char `get_transcript` 0.6 ms;
-`get_meeting_notes` ≤0.3 ms, including an older manifest with action items;
-`resources/read` 0.5 ms. 40 parallel instances: all initialized (median 13 ms,
-max 22 ms), listed, and exited 0 in 76 ms wall. The LaunchAgent is not loaded,
-so ssh-agent access from launchd is unverified.
-
 Granola import: see [granola-import.md](../plans/granola-import.md).
 
 ## Gaps
 
+- No meeting chunk was ever sent to ElevenLabs. Chunk transcription against
+  the real service, its round trip, what a meeting costs, Scribe's word times
+  at chunk seams and in echo suppression, and how long a dictation waits
+  behind a chunk request are all unmeasured. macOS: not compiled; Windows:
+  type-checked by cross compilation only; Linux: compiled and unit-tested
+  with fake transcribers.
+- A chunk request that fails during Stop & Transcribe's final pass fails the
+  whole pass: the meeting ends Failed with its WAVs and rolling draft, and
+  release builds have no action that sends it again.
 - No executed end-to-end recording with a real call, Screen Recording grant, or
-  speakers echo in this change; see the test script in the handoff.
+  speakers echo; see the test script in the handoff.
 - The process tap, its System Audio Recording prompt, and display-sleep
   recovery have not run in a recorded meeting. TCC status comes from the
   private `TCCAccessPreflight`; a denied tap would otherwise record silence.
@@ -1713,31 +1680,28 @@ Granola import: see [granola-import.md](../plans/granola-import.md).
   arrival time; drift below the 1 s gap threshold is uncorrected and echo
   thresholds were tuned on ScreenCaptureKit's shared clock.
 - Calendar titles (EventKit) are not implemented.
-- In-call text trails speech by one chunk plus its settling (seconds, see the
-  replay numbers); nothing shows a partial sentence before then. A track that
+- In-call text trails speech by one chunk, its request's round trip, and its
+  settling (unmeasured); nothing shows a partial sentence before then. A track that
   falls more than 120 s behind skips audio until Stop rebuilds it.
 - The recording capsule's Copy new / Copy all are unverified on a real Mac
   screen; its count can trail the transcript by up to a second.
-- Copying through the click is checked with a fake model only; its real-Mac
-  latency and how often the 3 s wait runs out are unmeasured. Handing a
+- Copying through the click is checked with a fake transcriber only; its
+  latency over the network and how often the 3 s wait runs out are unmeasured. Handing a
   copy's cuts from the rolling worker to the WAV rebuild in `transcribe` has
   no test of its own; the rebuild with cuts does. The copy waits
   for the next audio packet to arrive, so with both sources stopped it runs
   out of time and copies the in-call transcript.
 - The Meetings pane is verified by Rune goldens rendered offscreen (on Linux
   and on hailmary's Metal), not on a Mac screen; the capsules have no golden.
-- Echo thresholds are tuned on two speaker-mode calls (2026-10-15 and
-  2026-10-16), with six hand-labeled local utterances; other rooms, external
-  speakers, and Bluetooth are unmeasured. The 2026-10-16 replay audio was lost
-  with Studio's temporary directory, so those numbers cannot be re-run. Real
+- Echo thresholds were tuned upstream on two speaker-mode calls (2026-10-15
+  and 2026-10-16), with six hand-labeled utterances the user spoke, on
+  transcripts that did not come from ElevenLabs; they are unmeasured with
+  Scribe's words, and other rooms, external speakers, and Bluetooth are
+  unmeasured. Real
   NSFileManager trashing and the native rename field are unexercised in the app.
-- CPU, memory, and latency numbers come from the replay harness on the Pro,
-  not a recording in the app with real capture and hotkey dictations.
 - The short-chunk rolling transcript has not run in a real call yet.
-- Why the rolling worker stalled for over a minute on the Pro is unknown; slow
-  chunks (> 5 s) are now logged.
 - Titles and summaries have not run after a real recording in the app; the CLI
-  path exercised the real model, and the provisional-title thread, its manifest
+  path exercised Apple Intelligence, and the provisional-title thread, its manifest
   write, and the menu/pane refresh are unexercised in a live recording.
 - Live chapters (Labs) have not run in a real recording: the worker,
   manifest writes, title updates, menu bar Copy Section, and the boundary pass

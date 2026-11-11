@@ -1,18 +1,25 @@
 # Dictation
 
-Hold the configured shortcut, speak, and release. Hex transcribes locally and
-inserts the result at the current focus. New captures do not cancel accepted
+Hold the configured shortcut, speak, and release. Hex sends the recording to
+ElevenLabs Scribe ([transcription.md](transcription.md)) and inserts the
+returned text at the current focus. Nothing is transcribed on this computer:
+a dictation needs a network connection and an
+[API key](transcription.md#api-key). New captures do not cancel accepted
 work. Only Toggle mode has a cancel: its cancel shortcut, Escape by default,
 discards the recording (#786, #1022); every other intentional dictation
 finishes and pastes. The exception is a Labs › Caps Lock dictation capture on
 macOS: it is hands-free in every shortcut mode, so its own Escape binding
 cancels it even in Hold.
 
-This map covers the macOS release path. Linux shares the basic journey, not
+This map follows the macOS path. Linux shares the basic journey, not
 every timing, input, or recovery guarantee; see the
 [platform map](README.md#other-platforms-and-consumers). This is a map, not a
-verified end-to-end driver. Linked checks are locators; no tests or previews
-were run for this rewrite.
+verified end-to-end driver. Linked checks are locators. In this fork Linux is
+compiled and unit-tested, Windows is type-checked by cross compilation only
+and never run, macOS code is not compiled, and no dictation has been sent to
+ElevenLabs ([transcription.md](transcription.md#not-verified)). Dated
+observations below come from upstream Hex builds and were not repeated in
+this fork.
 
 ## How To Get To It
 
@@ -21,8 +28,11 @@ write fails, capture remains active with an error; retry or cancel it explicitly
 The GPUI regression that injected this failure went with GPUI; no Rune test
 injects a failed shortcut save yet.
 
-**Shortcut:** Option by default, after macOS permissions and the selected local
-model are ready. Commands and OpenCode are not required. General > Dictation >
+**Shortcut:** Option by default, once the macOS permissions are granted and an
+ElevenLabs API key is set; until then the listener reads "API key required"
+or "Waiting for setup" and starts by itself afterwards
+([transcription.md](transcription.md#api-key)). Commands and OpenCode are not
+required. General > Dictation >
 Shortcut accepts modifier-only, modifier-plus-key, standalone Fn/Globe, and
 standalone function-key bindings. On Windows and Linux/X11 it also accepts mouse buttons, and on
 macOS with Labs › Mouse shortcuts on (off by default; issue 209; see labs.md),
@@ -118,8 +128,7 @@ These reducer/recorder checks passed on October 25, 2026, with the full macOS
 confirmed it worked. Linux input-module tests and Xvfb button injection checks
 (`x11_mouse_grab_delivers_hold_and_release` and
 `x11_mouse_recorder_captures_auxiliary_button_and_releases_its_grab`) passed in
-an isolated Linux container. The full Linux app passed `cargo check` with the
-transcription Vulkan backend disabled for the container's older shader compiler.
+an isolated Linux container.
 Windows input code and tests were cross-checked for `x86_64-pc-windows-gnu` in
 an isolated input-module harness; no full Windows app build or physical Windows
 mouse test was run. Xvfb does not establish physical Linux desktop behavior.
@@ -133,10 +142,9 @@ shortcut. The recorder keeps one width in every state, so it, the tray, and the
 side picker never move while it records; with the picker showing, keycaps leave
 the side to it, and otherwise they name it (`Left ⌥`).
 Checks: `a_recorder_shows_the_modifiers_held_so_far` in `rune_ui/tests.rs`,
-`the_shortcut_row_holds_still_through_every_face_and_side`,
-`a_new_shortcut_s_keys_stay_inside_their_tray`, and
+`the_shortcut_row_holds_still_through_every_face_and_side` and
 `esc_stays_on_the_recorder_however_many_keys_are_held` in
-`rune_ui/tests/panes.rs`, the `shortcut-row*` scenes, and the `ChordCapture`
+`src/rune_ui/tests/panes.rs`, the `shortcut-row*` scenes, and the `ChordCapture`
 tests in `rune_ui/macos_host.rs` (no native end-to-end run).
 
 **Fixed October 29, 2026 (issue 400):** macOS marks every function, arrow, and
@@ -509,7 +517,7 @@ ready. With Labs › Return to app on (`labs.return_to_app`, off by default):
 ```ts
 Dictation shortcut, Caps Lock, or `hex dictation start` starts
   -> The frontmost app's pid is recorded (never Hex's own)
-Paste job -> Carries it through inference and processing        // dictate.return-to-app
+Paste job -> Carries it through transcription and processing    // dictate.return-to-app
 ├── Same app in front -> Paste as usual
 ├── Another app in front -> Activate it, poll 10 ms up to 500 ms,
 │   settle 50 ms, then paste
@@ -521,43 +529,24 @@ Details and checks in [labs.md](labs.md).
 
 ### Skip Long Pauses (Labs, Linux and Windows)
 
-A dictation transcribed as a whole clip (no stream on this model or device,
-or the fallback after a failed or late stream) sends every second of silence
-through the model. With Labs › Skip long pauses on (`labs.skip_pauses`, off
-by default, issue 899):
+A dictation's batch request uploads the whole clip
+([transcription.md](transcription.md#what-is-sent-where)), and ElevenLabs
+bills silence like speech
+([transcription.md](transcription.md#cost-and-privacy)). With Labs › Skip
+long pauses on (`labs.skip_pauses`, off by default, issue 899):
 
 ```ts
 Whole-clip run starts -> labs::skip_pauses()        // dictate.skip-pauses
-├── Off -> The clip, untouched (as before)
+├── Off -> The clip, untouched
 ├── On -> Each pause at the noise floor keeps its first 2.5 s and last 0.3 s,
 │   a trailing pause its first 2.5 s; shorter pauses pass whole (the stream's PauseCap)
 ├── Nothing heard above the floor -> The clip, untouched (#841)
-└── Job deadline, History duration, silence discard -> The full clip
+├── Job deadline, History duration, silence discard -> The full clip
+└── The request fails -> The clip kept for a retry is the cut one
+    // transcription.md#kept-failed-clips
 ```
 
 Details and checks in [labs.md](labs.md).
-
-**Fixed November 3, 2026 (issue 1194):** a clip longer than the model's
-window (Cohere's 35 s) is transcribed in chunks, and a chunk that was only
-silence (a locked dictation left waiting before the words) went to the model
-anyway; Cohere invented long repeating text for it, pasted before the real
-sentence. Each chunk of such a clip now goes through the speech detector
-first and is skipped when it hears no speech; without the detector every
-chunk still runs. Clips that fit the window are unchanged. Check:
-`a_long_clip_skips_only_chunks_the_detector_hears_no_speech_in` in
-[gguf_session.rs](../../src/transcription/gguf_session.rs) (detector verdict
-overridden; not run with Cohere on real audio).
-
-### Vocabulary Quality Checks
-
-`hex benchmark-transcription` accepts a scoring vocabulary and expected terms,
-and reports recall, excess vocabulary occurrences and WER by corpus group, plus
-overall latency. Its companion scorer also reports per-group latency.
-The [fixture guide](../../tests/fixtures/vocabulary/README.md) describes
-the synthetic set, public guard download, and ignored private manifest path.
-This is offline evaluation coverage, not a shipped vocabulary feature or proof
-of recognition quality on a microphone. Metric checks live in
-`transcription::benchmark::tests`; inference results belong in the research report.
 
 ### Hold And Short Taps
 
@@ -657,7 +646,8 @@ not run on GNOME).
 Labs › Live typing on (labs.live_typing, off by default, Wayland only)  // labs.live-typing
 Capture becomes intentional (hold threshold, or the Toggle press)
   -> Takes a dictation::live_text::TypingDemand, then Begin: get_input_method(seat)
-  -> The stream opens afterwards, so the engine sees the demand and publishes partials
+  -> The stream opens afterwards, so the engine sees the demand, opens a live
+     session (transcription.md#what-is-sent-where), and publishes partials
   -> Each stable + tentative change -> The newest preedit is sent (older ones coalesce), underlined in the focused field
   -> Escape, a short tap, silence, a lost microphone, a failed job, or the listener quitting -> Cancel: clear, destroy
 Release -> Process the final text -> Finish
@@ -665,14 +655,20 @@ Release -> Process the final text -> Finish
   │     then clear preedit, commit_string, destroy -> inserted, clipboard untouched
   ├── A caller that gives up first -> abandoned; owner only clears (up to 250 ms), then LinuxPaster.paste
   ├── No decision in 350 ms and the owner already claimed -> wait up to 750 ms and do not paste
-  └── CPU engine or non-streaming model -> No words while speaking; the final text still commits here
+  └── Live session cannot connect or fails -> No more words while speaking; the
+        whole clip's text (transcription.md#final-text) still commits here
 ```
 
 The input method exists from that intentional start until Finish or Cancel,
 which includes post-release processing; a short tap or chord that never
-becomes intentional creates none. It does not need a stream: a CPU engine or
-a model that cannot stream shows no provisional words, but the finished text
-still goes in through the input method instead of the clipboard. Hex's own
+becomes intentional creates none. The preedit words are the live model's
+(`scribe_v3_live`); the committed text is the batch model's unless Final text
+is Live ([transcription.md](transcription.md#final-text)). Each Live typing
+capture opens a live session, which ElevenLabs bills for all it hears
+([transcription.md](transcription.md#cost-and-privacy)). The input method
+does not need the session: when it cannot connect or fails, no provisional
+words show, but the finished text still goes in through the input method
+instead of the clipboard. Hex's own
 first-run practice field on Linux is an ordinary focused field, so it takes
 the preedit and the final commit too while Live typing is on. A newer
 capture's Begin takes over from an older job, whose Finish then returns false
@@ -721,8 +717,9 @@ enforce the serial today). Checks (unit tests only):
 [dictation/live_text.rs](../../src/dictation/live_text.rs); and
 `the_plate_follows_the_decision_made_when_the_stream_opened` in
 [dictation.rs](../../src/dictation.rs). **Not verified on
-a real compositor**: no GTK/Qt field or Sway/Hyprland run; KWin and Mutter
-fall back to paste by design.
+a real compositor**: no GTK/Qt field or Sway/Hyprland run, and no live
+session against ElevenLabs has fed a preedit; KWin and Mutter fall back to
+paste by design.
 
 **Fixed November 3, 2026 (issue 1158):** on Linux with PipeWire, Hex's
 microphone stream (held open while the microphone is kept ready) was named
@@ -952,7 +949,8 @@ General > Shortcut mode                               // dictate.shortcut-explai
      shortcut's keycaps (one per key, pressing together) and two lanes (key
      above, recording below) on a chart-recorder tape: a still pen at the
      right, the tape scrolling left without end and fading out at its left
-     edge; opening it ends a shortcut recording and closes the model picker
+     edge; opening it ends a shortcut recording and closes any other sheet
+     or menu
   ├── The current choice has a focus-coloured border
   ├── Double-tap with a shortcut that has no key -> Dimmed, takes no focus
   │   or press, says "Needs a shortcut with a key, like ⌥Space", unless
@@ -976,10 +974,9 @@ Checks: `the_shortcut_mode_row_names_the_choice`,
 `the_explainer_loops_on_the_poll_clock`,
 `reduce_motion_shows_the_finished_explainer_without_waking`,
 `the_explainer_restarts_when_reduce_motion_turns_off`,
-`a_long_chord_widens_shortcut_mode` (five keys),
-`shortcut_mode_draws_a_keycap_per_key_and_lines_up_the_lanes`, and
-`the_explainer_picker_and_shortcut_recording_never_share_the_window` in
-[tests/panes.rs](../../src/rune_ui/tests/panes.rs), the tape's own
+`a_long_chord_widens_shortcut_mode` (five keys), and
+`shortcut_mode_draws_a_keycap_per_key_and_lines_up_the_lanes` in
+[src/rune_ui/tests/panes.rs](../../src/rune_ui/tests/panes.rs), the tape's own
 `nothing_draws_past_the_pen`, `the_tape_scrolls_without_steps`,
 `the_still_frame_shows_a_whole_take`, `narrow_lanes_draw_nothing` and
 `the_past_leaves_the_tape` in `explainer.rs`, plus the `shortcut-mode`
@@ -1057,9 +1054,10 @@ Release that will transcribe                          // dictate.stop-tone
   -> Stop tone and mute/pause/sleep restore at the release, while the tail is
      still captured; a muted output (macOS, Linux) unmutes first, then the tone
      ├── Short tap or chord -> No stop tone; the start tone is retracted
-     ├── Clip later near-silent or without speech -> Tone already played;
-     │   discard quietly, nothing pasted, no error tone or note; the log has
-     │   the measured level and peak against the thresholds
+     ├── Clip later near-silent (loudest window under -50 dBFS) -> Tone already
+     │   played; discard quietly, the clip is not uploaded, nothing pasted, no
+     │   error tone or note; the log has the measured level and peak against
+     │   the threshold (an open live session already heard the audio)
      └── Escape after the release -> Nothing; the clip still transcribes
   -> macOS: the audio owner announces it before draining the tail; HUD
      Transcribing and submission still follow the tail
@@ -1087,22 +1085,7 @@ Source: `DictationCapture` in [dictation.rs](../../src/dictation.rs); checks:
 `resampled_clips_keep_the_last_word_through_a_delayed_release` (44.1/48 kHz,
 streamed and not, with the tail). These cover sample-buffer/timestamp logic, not
 a microphone recording. The physical release stays exact; the 200 ms tail is an
-explicit extension of the trim boundary. The opt-in `release_boundary_harness`
-([dictation/tail_tests.rs](../../src/dictation/tail_tests.rs); `HEX_TAIL_MODEL`,
-`HEX_TAIL_WAVS`) and `evaluate_dictation_corpus`
-([dictation/corpus_tests.rs](../../src/dictation/corpus_tests.rs);
-[`scripts/dictation-corpus.sh`](../../scripts/dictation-corpus.sh),
-`HEX_DICTATION_CORPUS_DIR`) replay recordings through the capture timeline at
-release offsets (`-300 ms` to `+200 ms`) and onset offsets (`-300 ms` to
-`+100 ms`). On 2026-10-15, before the tail, across 102 clips (70 real voice
-recordings, 20 macOS `say` clips, and 12 ElevenLabs `eleven_v4` clips) with
-Unified English, clips matched the release to the sample; releasing at
-`0 ms`..`+200 ms` kept the final word on 10/10 real clips (`-50 ms`: 9/10;
-`-100 ms`: 7/10; `-150 ms`: 4/10; `-200 ms`: 2/10). Warm 450 ms pre-roll kept the
-initial word even when speech began `-300 ms` before press, whereas cold 0 ms
-pre-roll lost initial syllables when speech preceded readiness by `150–300 ms`.
-The since-removed pause chunking on or off, and 1 versus default decoder
-threads, gave identical tail results. The harnesses now apply the tail; they have not been re-run with it. The
+explicit extension of the trim boundary. The
 tail also keeps any key-up or click sound made at release; no filtering is applied.
 The owner in [dictation/audio.rs](../../src/dictation/audio.rs) has
 `cold_capture_restart_rejects_late_open_results_and_closes_after_finish` and
@@ -1158,36 +1141,44 @@ speaker playing the tone.
 ### Streaming Finish
 
 ```ts
-Model advertises streaming, GPU device             // dictate.streaming
-  // Metal on macOS, Vulkan on Linux and x64 Windows
-  Load or switch model -> Probe a one-second silent stream (also prewarms the stream graph)
-       ├── Succeeds -> Stream shortcut captures
-       └── Fails, CPU device, Apple Speech, or HEX_STREAMING=0 -> Whole-clip path only
+Hotkey capture, API key set                            // dictate.streaming
+  A live session (scribe_v3_live) opens only when its text is used: a session
+  is billed for all it hears             // transcription.md#what-is-sent-where
+  ├── Shown -> Labs › Live text, the first run's practice page, Labs › Live
+  │   typing (Linux Wayland), or a /dictations client that asked for partials
+  ├── Pasted -> Settings › General › Final text = Live  // transcription.md#final-text
+  └── Neither (the default) -> No session; the clip is sent once, at release
   Shortcut capture passes the hold threshold (Toggle on Windows and Linux: on press)
-    -> Open one live stream; feed the 16 kHz backlog, then every 160 ms
+    -> Warm the HTTPS connection in the background
+       // one HEAD request, no audio, no key; at most once per 20 s
+    -> Session wanted -> Open it; feed the 16 kHz backlog, then blocks of at
+       least 160 ms
        // same audio as the final clip, pre-roll included; never blocks capture
+       // each pause is cut to its first 2.5 s and last 0.3 s; the clip keeps
+       // every sample
   Release -> Collect the release tail (200 ms, up to 600 ms while speech goes on)
     -> Finish with the complete clip
-    -> Feed any unfed remainder
-    -> Unified English: feed 400 ms of silence, as the whole clip gets (every OS)
-    -> Finalize -> Final text
-       ├── Stream failed, produced no text, or was fed > 250 ms past the clip
-       │   -> Transcribe the whole clip offline (source=fallback)
-       ├── ≥ 300 ms of speech the stream heard ends > 400 ms before its text's start
-       │   -> Transcribe the whole clip offline (source=fallback)   // lost opening
-       ├── ≥ 300 ms of speech the stream heard lies > 400 ms past its text's end
-       │   -> Transcribe the whole clip offline (source=fallback)   // #1101
-       ├── The raw decode carries two different <ll-RR> language tags
-       │   -> Transcribe the whole clip offline (source=fallback)   // language switch
-       ├── No final text within 1.5 s -> Abort the stream -> Whole clip
-       └── Model switched during the capture -> Stream closed -> Whole clip
-  Short tap, chord discard -> Drop the stream
+       ├── No session -> The whole clip in one batch request (source=offline)
+       ├── Final text = Batch -> The session only showed its text; no commit
+       │   -> The whole clip in one batch request (source=offline, or
+       │      fallback when the session itself was unusable)
+       └── Final text = Live -> Feed any unfed remainder -> Commit -> Final text
+           (source=stream)
+           ├── Session failed, returned no text, was fed > 250 ms past the
+           │   clip, or heard only quiet audio while a pause was cut
+           │   -> The whole clip in one batch request (source=fallback)
+           ├── No final text within 1.5 s -> Abort the session -> Whole clip
+           └── Session closed before the finish (it never opened, or another
+               engine command interrupted it) -> Whole clip (source=fallback)
+  Short tap, chord discard -> Drop the session
   Microphone stream failure -> Its audio so far becomes a copy-only dictation  // recovery.md#keep-an-interrupted-dictation
     └── A timeline gap over 250 ms still drops the capture  // recovery.md#reopen-with-fresh-audio
   Voice-delimited and programmatic captures (macOS) -> Whole clip after release
   Nothing is pasted or reaches the focused app until the final text exists
-  Labs + labs.live_text -> After each feed the stream publishes its text   // dictate.live-text
+  Labs + labs.live_text -> After each feed the session publishes its text   // dictate.live-text
   ├── Stable (committed) and tentative text, per capture; a new capture starts empty
+  │   └── A session commits only at the finish, so while recording every word
+  │       is tentative and each partial transcript replaces the last
   ├── One click-through line just past the HUD, on the HUD's screen
   │   ├── macOS: beside the plate the HUD placed (under the menu bar, over the Dock,
   │   │   in the menu bar, out of the notch), on the pointer's screen
@@ -1195,71 +1186,50 @@ Model advertises streaming, GPU device             // dictate.streaming
   │   ├── HUD hidden -> In the HUD's place at the top
   │   ├── Appears with the first words, already drawn; prewarmed, so macOS never
   │   │   reveals the last dictation's words for a frame (Linux, Windows: unverified)
-  │   ├── Grows with the words to 552 pt; the newest stay in view, "…" cutting the start
-  │   └── Tentative words, when the model has any, are dimmed after the stable ones
+  │   ├── Grows with the words to 552 pt; past that, stable text keeps its
+  │   │   newest words ("…" cuts the start) and tentative text is cut at its end
+  │   └── Tentative words are dimmed after the stable ones
   ├── Release, short tap, or a lost microphone -> The recording ends -> Hidden
   ├── Provisional: never pasted, copied, or kept (the final text replaces it)
-  ├── A failed or interrupted stream clears the text while the capture goes on
+  ├── A failed or interrupted session clears the text while the capture goes on
   └── process.log: `partials` on "finished live stream"; per change at debug (no words)
   Labs + labs.live_typing (Linux Wayland) -> The same text is the focused field's preedit  // labs.live-typing
-  ├── Begin at the intentional start, before the stream opens; destroyed at Finish or Cancel, so another input method keeps the seat
-  ├── Non-streaming model -> No words while speaking, but the final text still commits through the input method
+  ├── Begin at the intentional start, before the session opens; destroyed at Finish or Cancel, so another input method keeps the seat
+  ├── No usable session -> No words while speaking, but the final text still commits through the input method
   ├── Finish -> The owner wins the commit claim, clears the preedit, commits the processed text, no clipboard
   ├── Caller gives up first (350 ms) -> Owner only clears (up to 250 ms), then Paste
   └── Owner already claimed the commit -> Wait up to 750 ms; never paste over it
-  Picker -> "Streams" tag on catalog models whose artifact streams   // setup.model-card
-  Picker -> The saved language's Recommended/Fastest/Most accurate cards first  // setup.model-routing
-  ├── el: Cohere; tr, ms, fil, fa, mk, ar, ja, fi, sv, da: Whisper turbo first
-  ├── auto, yue, ko: no SenseVoice; mt: Parakeet v3 only (Whisper fails Maltese)
-  ├── en: Underdog Bark 3.0 Pro and Clean (Parakeet v3 fine-tunes; Clean
-  │   drops filler words) follow without a badge
-  ├── ar: QwenCleo-ASR 1.7B (Qwen3-ASR 1.7B fine-tune for Egyptian Arabic and
-  │   Arabic/English code-switching; Arabic only, 2.2 GB; its 19.85% WER is
-  │   the author's own test) follows without a badge
-  ├── he: ivrit.ai Whisper large-v3-turbo Recommended (Hebrew only, always with
-  │   the `he` hint; 18.45% WER on FLEURS Hebrew test against stock turbo's
-  │   29.69%, Hex's run), then Whisper turbo for Vocabulary (#752)
-  ├── ru: GigaAM v3 Recommended (ai-sage's e2e RNN-T, Russian only, 274 MB, no
-  │   hint; 5.37% WER on FLEURS Russian test against Parakeet v3's 6.52% and
-  │   Whisper turbo's 5.36%, Hex's run), then Whisper turbo for Vocabulary (#952)
-  ├── no: NB-Whisper Medium Recommended (National Library of Norway, Norwegian
-  │   only, always with the `no` hint, 539 MB; 6.68% WER on FLEURS Norwegian
-  │   test against Whisper turbo's 8.94%, Hex's run), then Whisper turbo for
-  │   Vocabulary (#1150)
-  ├── en, fr, de, es, pt, it, ja: Granite Speech 5.0 (IBM's TurboCTC, 506 MB,
-  │   no hint, also offered under Auto) follows without a badge: on FLEURS
-  │   test it trailed Parakeet Unified/v3 in every European language and tied
-  │   Whisper turbo in Japanese (5.04% CER against 5.02%), Hex's run (#1252)
-  ├── Orukeet: Oruk AI's Parakeet v3 fine-tune (740 MB, no hint, also offered
-  │   under Auto) follows without a badge; 1.86% WER on LibriSpeech test-clean
-  │   from transcribe.cpp's published conversion benchmark, with its FLEURS
-  │   figures in Details
-  └── Every other available model follows without a badge, selectable and
-      deletable; never auto-switched or auto-downloaded (setup.language-select)
 ```
 
 Source: [transcription/engine.rs](../../src/transcription/engine.rs) (one thread
-owns the model on every OS; streams, finishes, offline runs, and macOS model
-loads and switches share its FIFO because a live stream holds the model's
-compute lease), `probe_stream` and `with_stream` in
-[transcription/gguf_session.rs](../../src/transcription/gguf_session.rs), the stream entry points in
-[transcription/local_transcriber.rs](../../src/transcription/local_transcriber.rs) and
-[parakeet.rs](../../src/parakeet.rs), and `begin_stream` in
-[dictation.rs](../../src/dictation.rs): the capture owns its stream, feeds it as
-audio arrives, cancels it with the recording, and hands it to the finished clip.
-macOS streams hotkey captures from the audio owner in
+owns the Scribe transcriber on every OS; live sessions, finishes, whole-clip
+requests, and language reloads share its FIFO, so requests never overlap), the
+pause cap and `finish_stream` in
+[transcription/engine/streaming.rs](../../src/transcription/engine/streaming.rs),
+`stream_wanted`, `warm`, and `with_stream` in
+[transcription/scribe.rs](../../src/transcription/scribe.rs), the session in
+[transcription/scribe/live.rs](../../src/transcription/scribe/live.rs), and
+`begin_stream` in [dictation.rs](../../src/dictation.rs): the capture owns its
+stream, feeds it as audio arrives, cancels it with the recording, and hands it
+to the finished clip. macOS streams hotkey captures from the audio owner in
 [dictation/audio.rs](../../src/dictation/audio.rs); `DictationWorker::transcribe`
-hands the clip to the engine when it is submitted, so its stream finishes before
-a later capture opens one, and the job then waits for its text in order. Linux
+in [macos_dictation.rs](../../src/macos_dictation.rs) hands the clip to the
+engine when it is submitted, so its session finishes before a later capture
+opens one, and the job then waits for its text in order. Linux
 ([linux/dictation.rs](../../src/linux/dictation.rs)) and Windows
 ([windows/dictation.rs](../../src/windows/dictation.rs)) drive the same engine
-from their capture loops. Parakeet buffers with its largest context menu
-(Unified English: 5.6 s left, 1.04 s chunk, 1.04 s right), its most accurate and
-least compute-intensive setting; `HEX_STREAM_CHUNK_MS` overrides the chunk for
-benchmarks and `HEX_STREAMING=1` streams on any device, including a CPU
-(diagnostics and the Linux CI fixture). Each dictation logs
-`source=stream|offline|fallback` and `finish_ms`. The macOS "Transcribe during
-pauses" setting no longer affects dictation.
+from their capture loops and reload its language only while idle with no job
+pending. The wire side of both requests (models, endpoints, keyterms, timeouts,
+the one retry) is in [transcription.md](transcription.md#what-is-sent-where).
+
+The engine's "offline" path and `source=offline` name the complete clip sent in
+one batch request (`scribe_v3`), not work done without a network: every path
+sends the audio to ElevenLabs. With Final text Batch and a session open, the
+audio is sent twice, to the session while recording and whole at release. The
+warm-up reuses the agent the batch request is sent on, so the upload at release
+need not wait for DNS and TLS; it is skipped without a key, and what it saves
+is unmeasured. Each dictation logs `source=stream|offline|fallback` and
+`finish_ms`.
 
 Checks: `recorded_audio_is_a_prefix_of_the_finished_clip` (16, 44.1, and
 48 kHz), `resampled_clips_keep_the_last_word_through_a_delayed_release` (streamed
@@ -1272,312 +1242,110 @@ and not), `a_stream_starts_with_the_backlog_and_feeds_in_blocks`,
 `escape_and_short_taps_cancel_the_stream_and_submit_nothing`, and
 `a_model_that_cannot_stream_transcribes_the_whole_clip_after_release` in
 linux/dictation.rs; `source_labels_distinguish_fallbacks`,
-`streams_send_their_audio_in_order_and_cancel_when_dropped`, and (macOS, a real
-engine thread without a model) `a_finish_without_a_stream_transcribes_the_clip_offline`,
+`streams_send_their_audio_in_order_and_cancel_when_dropped`,
+`a_provisional_stream_is_told_apart_from_a_failed_one`,
+`an_engine_whose_model_cannot_stream_opens_no_stream`, and (a real engine thread
+whose transcriber is never asked for a request)
+`a_finish_without_a_stream_transcribes_the_clip_offline`,
 `an_unusable_stream_falls_back_to_the_complete_clip`,
 `work_runs_in_order_and_failures_reach_the_caller`, and
-`dropping_the_engine_stops_despite_an_open_stream` in transcription/engine.rs.
-These use synthetic audio and recorded engine commands. The Linux CI fixture
+`dropping_the_engine_stops_despite_an_open_stream` in transcription/engine.rs;
+`settings_reach_the_next_request` in transcription/scribe.rs (Final text
+reaching the engine). These use synthetic audio, fake streams, and recorded
+engine commands. The session and the batch request themselves are unit-tested
+against a fake server on loopback only
+([transcription.md](transcription.md#not-verified)). No test covers which
+captures open a session (`stream_wanted`: unit tests have no key), and nothing
+here was run against ElevenLabs: release-to-text latency of either path, the
+1.5 s finish deadline against a real commit, and a physical microphone are
+unmeasured. macOS: not compiled in this fork; Windows: type-checked by cross
+compilation only; Linux: compiled and unit-tested.
+
 [`scripts/test-linux-dictation.sh`](../../scripts/test-linux-dictation.sh)
-replays the same speech through a virtual microphone twice with the real model:
-once on the CPU (whole clip, `source=offline`) and once with `HEX_STREAMING=1`
-(`source=stream`, or `fallback` when the CPU stream misses its deadline). The
-hidden Windows `model stream-bench <wav> [--speed N]` command and the opt-in
-macOS `metal_stream_tracks_offline_transcription` (parakeet.rs;
-`HEX_STREAM_MODEL`, `HEX_STREAM_WAVS`, `HEX_STREAM_SPEED`) replay a WAV in real
-time and compare both paths.
+replays speech through a virtual microphone under a held shortcut and expects
+the transcript pasted into a GTK window beside Hex's own. It sends the clip to
+ElevenLabs (`ELEVENLABS_API_KEY` required; each run bills one short clip), no
+workflow runs it, and it has not been run in this fork. The hidden Windows
+`hex stream-bench <wav> [--speed N] [--language CODE]` replays a WAV into a
+live session as capture would and prints the release latency and word
+differences against the whole-clip request; it needs Live text or Final text
+Live, bills the clip once per path, and has never been run.
 
-**Observed October 19, 2026, RTX 5070 Ti, Vulkan, Unified English Q8, Windows
-TTS clips replayed at 4× (131 s also at 1×):** release-to-text 55/55/93 ms
-(10/27/131 s) streaming versus 82/185/873 ms whole-clip; GPU busy 3.1–3.6% of
-the dictation; process peak working set 214 MB and about 3% of one core during
-a real-time 131 s stream. Against the script, both paths transcribed the 10 s
-and 27 s clips perfectly; on 131 s the stream added one homophone error ("cache"
-→ "cash") to formatting differences both paths share. Smaller chunks (560 or
-160 ms) added more errors and up to 20% GPU without a faster release. After the
-engine became shared (same machine and clips at 4×): 56/91 ms streaming versus
-92/865 ms whole-clip for 10/131 s, with 0/28 and 1/408 word differences, matching
-the earlier build.
-
-**Observed October 19, 2026, MacBook Air M4, Metal, Unified English Q8, the same
-clips at 4× through `metal_stream_tracks_offline_transcription`:** Metal
-qualified for streaming and both clips finished from the stream: 140/253 ms
-release-to-text (10/131 s) versus 156/2,838 ms whole-clip, with 0/28 and 1/408
-word differences. This drives the production engine and Parakeet adapter, not
-the shortcut, microphone, or paste. Not measured: physical microphone corpora,
-noisy rooms, or Linux on a real GPU.
-
-**Observed October 28, 2026, Apple Silicon Mac (macOS 27), Metal, Unified
-English Q8, a 13.1 s `say` clip (40 words) at 1× through
-`metal_stream_tracks_offline_transcription` with live text:** the text changed
-12 times, once per 1.04 s chunk; the first words arrived 2.24 s into the audio,
-and at 12.6 s 35 of 40 words showed (about 1–2 s behind speech). The stable
-text was never rewritten and the tentative text was always empty, so with
-Parakeet's buffered settings live text grows in whole-chunk steps. The final
-text came from the stream 154 ms after release, with 0/40 word differences
-from the whole clip. Synthetic speech; not a physical microphone or the HUD.
-
-**Observed November 1, 2026, apollo (Radeon 8060S, Vulkan), Nemotron 3.5 ASR
-Q8, FLEURS clips replayed at 1× into the production engine with live text:**
-the stream qualified and every clip finished from it in 34–40 ms after the
-release tail (163 ms for the first, cold), against 168–889 ms whole-clip for
-10.6–54.6 s. German (17.9 s and 54.6 s, `de`) and Auto matched the whole clip
-word for word; live text showed its first words 2.4–5.0 s into the audio,
-updated once per 1.12 s chunk, and never rewrote stable text. A 43.7 s English
-clip of five sentences joined by 0.5 s of digital silence lost 13 of 96 words
-against the whole clip, which itself lost a sentence; Parakeet v3 lost more of
-the same clip, so treat long joined FLEURS clips as a weak test, not a
-streaming defect. A clip alternating English and German sentences with Auto
-kept each sentence in its language (1 word different from the whole clip),
-though both paths dropped one English sentence after a gap. Not a microphone, the HUD, macOS, or Windows.
-
-**Live text observed October 28, 2026, Apple M3 Pro, Metal, Unified English Q8,
-`Hex Test.app` at `84f594a` with `live-text`, a physical microphone:** the line
-appeared under the HUD and grew with the words; three dictations in a row
-reappeared with no trace of the previous text; a dictation released before its
-first words never showed the line and one released just after hid it; with the
-HUD at the Bottom the line sat above it, and with the HUD hidden it took the
-HUD's place at the top. Not observed: a second display, Dot scope placements,
-Linux, Windows.
-
-**Known defect, observed October 28, 2026 (same Mac and model):** the stream
-can drop the first words spoken after a pause, and the paste carries the loss
-because a stream with text is never retranscribed. In real dictation the
-words that resumed after 6 s and 13 s pauses were lost or garbled. Replaying
-`say` speech around 3, 8, and 13 s gaps (digital silence and a −50 dBFS noise
-floor) through `metal_stream_tracks_offline_transcription` lost "I" after the
-8 s gap of digital silence only, and the whole clip kept it: the loss depends
-on where speech resumes against the stream's chunks. Live text does not cause
-it: `HEX_STREAM_LIVE_TEXT=0` gives the same text. The losses replayed here sit
-in the middle of transcribed text, so neither coverage check below sees them;
-a loss of at least 300 ms at the stream's very start is checked since
-November 7, 2026 (`a_stream_that_lost_the_opening_phrase_falls_back_to_the_whole_clip`).
-
-**Mitigation, October 29, 2026 (#338's diagnosis, by ElliottH):** the engine's
-`PauseCap` now feeds a dictation stream only the first 2.5 s and last 0.3 s of
-each pause (20 ms frames the meeting pause detector calls not speech); the
-clip and its offline fallback keep every sample, and "finished live stream"
-logs `pauses_dropped_ms`. `/streams` is unchanged. Check:
-`a_dictation_stream_hears_only_the_ends_of_long_pauses` (synthetic audio, a
-fake stream). Not re-measured on a real model here; ElliottH's Metal replays
-went from 18/36 to 0/36 lost words for 6–14 s gaps of silence or steady noise.
-Limit: noise that rises mid-dictation counts as speech for up to about 10 s,
-so that pause is not cut.
-
-**Fixed October 30, 2026 (issue 458):** over steady background noise, speech
-only about 8 dB louder than the room missed the meeting detector's 12 dB
-speech margin, so the whole dictation counted as one pause and the stream
-heard only its first 2.5 s ("This in a test on the" for a 17 s clip over
-−35 dBFS noise). `PauseCap` now cuts only frames within 4 dB of the noise
-floor (or under −70 dBFS since #841) (`FrameLevel::quiet`); anything louder is
-kept. Noisier rooms keep more pause audio rather than lose speech. Check:
-`quiet_speech_over_steady_noise_is_never_cut_as_a_pause` (synthetic noise
-bursts, a fake stream; no real-model or microphone run).
-
-**Fixed November 1, 2026 (issue 841):** a quiet built-in microphone (Linux,
-Wayland) carried whole dictations under −55 dBFS, so every frame counted as
-quiet and the stream again kept only the first 2.5 s, which pasted as a
-success. The absolute quiet bound is now −70 dBFS, and a stream whose cap
-heard no frame above the noise floor yet cut audio as a pause is unusable:
-the whole clip is transcribed offline (`source=fallback`). Checks:
-`quiet_speech_over_steady_noise_is_never_cut_as_a_pause` (now also −62 dBFS
-speech over −72 dBFS noise) and
+**Pause cap:** `PauseCap` feeds a dictation session only the first 2.5 s and
+last 0.3 s of each pause, because a session is billed for every second it
+hears, silence included; the clip and its whole-clip request keep every
+sample, and "finished live stream" logs `pauses_dropped_ms`. `/streams` is not
+capped. Only 20 ms frames within 4 dB of the noise floor, or under −70 dBFS,
+count as pause (`FrameLevel::quiet` in
+[transcription/pause_segmenter.rs](../../src/transcription/pause_segmenter.rs)),
+measured with each frame's mean removed, so speech a few dB over steady room
+noise (#458), a quiet built-in microphone (#841), and a microphone with a DC
+offset are kept. A session whose cap heard no frame above the noise floor yet
+cut audio as a pause is unusable, and the whole clip is transcribed
+(`source=fallback`). Limit: noise that rises mid-dictation counts as speech for
+up to about 10 s, so that pause is not cut. Checks:
+`a_dictation_stream_hears_only_the_ends_of_long_pauses`,
+`quiet_speech_over_steady_noise_is_never_cut_as_a_pause` (−28 dBFS speech over
+−35 dBFS noise, −62 over −72, and −50 over −58 on a −26 dBFS DC offset), and
 `a_stream_that_heard_only_quiet_audio_falls_back_to_the_whole_clip`
-(synthetic noise, a fake stream; no microphone run).
+in transcription/engine.rs (synthetic audio, a fake stream; no microphone or
+session run).
 
-**Fixed November 1, 2026 (issue 841, follow-up):** on 3.1.2 the same
-microphone (a Ryzen built-in digital microphone) still kept exactly 2.5 s in
-the stream and relied on the fallback. Its level was measured with the DC
-offset included, which the dictation silence gate already removes; a steady
-offset louder than the speech pins every frame to the noise floor.
-`SpeechFrames` now removes each 20 ms frame's mean before measuring, for the
-pause cap and the meeting pause detector alike. Check:
-`quiet_speech_over_steady_noise_is_never_cut_as_a_pause` (now also −50 dBFS
-speech over −58 dBFS noise on a −26 dBFS DC offset; synthetic, a fake
-stream). The DC offset is inferred from the reporter's logs (clips that pass
-the −50 dBFS silence gate yet read as quiet), not measured on the device.
+**Live text from a session (read from the code, not observed):** every word
+shown while recording comes from a `partial_transcript` and is tentative,
+because Hex asks for manual commits and commits only at the finish. The plate
+cuts tentative text at its end once the line is full (`truncate` on the
+tentative words in [rune_ui/live_text.rs](../../src/rune_ui/live_text.rs)), so
+on a long dictation the newest words can be the hidden ones.
 
-**Fixed November 3, 2026 (issue 1101):** a short last phrase after a pause of
-about 1 s could be missing from the paste while the clip held it: the stream
-finalized without it, and a stream with text was never retranscribed.
-`PauseCap` now records where each speech frame (the meeting detector's 12 dB
-margin) the stream heard ends, and after finalizing compares that with the
-end of the stream's last token. At least 300 ms of speech more than 400 ms
-past the text makes the stream unusable, so the whole clip is transcribed
-offline (`source=fallback`, reason "the stream's text ends at … ms but … ms
-of speech follows"). A key click or stop tone in the 200 ms tail is shorter
-than that. Checks:
-`a_stream_that_dropped_a_phrase_after_a_pause_falls_back_to_the_whole_clip`
-and `a_short_sound_after_the_text_does_not_discard_the_stream` (synthetic
-tones, a fake stream). **Observed November 3, 2026, apollo (Radeon 8060S,
-Vulkan), Unified English Q8, an ad hoc probe through `PauseCap` and the real
-stream:** a FLEURS clip cut to speech, 1 s of digital silence, and a 1.2 s
-phrase from the same speaker lost the phrase in the stream (with or without
-the macOS 400 ms trailing silence) while the whole clip kept it ("…channels
-25 to 30 years"); the check flagged it. Seven ordinary clips (JFK, FLEURS,
-product names, 1.7–15 s) finished from the stream; an 84 s speech ending in
-applause fell back. The stream's own loss is not fixed upstream.
-
-**Nemotron 3.5 ASR, observed November 3, 2026, apollo (Vulkan, Q8, Auto):**
-ten clips through `PauseCap` and the real cache-aware stream (JFK, FLEURS
-English and German, product names, and speech, a 1–1.2 s pause, and a short
-phrase from the same or another speaker) matched the whole clip word for word
-(one clip differed on a single product name), and none lost the late phrase,
-so the drop did not reproduce with this model. Its tokens carry real
-timings, but it puts the closing full stop on the clip's last frame, which
-would have hidden a dropped phrase; the text's end is now the last token with
-letters or digits (`spoken_text_end_ms`), and no clip fell back. Check:
-`a_closing_full_stop_at_the_clips_end_does_not_cover_a_dropped_phrase`. Not
-macOS or a microphone.
-
-**Guard, November 7, 2026 (opening and language):** the coverage check now
-also runs at the start. `PauseCap` takes the first token with letters or
-digits (`spoken_text_start_ms`, the minimum `t0_ms`) and counts the speech
-frames the stream heard that end more than 400 ms before it; at least 300 ms
-of such speech means the stream lost its opening, so the whole clip is
-transcribed offline (`source=fallback`, reason "the stream's text starts at …
-ms but … ms of speech precedes it"). A short click before the speech is
-shorter than that. Hesitation fillers, coughs, or clicks that together reach
-300 ms before the first word would trip it too, and that false-positive rate
-is unmeasured; a false positive costs only the whole clip's latency, since its
-text is the fallback's. This check cannot see an opening that was garbled
-rather than dropped: a garbled opening still yields word tokens at the speech
-onset. The stream's unfiltered raw decode also keeps Nemotron 3.5's `<ll-RR>`
-language tags, which the public text drops; two distinct tags in one stream
-mean it changed language mid-clip, and the whole clip decides too
-(`language_tags`). That catches a garbled opening only when the garbled part
-carries a different tag, and neither check catches a stream that stays in one
-wrong language for the whole clip. Checks:
-`a_stream_that_lost_the_opening_phrase_falls_back_to_the_whole_clip`,
-`a_short_click_before_the_text_does_not_discard_the_stream`,
-`a_punctuation_token_does_not_start_the_streams_text`, and
-`a_stream_that_switched_language_falls_back_to_the_whole_clip` (synthetic
-tones and tags, a fake stream). Not measured on a real model, microphone, or
-device; the stream's own loss is not fixed upstream.
+**Live text plate, observed upstream October 28, 2026 (Apple M3 Pro, a physical
+microphone, `Hex Test.app` at `84f594a` with `live-text`):** the line appeared
+under the HUD and grew with the words; three dictations in a row reappeared
+with no trace of the previous text; a dictation released before its first
+words never showed the line and one released just after hid it; with the HUD
+at the Bottom the line sat above it, and with the HUD hidden it took the HUD's
+place at the top. The plate's code is unchanged in this fork; what a Scribe
+session feeds it has not been observed. Not observed: a second display, Dot
+scope placements, Linux, Windows.
 
 ### Ongoing Jobs And Output
 
-```ts
-Completed long recording                  // dictate.model-windows
-├── Cohere -> Runs of at most 35 seconds, including the final remainder
-└── Other GGUF models -> Existing backend-advertised input limit
-    -> Transcribe each chunk -> Join text in original order
-
-Chunking bounds inference, not capture duration. No silence is removed.
-```
-
-The shared `max_audio_chunk_samples` policy in
-[transcription/models.rs](../../src/transcription/models.rs) is used by
-[parakeet.rs](../../src/parakeet.rs) and
-[transcription/local_transcriber.rs](../../src/transcription/local_transcriber.rs). Cohere's pinned backend
-reports a 400-second encoder capacity, while its reference processor uses a
-35-second transcription window. Treating the encoder capacity as a useful
-inference window caused [#73](https://github.com/anomalyco/hex/issues/73)'s lost
-passages. A stricter backend bound still wins; other model policies are unchanged.
-
-`cohere_chunks_at_reference_window_not_encoder_capacity` checks the policy.
-The opt-in `cohere_long_form_keeps_all_sections_with_and_without_pauses` runs the
-real pinned model on synthetic speech. Reproduce it on macOS with
-[`scripts/test-cohere-long-form.sh`](../../scripts/test-cohere-long-form.sh) and an
-explicit model path. The script uses Samantha speech synthesis, never microphone
-capture, and retains fixtures on failure (`HEX_KEEP_COHERE_FIXTURES=1` keeps successes).
-
-**Observed September 4, 2026:** the same 57-second fixture went from 44 word errors
-to zero after chunking; the 73-second paused fixture went from 71 errors to one.
-Short references transcribed correctly before and after. The retained native
-regression also passed a roughly 235-second repeated fixture, retaining all three
-sections in each repetition. This is Metal inference evidence on an M2 Max, not
-physical capture/paste or Linux runtime proof. Chunk boundaries can still affect
-individual words; this is not a claim of perfect recognition or silence handling.
-
-`pad_gguf_samples` in [transcription.rs](../../src/transcription.rs) owns backend
-input padding on every OS for ordinary transcription: the minimum duration,
-then Unified English's additional trailing silence. The macOS `Transcriber` and
-the Linux and Windows `LocalTranscriber::transcribe_clip` both call it; a
-non-macOS whole-clip run calls it after its pause cut.
-`short_unified_input_is_minimum_padded_before_trailing_context` in
-[transcription.rs](../../src/transcription.rs) checks minimum-duration padding
-followed by Unified English's additional trailing silence. This is a pure
-sample policy check, not native inference-quality proof.
-
-**Fixed October 31, 2026 (issue 657):** with Unified English on macOS,
-dictated sentences and questions pasted without their closing full stop or
-question mark. Streamed dictations (the Metal path) finalized with no
-trailing silence at all, and whole clips got only 200 ms. Both now get
-400 ms of silence after the clip (`UNIFIED_ENGLISH_TRAILING_SILENCE_SAMPLES`;
-the stream hears it through `PauseCap` just before finalizing). Check:
-`a_dictation_stream_hears_trailing_silence_before_it_finalizes` in
-transcription/engine.rs (a fake stream). Not measured on the real model or a
-microphone; at the time, Linux and Windows streams were unchanged. Padding is
-now included in `inference_ms`; `prepare_ms` covers clip conversion and
-diagnostic retention.
-
-**Fixed November 10, 2026 (issue 1629):** Windows and Linux had been gated out
-of that fix. They now get the same 400 ms for Unified English on stream finish
-(`LocalTranscriber::stream_trailing_silence` through `PauseCap`) and on the
-whole clip. A whole-clip run cuts long pauses first, then pads, so a trailing
-pause cannot trim the silence. Check:
-`a_whole_clip_is_padded_after_cutting_its_trailing_pause` in
-transcription/engine.rs. Not measured on a real Windows or Linux model or
-microphone.
+A completed recording of any length is one batch request
+([what is sent where](transcription.md#what-is-sent-where)): nothing is cut into
+windows, and no silence is removed unless Labs › Skip long pauses is on
+([Skip Long Pauses](#skip-long-pauses-labs-linux-and-windows)). Once the engine
+starts a job it may run for 90 s plus 3 s per second of audio (`JOB_DEADLINE`,
+`JOB_SECONDS_PER_AUDIO_SECOND`: a request and its one retry, each uploading at
+real time); time queued behind other work is not counted. Past that the job
+fails with "transcription timed out" and cancels only itself, and jobs queued
+behind a run that never ends fail with "transcription engine is stuck" until
+the engine starts another. Checks in transcription/engine.rs (recorded
+commands and a stand-in for the request, no network):
+`a_started_job_that_never_ends_fails_instead_of_hanging`,
+`the_job_clock_does_not_count_time_queued_behind_other_work`,
+`a_timed_out_job_cancels_only_itself_not_the_next_capture`,
+`jobs_queued_behind_a_wedged_run_fail_instead_of_waiting_forever`,
+`the_job_deadline_grows_with_the_clip`,
+`a_wedged_run_times_out_its_job_and_later_jobs_still_finish`, and
+`a_timeout_aborts_the_offline_run_through_its_job_token`.
 
 ```ts
-Listening idle                            // dictate.model-memory
-├── Keep the selected model weights warm // avoids loading on each dictation
-└── Completed offline inference
-    -> Release input-sized GGML/Metal compute scratch
-    -> Keep only reusable model/session state
+Engine thread (macOS)                    // dictate.inference-threads
+└── User-interactive QoS, set once as the dictation worker starts
 ```
 
-The selected GGUF remains resident by design; Parakeet v3's pinned Q8 artifact is
-739,508,576 bytes before runtime metadata and decoder state. Input-sized scheduler
-scratch must not remain at its high-water mark after a dictation. The pinned
-`transcribe-cpp` 0.1.3 runtime owns that scratch for the session lifetime, so Hex
-rotates the lightweight session after every offline run while retaining the loaded
-model. A later dictation recreates its session without reloading the weights.
-
-**Observed September 18, 2026, isolated Metal probe on M2 Max:** with the similarly
-sized Parakeet Unified English model, `transcribe-cpp` 0.1.3 grew from a 792 MB loaded
-footprint to 1,195 MB after a 45-second input and retained 1,195 MB after another
-short run. The same 0.1.3 runtime with Hex's session rotation measured 792 MB loaded,
-801 MB after the long input, and 802 MB after the following short run. The probe used
-generated silence and no live microphone, UI, or paste. This
-establishes the backend scratch cause and reclamation on that model and machine, not
-Parakeet v3's exact whole-app footprint on the reporter's Mac. Activity Monitor can
-include additional app memory.
-
-```ts
-Accepted job on a GPU device             // dictate.inference-threads
-├── Inference thread -> macOS user-interactive QoS
-└── GGUF session -> One CPU decoder thread, no ggml worker pool
-    // CPU-only devices keep the backend's default thread count
-```
-
-Source: `session_options` in [transcription/gguf_session.rs](../../src/transcription/gguf_session.rs) and
-`prioritize_inference_thread` in [parakeet.rs](../../src/parakeet.rs); check
-`gpu_sessions_bound_decoder_threads_and_cpu_sessions_keep_library_default`.
-Parakeet's per-token TDT decoder runs on CPU even with Metal encoding. ggml's
-default pool (up to 8 spin-waiting threads) is created with plain `pthread_create`,
-so its workers start at default QoS rather than inheriting the inference thread's.
-
-**Observed October 14, 2026, standalone `transcribe-cpp` 0.2.4 bench on a Mac
-Studio (18 cores) already busy with other work, Unified English Q8, Metal:** under
-36 extra `yes` processes, user-interactive QoS medians for 3/30/90-second clips were
-170/703/1,819 ms with one thread, 136/1,907/4,940 ms with two, and 178/4,304/13,519 ms
-with four. Without the extra load, one thread measured 83/364/1,631 ms and two
-64/705/2,889 ms. This is backend timing, not physical capture/paste on the
-reporter's MacBook Pro, and not Linux runtime proof.
+Source: `prioritize_inference_thread` in
+[macos_dictation.rs](../../src/macos_dictation.rs), run on the engine thread by
+`DictationWorker::start`. No automated check; macOS is not compiled in this
+fork.
 
 ```ts
 Finish
-  ├── Near-silent capture -> Discard, no inference    // dictate.silence-gate
+  ├── Near-silent capture -> Discard, nothing sent    // dictate.silence-gate
   │       // loudest 30 ms window (DC removed) below -50 dBFS; no paste,
   │       // History, or last-result update; process.log records the level
-  ├── Louder capture, no detected speech -> Discard, no inference
-  │       // the Silero speech detector, once installed, finds no speech of
-  │       // at least 160 ms before the release; process.log records
-  │       // audio_ms and vad_ms (at debug level when speech passes)
-  ├── Capacity available -> Accepted job -> Local transcription -> Mode processing
+  ├── Capacity available -> Accepted job -> Transcription (ElevenLabs Scribe)
+  │    -> Mode processing
   │    -> Paste successful nonempty output once, at current focus
   │       // Labs › Return to app (macOS): when the app in front now isn't the
   │       // one the capture started in, Hex activates that one and waits up to
@@ -1598,42 +1366,30 @@ A pending -> Start capture B                          // dictate.overlap
   -> Completing/pasting A must not end B
 ```
 
-Source: `finish_dictation` in [recognition.rs](../../src/recognition.rs).
-The silence gate stops models from hallucinating closing phrases such as "thank
-you" on an empty hold ([#108](https://github.com/anomalyco/hex/issues/108)). It
-covers hotkey and voice-delimited captures on macOS, and the Linux
-hotkey loop. The local API's programmatic dictation and host-audio transcription
-are deliberately left ungated: they skip both silence checks, and only output
-that repeats the vocabulary prompt (Whisper, Qwen3-ASR) is dropped there.
-The threshold is conservative, so speech is not dropped; a noisy room, the start
-tone, or a key click can lift a capture above it. Those captures then go to the
-Silero speech detector ([transcription/speech_detector.rs](../../src/transcription/speech_detector.rs)),
-which discards them when it finds no speech. The detector (1.2 MB, pinned
-revision and checksum in [transcription/models.rs](../../src/transcription/models.rs))
-downloads in the background whenever a transcription model is downloaded or
-activated, and at the first dictation, so an installed model still activates at
-once offline; a failed download is retried at the next dictation. Model
-preparation (macOS, Windows) and the Linux listener load it when present and
-never download it. It runs on the CPU with a speech threshold of 0.4 instead of
-Silero's 0.5, which misses a whisper at -43 dBFS. While it is missing or fails to
-load, captures above the threshold still reach the model, as before.
-Output that only repeats the vocabulary prompt (Whisper, Qwen3-ASR) is dropped as well
-([models](README.md#get-ready)). Other hallucinations after real
-speech are not addressed.
-`silence_gate_discards_only_near_silent_captures` and
-`speech_detector_discards_loud_captures_without_speech` in
-[dictation.rs](../../src/dictation.rs) check the policy on synthetic samples
-with the detector's verdict fixed; `real_detector_rejects_silence_and_noise`,
-`real_detector_hears_speech`, and `real_detector_hears_quiet_whispers` (ignored;
-`HEX_VAD_MODEL`, `HEX_VAD_SPEECH_WAV`, `HEX_VAD_WHISPER_WAV`) run the real
-detector, and `an_installed_model_does_not_wait_for_the_speech_detector` checks
-the background download.
+Source: `finish_dictation` in
+[recognition/output.rs](../../src/recognition/output.rs) (macOS) and
+`submit_capture` in [linux/dictation.rs](../../src/linux/dictation.rs) and
+[windows/dictation.rs](../../src/windows/dictation.rs).
+The silence gate (`is_near_silent` in [dictation.rs](../../src/dictation.rs))
+keeps an empty hold from being sent for transcription: a speech model can
+answer silence with a closing phrase such as "thank you"
+([#108](https://github.com/anomalyco/hex/issues/108)), and a request is billed
+for silence too. It covers hotkey and voice-delimited captures on macOS, and
+the Linux and Windows hotkey loops. The local API's programmatic dictation and
+host-audio transcription are deliberately left ungated. The threshold is
+conservative, so speech is not dropped; a noisy room, the start tone, or a key
+click can lift a capture above it, and that capture is sent. Level is the only
+gate: nothing on this computer judges whether a capture holds speech, and what
+Scribe returns for a loud capture without speech has not been observed.
+`silence_gate_discards_only_near_silent_captures` in
+[dictation.rs](../../src/dictation.rs) checks the policy on synthetic samples.
 Key resolution: [keyboard.rs](../../src/keyboard.rs); non-Latin layout
 fallback details live in [shortcut recovery](recovery.md#keyboard-layout-resolution).
-Checks in [parakeet.rs](../../src/parakeet.rs):
+Checks in [macos_dictation.rs](../../src/macos_dictation.rs):
 `parallel_processing_results_are_released_in_submission_order`,
 `ordered_waiting_outputs_remain_bounded_after_channel_drain`.
-These cover output bookkeeping/admission, not sustained end-to-end inference/paste.
+These cover output bookkeeping/admission, not sustained end-to-end
+transcription/paste, and macOS is not compiled in this fork.
 `transcript_write_is_marked_for_clipboard_managers` in [paste.rs](../../src/paste.rs)
 checks the markers on a private pasteboard; whether a given clipboard manager
 (Maccy, Raycast) honors them is not verified here. The restored previous clipboard
@@ -1720,7 +1476,8 @@ every app for as long as Hex runs, so Wayland binds nothing for it. Checks:
 `cancel_is_wanted_only_while_a_toggled_capture_records` in
 [windows/input.rs](../../src/windows/input.rs),
 `the_cancel_shortcut_shows_in_toggle_and_restores_escape` and the
-`toggle-cancel` goldens in [tests/panes.rs](../../src/rune_ui/tests/panes.rs),
+`toggle-cancel` goldens in
+[src/rune_ui/tests/panes.rs](../../src/rune_ui/tests/panes.rs),
 and `cancel_parses_and_takes_no_flags` in [control.rs](../../src/control.rs).
 The X11 grab and the hooks' suppression have no automated end-to-end check.
 
@@ -1744,6 +1501,10 @@ Record -> Release -> Transcribing/processing/paste -> Finished // dictate.feedba
      -> Settings listener card: "Last dictation failed: …"   // macOS, Windows
         -> clears once a later dictation completes
         -> a known microphone cause explains itself; other failures keep their wording
+        -> a failed transcription names its cause (no key, refused key, quota,
+           rate limit, ElevenLabs unreachable or failing) and, when the clip
+           was kept, its file and `hex model transcribe <file>`
+           // transcription.md#retry-and-failures, #kept-failed-clips
      -> Labs › Failure notices: why beside the HUD for ~6 s  // dictate.failure-notice, off by default
         -> a new capture dismisses it; no old failure is replayed at launch
      -> Classic has none: macOS Basso, Signature's error on Windows and Linux
@@ -1841,7 +1602,7 @@ Settings > Sounds (next to Sound volume)                    // dictate.sound-set
 ```
 
 The sheet is a modal like the shortcut explainer, opened from a
-`sheet_button` because its choices need room to be heard, not a menu. Checks:
+`value_button` because its choices need room to be heard, not a menu. Checks:
 `auditions_play_each_sound_at_its_moment`,
 `stopping_an_audition_fades_all_of_it`,
 `each_moment_shows_from_its_sound_to_the_next`,
@@ -2015,9 +1776,11 @@ on hardware; only the macOS compile is checked.
 At the top position the HUD sits 6 pt below the menu bar (`rune_hud::hud_placement::TOP_OFFSET`), or below the
 notch (`NSScreen.safeAreaInsets`) where a fullscreen Space hides the menu bar
 and `visibleFrame` reaches the top of a notched screen. Screens without a notch
-and normal Spaces keep their position. Check: `scripts/check
-dictation::indicator::tests::top_capsule` covers the math only; placement over a
-fullscreen app on a notched Mac is not yet observed.
+and normal Spaces keep their position. Checks:
+`below_hangs_6_points_under_the_menu_bar_or_above_the_dock` and
+`below_clears_the_notch_when_fullscreen_hides_the_menu_bar` in
+[rune_hud/hud_placement.rs](../../src/rune_hud/hud_placement.rs) cover the math
+only; placement over a fullscreen app on a notched Mac is not yet observed.
 
 ### Dot scope
 
@@ -2209,19 +1972,10 @@ over fullscreen TextEdit, captured through Cua Driver. This was a debug preview
 with no microphone capture, not a signed installed-app or multi-display test.
 Kit independently confirmed the repeating candidate was visible in fullscreen.
 
-**Combined verification September 14, 2026:** 468 Rust tests passed with ten
-native/opt-in checks ignored, plus all twelve keyboard-layout child scenarios
-in debug and release. Strict all-target/all-feature Clippy, 46 command-SDK tests,
-and the command-SDK build passed. The native preview also built successfully.
-These checks preceded the app release.
-
-**2.1.18 candidate verification September 14, 2026:** the optimized suite passed
-all 468 Rust tests and twelve keyboard-layout child scenarios; ten opt-in checks
-were skipped. Strict release all-target/all-feature Clippy and app-identity
-fixtures passed. The signed, notarized bundle's isolated HUD preview was visibly
-present over native fullscreen TextEdit. This exercises the packaged renderer,
-not microphone capture or an installed-app update. The preview and disposable
-TextEdit process were stopped afterward.
+**Upstream 2.1.18 candidate, September 14, 2026:** the signed, notarized
+bundle's isolated HUD preview was visibly present over native fullscreen
+TextEdit. This exercised upstream's packaged renderer, not microphone capture
+or an installed-app update, and nothing built from this fork.
 
 ## Gaps And Constraints
 
@@ -2235,13 +1989,15 @@ TextEdit process were stopped afterward.
 - **Microphone modes:** verify onset and idle closure separately for Keep ready
   and Release when idle on an identified device. The macOS microphone indicator
   while Keep ready is idle is expected, not proof of recording.
-- **Streaming:** `dictate.streaming` has benchmark, synthetic, and Linux CI
-  (CPU-forced) evidence only. Real microphones, room noise, Bluetooth inputs,
-  and a physical shortcut on a Mac or a Linux GPU have not been observed with a
-  live stream.
+- **Streaming:** `dictate.streaming` has synthetic evidence only: engine tests
+  with fake streams and recorded commands, and session and batch-request tests
+  against a fake server on loopback. No request was ever made to ElevenLabs, so
+  a live session, either path's latency, real microphones, room noise,
+  Bluetooth inputs, and a physical shortcut have not been observed
+  ([transcription.md](transcription.md#not-verified)).
 - **Paste consumption:** current paste policy waits a fixed interval rather than
   acknowledging target consumption. Internal ordering does not establish
   correctness for an arbitrarily slow target application.
-- **Native checks require deliberate setup:** permissions, model, keyboard,
+- **Native checks require deliberate setup:** permissions, API key, keyboard,
   microphone, output device, and a disposable text target must be recorded. This
   map does not authorize operating the installed app or injecting global input.

@@ -1,65 +1,89 @@
 # Nix
 
-The flake packages Hex for Linux only, `x86_64-linux` and `aarch64-linux`;
-there is no macOS package. Both targets build from source; `aarch64-linux`
-evaluates but has not been built or run on real ARM64 hardware yet. It
-supports the Linux X11 beta and native Wayland on compatible wlroots
-compositors. Wayland requires layer-shell for the recording overlay, the
-clipboard protocol used by `wl-copy`, and the virtual-keyboard protocol
-used by `wtype`. Global shortcuts come from the desktop's GlobalShortcuts
-portal, or from your own compositor keybindings running the `hex` commands.
-This is not a claim of support for every Wayland desktop; GNOME and KDE are
-not covered by this contract.
+The flake packages this fork of Hex for Linux only, `x86_64-linux` and
+`aarch64-linux`; there is no macOS package. Both targets build from source.
+This fork transcribes only through the ElevenLabs Scribe cloud API: Hex needs
+a network connection and an ElevenLabs API key (see [API Key](#api-key)), and
+audio is sent to ElevenLabs on every transcription. What each desktop needs
+for shortcuts, paste, and the recording overlay is in the
+[Linux guide](linux.md).
+
+Not verified: since this fork changed the Nix files, the package has not been
+rebuilt, `nix flake check` has not been run, and neither module has been used
+on a system.
 
 ## Run Or Install
 
-On macOS, install the [DMG or Homebrew cask](../README.md#downloads) instead;
-the flake has no `aarch64-darwin` package.
-
-From a checkout, with Nix flakes enabled:
+Use the flake from a checkout of this fork. With Nix flakes enabled:
 
 ```sh
 nix build
-nix run . -- model install
+nix run . -- key set    # paste your ElevenLabs API key
 nix run . -- app
 ```
 
-Or add `hex.url = "github:anomalyco/hex"` to your configuration's flake inputs
-and install `hex.packages.${system}.default` (`x86_64-linux` or
-`aarch64-linux`). The package supplies the
-`hex` command and desktop launcher, native libraries (including PipeWire and
-libva for Annotate), and the `curl`, `wl-copy`, `wtype`, and `ffmpeg`/`ffprobe`
-runtime dependencies. Annotate's hardware encoder uses whatever VA-API driver
-your system provides (NixOS: `hardware.graphics`, through `/run/opengl-driver`);
-without one it falls back to ffmpeg's libx264. Your system still needs a
-working audio session and a Vulkan driver for Settings, even when inference
-falls back to the CPU. On non-NixOS hosts, Nix GUI
-applications may require the host's usual Nix graphics integration.
+Nix builds only the files Git tracks in the checkout, so `git add` new files
+before building.
 
-On NixOS, Hex built from its own pinned nixpkgs can use an older glibc than
-your system's graphics drivers need. Hex then finds no suitable Vulkan
-adapter and its window does not open. Make Hex's nixpkgs follow your
-system's, so both use the same glibc:
+Or point a flake input of your configuration at the checkout and install
+`hex.packages.${system}.default` (`x86_64-linux` or `aarch64-linux`):
 
 ```nix
 {
   inputs.hex = {
-    url = "github:anomalyco/hex";
+    url = "git+file:///path/to/hex";
     # Use the name of your own nixpkgs input here.
     inputs.nixpkgs.follows = "nixpkgs";
   };
 }
 ```
 
-Models are downloaded into your user data directory, not the Nix store.
-Run `hex model install` once, then launch Hex as your normal desktop user.
-Do not run Hex as root.
+The package supplies the `hex` command and desktop launcher, native libraries
+(including PipeWire and libva for Annotate), and the `curl`, `wl-copy`,
+`wtype`, and `ffmpeg`/`ffprobe` runtime dependencies. Annotate's hardware
+encoder uses whatever VA-API driver your system provides (NixOS:
+`hardware.graphics`, through `/run/opengl-driver`); without one it falls back
+to ffmpeg's libx264. Your system still needs a working audio session, a
+network connection, and a Vulkan driver for the window. On non-NixOS hosts,
+Nix GUI applications may require the host's usual Nix graphics integration.
 
-The Nix store is not Hex's user-local managed installation layout. In-app
-updates do not replace a Nix installation. Update the flake input and
-rebuild or switch your Nix/Home Manager configuration instead. Remove any
-old source-install XDG autostart entry before enabling a second autostart
-mechanism; do not run two Hex listeners.
+The `follows` line matters on NixOS. Hex built from its own pinned nixpkgs can
+use an older glibc than your system's graphics drivers need; Hex then finds no
+suitable Vulkan adapter and its window does not open. Following your system's
+nixpkgs makes both use the same glibc.
+
+Launch Hex as your normal desktop user. Do not run Hex as root.
+
+Hex has no updater in this fork: it never checks for, downloads, or installs
+an update. Pull the checkout, update the flake input, and rebuild or switch
+your Nix/Home Manager configuration instead. Remove any old source-install XDG
+autostart entry before enabling a second autostart mechanism; do not run two
+Hex listeners.
+
+## API Key
+
+Hex needs an ElevenLabs API key. Without one the listener shows "API key
+required" and does not start; it starts by itself once a key is set.
+
+Neither module has an option for the key, and a key written into a Nix
+configuration would end up in the world-readable Nix store. Save it as your
+desktop user instead:
+
+```sh
+hex key set       # paste the key at the prompt, or: hex key set < key.txt
+hex key check     # ask ElevenLabs whether it accepts the key; sends no audio
+```
+
+`hex key set` writes the owner-only file `elevenlabs.key` in Hex's data folder
+(`~/.local/share/hex` by default), which Hex reads for each request. Settings
+› General › Transcription saves the same file.
+
+Hex also reads the key from the environment variable `ELEVENLABS_API_KEY`,
+but the systemd user unit does not inherit your shell's environment: a
+variable exported in a shell reaches the `hex` commands run in that shell
+(`hex model transcribe`, `hex key check`), not the background service. The
+same holds for `HEX_ELEVENLABS_URL`, which replaces ElevenLabs' base URL. Use
+the saved key file; the [Linux guide](linux.md#api-key) has the details.
 
 ## NixOS
 
@@ -137,13 +161,12 @@ journalctl --user -u hex.service
   programs.hex = {
     enable = true;
     shortcut = "control+option+space"; # dictation_hotkey
-    model = "parakeet_v3";
-    language = "de";
-    installModel = true;
+    language = "de";                   # transcription.language
     settings = {
       shortcut_mode = "toggle";
       sound_effect_volume = 0.4;
       paste_with_shift = true;
+      "scribe.numbers_format" = "digits";
       "meetings.enabled" = true;
     };
   };
@@ -153,8 +176,10 @@ journalctl --user -u hex.service
 `settings` takes the dotted keys `hex settings list` shows, with JSON values:
 booleans, numbers, text such as shortcuts and choices, `null` to clear an
 optional setting, and attribute sets or lists for its `json` settings. The
-`shortcut`, `model`, and `language` options are shorthands for
-`dictation_hotkey`, `transcription.model`, and `transcription.language`.
+`shortcut` and `language` options are shorthands for `dictation_hotkey` and
+`transcription.language` (an ISO 639 code, or `auto` to let Scribe detect the
+language). There is one model, `scribe_v3`, which runs at ElevenLabs, so the
+modules have no model option and nothing to download.
 
 Every activation merges them into Hex with `hex settings apply`, after
 systemd units reload. Declared keys overwrite Hex's values; anything you
@@ -164,12 +189,6 @@ older values back from memory; with Hex stopped they go straight into
 `settings.json`. `settings.json` stays an ordinary writable file. An unknown
 key or invalid value applies nothing and prints a warning, without failing
 the switch.
-
-Declaring a model only selects it; activation never downloads. With
-`installModel = true`, the `hex-model` user service runs `hex model install`
-for the selected model at login, once the system's `network-online.target`
-is reached (or after two minutes), and retries a failed download. A switch
-does not wait for it.
 
 ## Wayland Shortcuts
 
@@ -187,7 +206,9 @@ bindsym --release F9 exec hex dictation stop
 
 `hex dictation toggle` and `hex paste-last`
 are also available; see the
-[Linux guide](linux.md#shortcuts). The paste helper is `wtype`; no privileged
+[Linux guide](linux.md#shortcuts). The package ships `wl-copy` and `wtype` for
+paste; where the compositor lacks the virtual keyboard protocol (KDE, GNOME),
+Hex pastes through the desktop's RemoteDesktop portal instead. No privileged
 input-injection fallback is installed.
 
 ## Development
@@ -200,16 +221,18 @@ cargo run --locked -- app
 ```
 
 The package and shell share the native build environment and runtime
-library/plugin paths. OpenBLAS link ordering is handled by `build.rs`, not
-by Nix-only `RUSTFLAGS`. The shell also supplies the paste and download
-helpers, so it does not rely on the installed app's wrapper. Desktop commands
-still require a real graphical/audio session and the permissions described above.
+library/plugin paths. The shell also supplies `curl`, `wl-copy`, `wtype`, and
+`ffmpeg`, with rust-analyzer, rustfmt, and clippy, so it does not rely on the
+installed app's wrapper. Desktop commands still require a real graphical/audio
+session and the permissions described above.
 
-`nix flake check` evaluates the module and shell-environment regressions and
-builds the package with its normal display-free Rust tests. Tests explicitly
-marked ignored because they require a desktop or installed model remain
-ignored; the Nix build does not download models or exercise live input.
+`nix flake check` evaluates the module, shell-environment, and
+session-readiness regressions and builds the package with its normal
+display-free Rust tests. Tests explicitly marked ignored because they require
+a desktop remain ignored. The tests read no API key, so the build sends
+nothing to ElevenLabs, and it exercises no live input.
 
-The initial packaging design builds on [PR #29](https://github.com/anomalyco/hex/pull/29).
-Declarative settings follow
+The packaging comes from upstream Hex: the initial design builds on
+[PR #29](https://github.com/anomalyco/hex/pull/29), and declarative settings
+follow
 [@SymphonySimper's request in #588](https://github.com/anomalyco/hex/issues/588).

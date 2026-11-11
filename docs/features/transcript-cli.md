@@ -1,7 +1,7 @@
 # Read retained transcripts
 
 ```ts
-Agent or terminal                                // transcripts.cli; macOS release
+Agent or terminal                                // transcripts.cli; every OS
 ├── hex history -> Timestamp, app, recorded mode, final text
 │   ├── --since / --until / --app / --grep -> Filter, then limit
 │   ├── --search <query> -> Rank filtered entries with meetings' fuzzy BM25
@@ -55,15 +55,15 @@ and `chapters` / `show --chapter` JSON and Markdown on the synthetic
 (`meeting_chapters_list_and_select_a_chapter_in_json_and_markdown`). Existing history checks cover bounded
 storage, owner-only files, and expiry. Meeting query fixtures cover locks, partial
 NDJSON, interrupted drafts, and search parity with MCP. These fixture checks do
-not establish a signed installed-app invocation; native install evidence must be
-recorded separately.
+not establish an installed-app invocation.
 
 `scripts/test-transcript-cli.py <release-binary>` exercises the real command
 parser against copied fixtures while holding the listener lock. It checks that
 the commands create no logs or API discovery file and leave all input bytes and
 modification times unchanged, with experimental microphone mode requested.
 
-Observed October 22, 2026, on Pro before and after the Rune integration: all 35
+Observed upstream October 22, 2026, on Pro before and after the Rune
+integration, on code this fork did not change: all 35
 targeted history, meeting-query, and CLI tests passed; formatting and
 all-target/all-feature Clippy with `-D warnings` passed. The optimized release
 binary passed the occupied-lock/no-write smoke. Claude Opus 5.5 reviewed the

@@ -8,13 +8,15 @@ display with ScreenCaptureKit, on Linux the screen-cast portal and
 PipeWire (`capture.linux`), on Windows Windows.Graphics.Capture
 (`capture.windows`), (or a cabled iPhone through `scrawl-helper`'s
 mirror) and narration from Hex's microphone, takes ink and clicks (Shift on
-macOS and Windows, or the Annotate key held or the pen), transcribes the narration with word timestamps on
-Hex's loaded model, writes a Scrawl bundle into Scrawl's captures folder,
-copies it to the clipboard, and sends it to an OpenCode session with Scrawl's
-router (`crates/router`), run in Hex's process. Settings › Annotate (under
-Labs in the sidebar) holds its settings. Scrawl's capsule (switch
-chips, the on-screen picker, route chips) and its ink and laser overlay are
-Rune overlays.
+macOS and Windows, or the Annotate key held or the pen), sends the narration
+audio to ElevenLabs Scribe for its words and their timestamps
+([what is sent](transcription.md#what-is-sent-where),
+[cost and privacy](transcription.md#cost-and-privacy)), writes a Scrawl bundle
+into Scrawl's captures folder, copies it to the clipboard, and sends it to an
+OpenCode session with Scrawl's router (`crates/router`), run in Hex's process.
+Settings › Annotate (under Labs in the sidebar) holds its settings. Scrawl's
+capsule (switch chips, the on-screen picker, route chips) and its ink and
+laser overlay are Rune overlays.
 
 ```ts
 Turn it on                               // capture.gate
@@ -158,7 +160,8 @@ On Linux                                 // capture.linux
 ├── Narration -> the listener's microphone through ListenerTimeline (each
 │   stream anchored to the monotonic clock); released-while-idle microphones
 │   open for the capture
-├── Words -> one foreground job on the listener's engine (its loaded model)
+├── Words -> one foreground request on the listener's engine: the whole
+│   narration to ElevenLabs, in the listener's language (capture.stop)
 ├── Copy -> the summary text through Hex's Linux clipboard (wl-copy or the
 │   X11 clipboard), as the Mac copies it
 ├── Paste -> as the Mac: the contact sheet (image/png), then the summary,
@@ -209,7 +212,8 @@ On Windows                               // capture.windows
 │   the primary's scale applies everywhere)
 ├── Narration -> the listener's microphone through ListenerTimeline, fed by
 │   windows/dictation; released-while-idle microphones open for the capture
-├── Words -> one foreground job on the listener's engine (its loaded model)
+├── Words -> one foreground request on the listener's engine: the whole
+│   narration to ElevenLabs, in the listener's language (capture.stop)
 ├── Input -> windows/input's low-level hooks: the Annotate key (F9; tap to
 │   start and stop, hold to draw), Escape while drawing, and while a capture
 │   records every pointer move, click, wheel turn, and modifier change
@@ -227,7 +231,7 @@ On Windows                               // capture.windows
     a Windows machine
 
 Settings › Annotate                      // capture.pane
-├── Capture with Hex (capture.enabled, default off) -> off: no host, shortcut,
+├── Capture with Hex (capture.enabled, default on) -> off: no host, shortcut,
 │   input, retention, or folder
 │   └── On while the shortcut collides -> refused, the shortcut row says why
 ├── Shortcut (capture.hotkey, default ⌥⇧S, F9 on Linux and Windows) -> same keycap and recorder as dictation;
@@ -254,7 +258,11 @@ Settings › Annotate                      // capture.pane
 │       capture). Check: rune_ui::scrawl tests
 ├── Show in screen recordings (capture.show_overlays_in_recordings, default
 │   off) -> see capture.own-windows; applies at once, to open windows and a recording capture
-├── Transcriber (capture.transcriber) -> Parakeet (default) | Apple
+├── Transcriber (capture.transcriber; the row is macOS only) -> `scribe`
+│   (default: ElevenLabs Scribe, as dictation uses it; a saved `parakeet`
+│   from upstream Hex loads as `scribe`) | `apple` (Apple's
+│   SpeechAnalyzer through scrawl-helper, macOS: that capture's narration is
+│   not sent to ElevenLabs; on Linux and Windows `apple` is Scribe too)
 ├── Captures folder (capture.folder, default Scrawl's) -> Reveal | choose another
 ├── Keep (capture.media_days / bundle_days) -> Scrawl's presets, or imported days
 ├── Scrawl.app running -> "Scrawl is running" card + Use Hex for captures
@@ -264,7 +272,7 @@ Settings › Annotate                      // capture.pane
     doesn't run. A cabled iPhone needs no row (capture.phone)
 
 First launch with Annotate on            // capture.import
-├── ~/.config/scrawl/config.json -> transcriber (apple; else Parakeet), capturesDir,
+├── ~/.config/scrawl/config.json -> transcriber (`apple`; else the default), capturesDir,
 │   retention, read once (migration `scrawl-capture-settings`); token not used
 ├── Scrawl's router settings -> capture.routing, read once (migration
 │   `scrawl-routing-settings`): rules, autoSend, smartRouting and jevRouting;
@@ -634,8 +642,7 @@ The on-screen picker                     // capture.picker (capture_capsule/pick
 │   picking and never takes focus; it follows the pointer to another display
 ├── Made at launch, hidden; away from macOS its window holds no GPU surface
 │   while hidden (`release_gpu_when_hidden`), so a Hex that never annotates
-│   holds no GPU memory for it (`perf/idle.bench.ts#window-closed-memory`,
-│   `gpu.vram`)
+│   holds no GPU memory for it
 ├── Everything but the target dims; the dim moves with the target as one piece
 ├── Window -> the window under the pointer: tinted, ringed, its title in a badge;
 │   the cursor becomes Scrawl's camera; no window under it -> the display
@@ -703,6 +710,9 @@ While a capture records                  // capture.input
     at the start -> the first Shift drag inks
 
 hex capture start                        // capture.start; needs a listening Hex
+├── No ElevenLabs API key -> the listener never starts ("API key required",
+│   transcription.md#api-key), and the capture host is the listener's, so
+│   nothing records until a key is set
 ├── Creates <captures folder>/<unix ms>.scrawl (owner-only) -> reply: recording + bundle path
 ├── Two stopped captures still writing -> refused `busy`
 ├── Copies the dictation timeline from now into a bounded sink (no second stream)
@@ -719,7 +729,8 @@ While it records                         // capture.audio
 └── Microphone gap or recovery -> the gap is recorded, positions stay on the clock
 
 Never on Hex's path                      // capture.isolation
-├── No microphone, event tap, global shortcut, or model of its own
+├── No microphone, event tap, global shortcut, or transcription engine of its
+│   own: its requests go through the dictation engine (capture.stop)
 ├── No ingest server (47777) or recovery workers; delivery retries only while
 │   neither Scrawl.app runs nor anything serves the ingest port (capture.route)
 ├── No ingest token used; Scrawl's two config files read once by the import, never
@@ -750,12 +761,24 @@ hex capture stop                         // capture.stop
 │   starts where its first frame was shown (video_offset_ms)
 └── In the background, on one capture-finish thread, one capture at a time:
     ├── 16 kHz audio with its start offset and gaps -> SealedCapture::finish
-    ├── Words: 30 s chunks, each a foreground job on the dictation engine's model,
-    │   after queued dictation, before meeting chunks; waits while dictation records
-    │   or transcribes; never interrupts a live stream
-    ├── Word times moved earlier by the model's measured lag (Parakeet Unified
-    │   English: starts −280 ms, −520 ms after a ≥ 250 ms pause; ends −195 ms);
-    │   other models and Apple keep their own times
+    ├── Words (capture.transcriber `scribe`, the default) -> the narration is
+    │   sent to ElevenLabs as batch `scribe_v3` requests with word timestamps
+    │   (transcription.md#what-is-sent-where), each a foreground request on the
+    │   dictation engine: after queued dictation, before meeting chunks, never
+    │   inside a dictation's live session, which finishes first
+    │   ├── macOS -> 30 s chunks in the saved language, times offset by each
+    │   │   chunk's start; each chunk waits (up to 20 s) while dictation records
+    │   │   or transcribes
+    │   ├── Linux, Windows -> one request for the whole narration, in the
+    │   │   listener's language
+    │   ├── The saved Scribe settings and, with Labs › Vocabulary biasing on,
+    │   │   the shared vocabulary as keyterms go with each request
+    │   │   (transcription.md#scribe-settings, #vocabulary-as-keyterms)
+    │   └── No listener engine -> no request; the bundle says "Transcriber
+    │       unavailable."
+    ├── Word times are Scribe's own, kept at 0 or later and never going
+    │   backwards (capture_host::word_timings); scrawl.json records source
+    │   `hex`, model `scribe_v3`. Apple keeps its own times
     ├── Past 20 min -> audio kept to 20 min, the rest one gap
     ├── recording.mp4, capture.json, audio.wav, frames/, scrawl.json,
     │   summary.md; then every file 0600 and folder 0700
@@ -767,7 +790,12 @@ hex capture stop                         // capture.stop
     │   French, German, Portuguese, and Italian, whatever the dictation
     │   language. Check: scrawl-capture keyframes
     │   spoken_cues_count_in_other_languages
-    ├── Transcription fails -> logged; the bundle has no words, and the outcome says why
+    ├── Transcription fails (no API key, or a request that still fails after
+    │   its one retry; transcription.md#retry-and-failures) -> logged; the
+    │   bundle has no words, and the outcome says why ("Transcription failed
+    │   (…)."). On macOS one failed chunk leaves the whole capture without
+    │   words. audio.wav stays in the bundle; the clip is not copied to
+    │   failed-dictations/ (transcription.md#kept-failed-clips is dictation's)
     ├── Written -> image and text copied to the clipboard (Scrawl's handoff)
     └── Sent -> the capture-route thread (capture.route)
 
@@ -817,9 +845,7 @@ Where it goes                            // capture.route; capture.routing's aut
 │   page of sessions keeps what was read and still reads the folders and
 │   sessions that rules name
 │   └── Timings in process.log: local sensing, total lookup, page publisher,
-│       written-to-look wait, judging, and sending (sync, idle check, post).
-│       Fake-dependency benchmarks and their proof limits:
-│       [Annotate routing latency](../../perf/annotate-routing.md)
+│       written-to-look wait, judging, and sending (sync, idle check, post)
 ├── Written -> the one capture-route thread (queue 16) decides; the snapshot's
 │   `last.route` follows: Looking -> Rule | ResolvingRule | Guess | Nothing |
 │   NoAnswer | Unreachable. Background refinements preserve an open search and
@@ -909,7 +935,8 @@ hex capture cancel -> engine cancelled, sink closed, bundle removed
 hex capture status -> recording (bundle, elapsed), bundles still writing, last outcome
                       (words, audio gaps, or why it has no transcript)
 Hex quits mid-capture -> cancelled, bundle removed; captures still writing stop
-transcribing between chunks and keep their audio (shutdown waits ≤ 2 s)
+transcribing between chunks (macOS's 30 s chunks) and keep their audio
+(shutdown waits ≤ 2 s)
 
 15 s replay buffer (Labs, macOS 27+)     // capture.replay; labs.annotate_replay
 ├── Off by default (`Audience::Everyone`); shown and runnable only when macOS 27's
@@ -937,7 +964,8 @@ transcribing between chunks and keep their audio (shutdown waits ≤ 2 s)
     └── Hold (≥ 300 ms) -> exports the frozen 15 s clip at the press and records
         Hex's microphone timeline with "While dictating" until release + tail;
         narration is shifted onto the bundle clock after the clip (`video_ms..`),
-        transcribed with word timestamps, and anchored onto the final keyframe
+        transcribed with word timestamps by capture.transcriber (by default
+        sent to ElevenLabs, as capture.stop), and anchored onto the final keyframe
 ```
 
 `scrawl.json` is Scrawl's bundle manifest. Its `transcript.words` are
@@ -946,10 +974,11 @@ boot-time clock audio and shortcuts share), and `audio.wav` starts at that
 start too, padded with silence when the microphone began late or dropped
 audio.
 
-`hex dev capture-replay <wav>…` (debug, with the feature) runs the same
-capture host on a fresh transcription engine with the selected model, feeding
-WAV files instead of the microphone, and prints the bundle path. It needs
-Annotate on too, and records the screen meanwhile.
+`hex dev capture-replay <wav>…` (debug macOS builds, with the feature) runs
+the same capture host on a fresh transcription engine, feeding WAV files
+instead of the microphone, and prints the bundle path; the files' audio goes
+to ElevenLabs like any capture's narration. It needs Annotate on too, and
+records the screen meanwhile.
 
 Sources: [capture_host.rs](../../src/capture_host.rs), the tap in
 [suppression.rs](../../src/suppression.rs), the shortcut and Escape in
@@ -958,7 +987,10 @@ Sources: [capture_host.rs](../../src/capture_host.rs), the tap in
 [rune_ui/scrawl.rs](../../src/rune_ui/scrawl.rs), the input rules in
 [hosted_input.rs](../../crates/capture/src/hosted_input.rs), the sink in
 [dictation/audio.rs](../../src/dictation/audio.rs),
-`transcribe_with_words` in [parakeet.rs](../../src/parakeet.rs), routing in
+`transcribe_with_words` in [macos_dictation.rs](../../src/macos_dictation.rs)
+(macOS) and `transcribe_words` in capture_host.rs (Linux, Windows), the
+request itself in [transcription/scribe.rs](../../src/transcription/scribe.rs)
+(`transcribe_words`, `transcribe_segments`), routing in
 [capture_host/routing.rs](../../src/capture_host/routing.rs), the CLI's reads in
 [capture_host/library.rs](../../src/capture_host/library.rs), the 15 s replay
 buffer in [capture_host/replay.rs](../../src/capture_host/replay.rs) and
@@ -968,19 +1000,25 @@ control commands in [control.rs](../../src/control.rs).
 
 Checks:
 
-- Gate: `the_host_is_absent_while_the_experiment_is_off` in capture_host.rs;
+- Gate: `the_host_is_absent_while_captures_are_off` in capture_host.rs;
   [test-app-identity.sh](../../scripts/test-app-identity.sh) for the
-  release-path refusals.
+  bundle validation refusals (a bundle without scrawl-helper is rejected).
 - Sink, in dictation/audio.rs: `capture_sink_shares_the_timeline_with_dictation`,
   `a_full_capture_sink_drops_audio_as_a_gap_and_never_stalls_dictation`,
   `capture_sink_records_microphone_gaps`,
   `capture_sink_holds_a_released_microphone_open_until_it_closes`,
   `capture_sink_keeps_every_frame_through_timestamp_jitter`, and
   `a_dropped_capture_receiver_closes_the_sink`.
-- Words, in parakeet.rs: `chunked_word_transcription_keeps_word_times_across_chunks`
-  and `word_transcription_is_a_foreground_request_on_the_shared_engine`;
+- Words, in macos_dictation.rs (macOS only, not compiled in this fork):
+  `chunked_word_transcription_keeps_word_times_across_chunks` and
+  `word_transcription_is_a_foreground_request_on_the_shared_engine`;
   `foreground_work_waits_for_an_open_stream_instead_of_interrupting_it` in
-  [transcription/engine.rs](../../src/transcription/engine.rs).
+  [transcription/engine.rs](../../src/transcription/engine.rs);
+  `word_times_are_kept_and_never_go_backwards` in capture_host.rs;
+  `words_come_back_as_spans_for_a_capture` in transcription/scribe.rs (a unit
+  test with a fake server on loopback). Not verified against ElevenLabs: no
+  capture's narration has been sent to the real service
+  ([transcription.md](transcription.md#not-verified)).
 - Host, in capture_host.rs (a fake engine that writes through Scrawl's real
   `finalize_capture_bundle_with_flags`, without a screen):
   `controls_are_idempotent_and_stop_writes_a_scrawl_bundle`,
@@ -1019,7 +1057,7 @@ Checks:
   [audio.rs](../../crates/capture/src/audio.rs). The mirror, its
   `--no-microphone`, and the camera prompt have not run in Hex.
 - Routing, in [routing.rs](../../src/capture_host/routing.rs):
-  `only_a_saved_rule_sends_on_its_own`,
+  `only_a_saved_rule_or_a_signed_page_sends_on_its_own`,
   `a_rule_sends_and_lists_the_rest`,
   `a_guess_sends_nothing_and_a_failure_still_lists_recent_sessions`, and
   its `looked` tests, which write a bundle and route it through `look` and
@@ -1060,12 +1098,11 @@ Checks:
   `a_queued_send_says_so_and_says_sent_when_it_goes`,
   `a_cabled_phone_shows_its_chip`, …),
   `paste_takes_back_a_send_still_undoable_and_the_capsule_stays_gone`,
-  `a_rule_reads_sent_at_once_and_sounds_when_it_went`,
   `undoing_a_rule_send_reopens_the_list_until_a_pick`,
   `undoing_a_pick_reopens_the_list_it_came_from`,
   `a_pick_during_an_undo_stands_when_the_undo_answers`,
   `a_send_undone_while_under_way_keeps_the_list_however_it_ends`,
-  `the_undo_window_wakes_the_capsule_once_at_its_end`,
+  `an_undo_window_wakes_only_when_it_ends`,
   `every_rule_send_sounds_sent_once`,
   `picking_the_rules_own_session_just_closes_the_list`,
   `too_late_to_take_back_offers_the_list_for_a_copy`,
@@ -1073,7 +1110,8 @@ Checks:
   `shift_shows_the_rule_and_a_shift_pick_saves_it`,
   `an_answer_after_the_capsule_closed_leaves_it_closed`,
   `the_capsule_takes_only_the_keys_its_state_needs`,
-  `shortcuts_read_as_one_quiet_word`, `the_capsule_draws_no_keycaps`,
+  `shortcuts_read_as_one_quiet_word`,
+  `the_capsule_draws_keycaps_only_on_search_and_hints`,
   `a_written_copy_offers_paste_and_inspect_as_icons`,
   `every_change_moves_at_once`,
   `entry_lands_the_pose_instantly_then_springs_to_rest_with_its_content`,
@@ -1137,7 +1175,7 @@ Checks:
   zero-size point, and the camera stopping where the scripted pointer stops.
   Not proven natively end to end: the overlays have been driven only by the
   scripted scenes, not a live capture.
-- Pane: `captures_default_off_and_refuse_a_shortcut_in_use` and
+- Pane: `captures_default_on_and_refuse_a_shortcut_in_use` and
   `retention_names_presets_and_imported_days` in rune_ui/scrawl.rs; scenes
   `mac-scrawl-off`, `mac-scrawl`, `mac-scrawl-running`, `mac-scrawl-permission`
   (feature builds only, so no goldens: those run on Linux).
@@ -1151,18 +1189,20 @@ Checks:
   `replay_shortcut_begins_on_press_finishes_on_release_and_cancels_on_escape`,
   and `error_completion_block_carries_xpc_signature`.
 
-Observed 2026-10-25 on pro (M2 Max), before the real engine, with the
-stand-in: `HEX_EXPERIMENTS=capture hex dev capture-replay` over three
-vocabulary fixtures (6.5 s) loaded Parakeet unified English on Metal and
-wrote 18 words with plausible times. The non-replay `hex capture` engine has
+The non-replay `hex capture` engine has
 not run end to end in automated tests (unit tests use a fake engine over
-Scrawl's real bundle writer). Observed 2026-11-04 in a macOS 27.0
-(`26A428`) guest VM on Apple Silicon with Developer ID-signed `Hex Test.app`:
-`labs.annotate_replay` opened a 15 fps `1920×1080` `SCClipBufferingOutput`
-stream, exported 15,000 ms silent and 19,581 ms narrated bundles (13 Parakeet
-words anchored on the final keyframe, cursor hidden, Hex chrome excluded,
-clipboard handoff populated) via `hex capture replay`, an `⌥⇧R` tap, and a
-3.5 s `⌥⇧R` hold, recovered across `CGVirtualDisplay` plug/unplug and
-display sleep/wake, and rejected a 16 s request with
-`SCStreamErrorDomain -3812`. The menu-bar screen-recording indicator stays lit
-for the entire lifetime of the rolling buffer.
+Scrawl's real bundle writer). Observed 2026-11-04 by upstream Hex in a macOS
+27.0 (`26A428`) guest VM on Apple Silicon with Developer ID-signed
+`Hex Test.app`: `labs.annotate_replay` opened a 15 fps `1920×1080`
+`SCClipBufferingOutput` stream, exported 15,000 ms silent and 19,581 ms
+narrated bundles (cursor hidden, Hex chrome excluded, clipboard handoff
+populated) via `hex capture replay`, an `⌥⇧R` tap, and a 3.5 s `⌥⇧R` hold,
+recovered across `CGVirtualDisplay` plug/unplug and display sleep/wake, and
+rejected a 16 s request with `SCStreamErrorDomain -3812`. The menu-bar
+screen-recording indicator stays lit for the entire lifetime of the rolling
+buffer. That run's narration words came from upstream's transcriber.
+
+Unverified in this fork: narration words through ElevenLabs, a capture
+without an API key, and a failed request's outcome have not been observed on
+any OS (macOS: not compiled; Windows: type-checked by cross compilation only;
+Linux: compiled and unit-tested, not run against ElevenLabs).

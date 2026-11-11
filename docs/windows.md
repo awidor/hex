@@ -1,218 +1,260 @@
-# Windows Beta
+# Windows
 
-The Windows port is a beta with a Rune desktop app (a tray process; see
-[The app](#the-app)), WASAPI capture,
-local `transcribe.cpp` transcription, a global shortcut, and generation-safe
-automatic paste. Its daily-use surface includes live microphone, model, and
-shortcut settings, Hold, Tap, and double-tap shortcut modes, Paste Last
-Dictation, recording tones, a click-through HUD, retained History, text
-replacements, a resident system tray, and per-user Launch at login. Global and
-contextual Modes can rewrite completed dictation through the same
-deadline-bounded OpenCode processing policy as macOS, then run ordered built-in
-or user-defined TypeScript transformations.
+In this fork the Windows code is type-checked by cross compilation only and
+has never been run. Nothing on this page is verified here: it describes what
+the code is written to do, not behaviour anyone has observed.
+
+The Windows port is a Rune desktop app (a tray process; see
+[The app](#the-app)) with WASAPI capture, transcription by ElevenLabs Scribe,
+a global shortcut, and generation-safe automatic paste. Its daily-use surface
+includes live microphone, language, and shortcut settings, Hold and Toggle
+shortcut modes with a double-tap lock, Paste Last Dictation, recording tones,
+a click-through HUD, retained History, text replacements, a resident system
+tray, and per-user Launch at login. Global and contextual Modes can rewrite
+completed dictation through the same deadline-bounded OpenCode processing
+policy as macOS, then run ordered built-in or user-defined TypeScript
+transformations.
+
+Every transcript comes from ElevenLabs: Hex sends the audio of each dictation
+to the Scribe cloud API with your API key. Nothing is transcribed on the PC,
+and nothing works without a network connection. See
+[Transcription and the API key](#transcription-and-the-api-key).
 
 The default shortcut is `Ctrl+Space`. In **Hold** mode, hold both keys while
 speaking and release Space to transcribe and paste. In **Toggle** mode, press
 `Ctrl+Space` to start and again to finish, or press the **Cancel** shortcut
 (Escape by default) to throw the recording away; Hex takes that key only while
-a recording runs. Hold mode has no cancel (every dictation finishes and
-pastes), and holding a modifier on its own does nothing. Hex consumes the chord while it matches, so
-applications and input methods no longer see `Ctrl+Space`; rebind it in Settings
-if you rely on that chord elsewhere. To let another app use the same key, such as
-a Discord push-to-talk key, turn on **Share dictation shortcut with other apps**
-under Advanced: Hex still reacts to it but passes its key-down and key-up on,
-which can also trigger that binding in other apps. In Hold mode, tap the shortcut twice within
-300 ms to lock recording, then press it again to finish. Paste Last defaults to
-`Ctrl+Alt+V`. Settings changes apply live or through an automatic listener
-restart.
+a recording runs. Hold mode has no cancel shortcut (every dictation finishes
+and pastes), and holding a modifier on its own does nothing. Hex consumes the
+chord while it matches, so applications and input methods don't see
+`Ctrl+Space`; rebind it in Settings if you rely on that chord elsewhere. To
+let another app use the same key, such as a Discord push-to-talk key, turn on
+Labs › **Share dictation shortcut with other apps**: Hex still reacts to it
+but passes its key-down and key-up on, which can also trigger that binding in
+other apps. In Hold mode, tap the shortcut twice within 300 ms to lock
+recording, then press it again to finish. Paste Last defaults to
+`Ctrl+Alt+V`. Saved settings reach a running listener in place, at a moment
+when nothing records; it does not stop for them.
 
-The Settings card reads **Enabled** when the shortcut works system-wide in every
-app and **Disabled** when it does nothing.
+The Settings card reads **Enabled** when the shortcut works system-wide in
+every app, **Disabled** when it does nothing, and **API key required** while
+no ElevenLabs API key is set.
 
-## Install
+## Transcription and the API key
 
-x86_64 PCs need a 2013 or newer processor with AVX2 (Intel Haswell / AMD Excavator or later); on an older processor Hex shows a message and quits instead of starting.
+- There is one model, `scribe_v3`, and it runs at ElevenLabs. There is no
+  speech model on the PC and nothing to download.
+- Audio is sent to ElevenLabs on every transcription: each dictation, each
+  meeting chunk (the other participants' voices included), an Annotate
+  recording's narration, `hex record`, `hex model transcribe`, and every
+  local API request that carries audio. ElevenLabs handles that audio and its
+  text under its own retention policy.
+- An API key is required. Save one with `hex key set` (it reads the key from
+  standard input) or in Settings › General › Transcription, or put it in the
+  environment variable `ELEVENLABS_API_KEY`, which wins over a saved key. Hex
+  reads the key for each request, so a key saved while Hex runs applies to the
+  next dictation.
+- The saved key is the file `%APPDATA%\hex\elevenlabs.key`. On Windows the
+  code sets no permissions on it: the file has whatever access the per-user
+  `%APPDATA%\hex` folder gives it. `%APPDATA%` is the Roaming profile folder,
+  which a managed network can copy to a server at sign-in. The key is never
+  written to `settings.json` or the logs, and Hex shows only its last four
+  characters.
+- Without a key the listener's status reads **API key required** and the
+  listener does not start; it starts by itself once a key is set.
+  `hex key status` shows where the key comes from, `hex key check` asks
+  ElevenLabs whether it works without sending audio, and `hex key clear`
+  removes the saved key.
+- Settings › General › Transcription also holds Language
+  (`transcription.language`, `auto` by default), Final text
+  (`scribe.final_text`), Leave out filler words (`scribe.no_verbatim`), and
+  Numbers (`scribe.numbers_format`).
+- When a dictation's transcription fails for a reason the same audio could
+  survive (no network, a timeout, an ElevenLabs failure, a rate limit, a
+  missing or refused key, no quota), Hex keeps the clip as a WAV in
+  `%APPDATA%\hex\failed-dictations\` (at most 20 clips, for at most 7 days).
+  The failure message names the file and the command
+  `hex model transcribe <file>`.
+- `HEX_ELEVENLABS_URL` names another ElevenLabs host to send requests to, for
+  example a data-residency one.
 
-Download and run the installer for your PC:
+## Build From Source
 
-- x64: [`HexSetup.exe`](https://anoma.ly/hex/download/windows-x64-setup)
-- ARM64: [`HexSetup.exe`](https://anoma.ly/hex/download/windows-arm64-setup)
-
-Until Hex's first stable release these are the newest dev build, which keeps
-updating itself from the Dev channel; afterwards, the stable release.
-
-[anoma.ly/hex](https://anoma.ly/hex/) picks the right one. The
-installer needs no administrator rights: it installs for the current user,
-adds Hex to the Start menu, to **Settings › Apps** for uninstalling, and
-`hex` to PATH for terminals, and opens Hex, whose first run downloads a speech
-model. Releases built once
-Anomaly's Azure Artifact Signing is configured are Authenticode-signed
-([windows-signing.md](windows-signing.md)). Until then, and while a new
-publisher builds SmartScreen reputation, SmartScreen may say it protected your
-PC; choose **More info**, then **Run anyway**.
-
-**x64** decodes on the GPU through Vulkan 1.2, which a current NVIDIA, AMD, or
-Intel graphics driver supplies (`vulkan-1.dll`). With a missing or older
-driver Hex still starts and decodes on the CPU, and Settings › Speech engine
-says so. **ARM64** decodes on the CPU. Both are
-self-contained: no Visual C++ Redistributable is required. Hex then keeps
-itself current through the signed update feed. Uninstalling removes every
-installed version, the shortcut, and Launch at login, and keeps settings and
-history in `%APPDATA%\hex` and logs and models in `%LOCALAPPDATA%\hex`.
-
-The installer and the script below create the same managed layout, so either
-can replace the other. For a scripted install:
-
-```powershell
-powershell -ExecutionPolicy Bypass -Command "iwr https://anoma.ly/hex/files/install-windows.ps1 -OutFile install-windows.ps1; ./install-windows.ps1"
-```
-
-Uninstall a script install with `install-windows.ps1 -Uninstall`.
-
-The managed layout is `%APPDATA%\hex\versions\<version>\` holding `hex.exe`,
-the app, a GUI program so launching Hex opens no console window, and
-`hex.com`, its console entry point, which runs `hex.exe` with the same
-arguments, waits for it, and returns its exit code (`hex` and `hex app` only
-start the app and return). Shortcuts, Launch at login,
-and the Start menu open `hex.exe`. `%APPDATA%\hex\bin\hex.com`, a copy that
-runs the version `current-version` names, is on the user's PATH, and a
-terminal resolves `hex` to it before any `hex.exe` because PATHEXT lists
-`.COM` first. Terminals opened before the install need reopening to see PATH.
-
-## Known Issues
-
-**Discord shows "Playing HEX: Shards of Fate"**
-([#445](https://github.com/anomalyco/hex/issues/445)). With game activity
-detection on, Discord Desktop matches the running `hex.exe` to the verified game
-*HEX: Shards of Fate*. It then shows that game on your profile for as long as
-Hex runs. The reporter's local test suggests Discord matches on the executable
-name. Hex keeps the name `hex.exe` because the installer, updater, Start Menu
-shortcut, and Launch at login all use the managed
-`%APPDATA%\hex\versions\<version>\hex.exe` path. The problem has been reported
-to Discord. Until Discord fixes its game list, open Discord's
-**Settings › Registered Games** (or **Activity Privacy**) and hide the detected
-entry, or turn off activity sharing there. Hex works the same either way.
-
-## Streaming Dictation
-
-With Parakeet Unified English on a GPU, Hex streams audio into the model while
-the shortcut is held, so release only decodes the last one to two seconds. The
-same engine streams on macOS (Metal) and Linux (Vulkan). Each dictation logs
-`source=stream` or `source=fallback` in `logs\process.log`; a stream that fails,
-stalls past its deadline, or returns nothing falls back to transcribing the
-whole clip. CPU devices (including ARM64) always use the whole-clip path. Set
-`HEX_STREAMING=0` to force the whole-clip path. See
-[dictation](features/dictation.md#streaming-finish).
-
-## Requirements For Source Builds
+This fork publishes no Windows build: no installer, no download, no release
+channel, no code signing, and no self-updates. The only way to get `hex.exe`
+is to build it from a checkout.
 
 - 64-bit Windows 10 or 11, x64 or ARM64.
 - PowerShell 7 or Windows PowerShell 5.1.
 - `winget` from Microsoft App Installer.
-- Visual Studio C++ Build Tools, CMake, and the stable MSVC Rust toolchain.
-- x64: the Vulkan SDK (`VULKAN_SDK` set), for the GPU backend.
-- ARM64: Visual Studio's clang-cl and Ninja; ggml's ARM CPU backend refuses
-  MSVC. Build with `CC=clang-cl`, `CXX=clang-cl`, `CMAKE_GENERATOR=Ninja`, and
-  `TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF`, as
-  `.github/workflows/check-windows.yml` does.
+- Visual Studio C++ Build Tools and the stable MSVC Rust toolchain.
 
-`.cargo/config.toml` links the C and C++ runtimes statically. Distributed builds
-also set `TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF`; without it ggml tunes its
-CPU kernels to the build machine and the binary can crash on older CPUs.
+`.cargo/config.toml` links the C and C++ runtimes statically, so `hex.exe`
+needs no Visual C++ Redistributable.
 
-Run the checked-in setup script from the repository root. It keeps an existing
-compatible Visual Studio installation and installs only missing prerequisites.
+Run the setup script from the repository root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 ```
 
-The script also installs `rustfmt`, Clippy, and rust-analyzer, fetches Cargo
-dependencies, and runs `cargo check --all-targets`.
+[`scripts/setup-windows.ps1`](../scripts/setup-windows.ps1) needs `winget`.
+It installs rustup and the Visual Studio 2022 Build Tools with the C++
+workload when they are missing (an existing installation with the C++ tools
+is kept), installs the stable toolchain and makes it the default, adds the
+`x86_64-pc-windows-msvc` target, `rustfmt`, Clippy, and rust-analyzer,
+fetches the Cargo dependencies for that target, and runs
+`cargo check --all-targets` (`-SkipCheck` leaves that out).
 
-## Smoke Test
+Then build from Git Bash on Windows:
 
-List WASAPI inputs and the compute backends visible to `transcribe.cpp`:
+```sh
+scripts/build-windows.sh
+```
+
+[`scripts/build-windows.sh`](../scripts/build-windows.sh) refuses to run
+anywhere else. It runs `cargo build --locked --release` for `hex` and for
+`hex-console` (`crates/console`), checks that both outputs are Windows
+executables, and copies them to `dist/hex-<version>-windows-<x64|arm64>.exe`
+(the GUI app) and `.com` (its console entry point). `HEX_WINDOWS_ARCH` is
+`x86_64` (default) or `aarch64`; the script does not install the Rust target
+for it. `HEX_RELEASE_DIST` names another output folder. The script prints the
+executable's path. The version in the file name is what the built
+`hex.com --version` reports when the build is for this machine's
+architecture, otherwise `HEX_VERSION` or the crate version.
+
+To use the build from a terminal, put the two files in one folder as
+`hex.exe` and `hex.com`. `hex.exe` is a GUI program, so launching it opens no
+console window; `hex.com` runs the `hex.exe` beside it with the same
+arguments, waits for it, and returns its exit code (`hex` and `hex app` only
+start the app and return). A terminal resolves `hex` to `hex.com` before
+`hex.exe` because PATHEXT lists `.COM` first. Nothing adds the folder to PATH
+or makes a Start menu entry.
+
+The updater is permanently off: Hex never checks for, downloads, or installs
+an update. The window's sidebar footer shows a plain line ("Updated from your
+source checkout") where Check for updates would be, and
+`hex check-for-updates` answers that this build doesn't update itself.
+
+## Known Issues
+
+**Discord shows "Playing HEX: Shards of Fate"**
+(upstream [#445](https://github.com/anomalyco/hex/issues/445)). With game
+activity detection on, Discord Desktop matches the running `hex.exe` to the
+verified game *HEX: Shards of Fate*. It then shows that game on your profile
+for as long as Hex runs. The reporter's test suggests Discord matches on the
+executable name. Open Discord's **Settings › Registered Games** (or **Activity
+Privacy**) and hide the detected entry, or turn off activity sharing there.
+
+## Streaming Dictation
+
+By default a dictation is recorded while the shortcut is held, and on release
+its whole clip is uploaded and `scribe_v3` returns the text (Final text:
+Batch). Hex opens a realtime session (`scribe_v3_live`, a WebSocket) for a
+dictation only when the session's text is used: with Labs › Live text on,
+which shows provisional words while you speak, or with Final text set to
+Live, which pastes the session's committed text instead of uploading the clip
+again. A session is billed for all it hears, which is why none is opened
+otherwise. A session that fails, misses its deadline (1.5 s after release),
+or returns nothing falls back to transcribing the whole clip.
+
+Each dictation logs its source in `logs\process.log`: `source=offline` (the
+whole clip, by choice), `source=stream` (the live session's text), or
+`source=fallback`. "Offline" names the whole-clip path; it still goes over
+the network. The WebSocket connects directly: the HTTP proxy Hex uses for its
+HTTPS requests is not applied to it. See [dictation](features/dictation.md).
+
+## Commands
+
+These run from a checkout with `cargo run --`, or as `hex` from a built pair.
+
+List the WASAPI inputs, save and check the API key, and transcribe a WAV
+file (the file's audio is sent to ElevenLabs):
 
 ```powershell
 cargo run -- devices
-cargo run -- model devices
-```
-
-Install the selected model (with Hex stopped, `model install` downloads and
-selects it in this process), load it, and transcribe a WAV file:
-
-```powershell
-cargo run -- model install
-cargo run -- model check
+cargo run -- key set
+cargo run -- key check
+cargo run -- model status
 cargo run -- model transcribe .\sample.wav
 ```
 
-For Polish, name the multilingual Parakeet model:
+`model check` is the same check as `key check`: it asks ElevenLabs about the
+key and sends no audio. For Polish, set the language and record one capture:
 
 ```powershell
-cargo run -- model install parakeet_v3 --language pl
-cargo run -- model check parakeet_v3 --language pl
-cargo run -- record --model parakeet_v3 --language pl --copy
+cargo run -- model use scribe_v3 --language pl
+cargo run -- record --language pl --copy
 ```
 
-Open the desktop application after the model is installed:
+Open the desktop application:
 
 ```powershell
 cargo run -- app
 ```
 
-The Settings card reads **Enabled** when the shortcut works system-wide in every
-app and **Disabled** when it does nothing; its button and the tray's
-**Enable / Disable Hex** switch between them. Hex enables itself on launch by
-default (**Enable on launch**). The microphone records only while you dictate.
-Changing the
-transcription model, microphone, dictation shortcut, double-tap behavior, or
-Paste Last setting automatically restarts the listener; you do not need to
-stop it first. Text replacements and feedback volume apply without a model
-reload. Mode rules, OpenCode profiles, and ordered transformations are
-snapshotted by the output worker and apply to the next completed dictation
-without restarting capture. The command-line listener uses the settings saved
-by the app:
+The Settings card's button and the tray's **Enable / Disable Hex** switch
+between **Enabled** and **Disabled**. Hex enables itself on launch by default
+(**Enable on launch**), once first-run setup is done and a key is set.
+Changing the language, microphone, a shortcut, double-tap behavior, or the
+While dictating setting applies to the running listener without stopping it;
+only its keyboard hook, microphone stream, or audio control is replaced as
+needed. Text replacements and feedback volume apply the same way. Mode rules,
+OpenCode profiles, and ordered transformations are read by the output worker
+and apply to the next completed dictation.
+
+`listen` runs the listener in the foreground without the window, with the
+saved shortcuts and Modes settings. Its microphone is `--device` (the system
+default when left out) and its language is `--language` (`auto` when left
+out), not the saved ones. It can't run while the app's listener does (both
+take `windows-listener.lock`):
 
 ```powershell
-cargo run -- listen --model parakeet_v3 --language pl
+cargo run -- listen --language pl
 ```
 
-`record` prewarms the selected model and opens the microphone before prompting.
-Press Enter once to start, then again to stop. Captures shorter than 300 ms are
-discarded. `--device` accepts a case-insensitive fragment from `devices`.
+`record` opens the microphone before prompting. Press Enter once to start,
+then again to stop. Captures shorter than 300 ms are discarded; anything
+longer is sent to ElevenLabs and the text is printed (`--copy` also puts it on
+the clipboard). `--device` accepts a case-insensitive fragment from
+`devices`.
 
-Runtime data is stored under `%APPDATA%\hex`, except logs and speech models,
-which belong to this computer and live in `%LOCALAPPDATA%\hex`: on managed
-networks Windows copies the Roaming folder to a server at every sign-in, which
-hundreds of megabytes of models would slow down. An older Hex's `logs` and
-`models` move there once (`app_paths::machine_local`); while a running Hex
-holds them, the Roaming copy stays in use. Observations are in
-`logs\live.ndjson`, and native/runtime diagnostics are in `logs\process.log`,
-including every panic with its thread and backtrace. A worker that stops
-unexpectedly leaves its cause there. `hex.exe` is a GUI program, so a launch
-from Explorer, the Start menu, or login opens no console window. Run from a
-terminal, it prints startup errors there, then the app leaves the terminal and
-has no stdout or stderr.
+## Data And Logs
+
+Runtime data is stored under `%APPDATA%\hex` (`settings.json`,
+`history.json`, `elevenlabs.key`, `failed-dictations\`, `local-api.json`),
+except logs, which belong to this computer and live in
+`%LOCALAPPDATA%\hex\logs`: on managed networks Windows copies the Roaming
+folder to a server at every sign-in. An older Hex's `logs` folder moves there
+once (`app_paths::machine_local`); while a running Hex holds it, the Roaming
+copy stays in use. `HEX_APPLICATION_SUPPORT_DIR` names another data folder,
+logs included. Observations are in `logs\live.ndjson`, and native/runtime
+diagnostics are in `logs\process.log`, including every panic with its thread
+and backtrace. A worker that stops unexpectedly leaves its cause there.
+`hex.exe` is a GUI program, so a launch from Explorer or at login opens no
+console window. Run from a terminal, it prints startup errors there, then the
+app leaves the terminal and has no stdout or stderr.
 Successful pasted dictations are retained, subject to the selected retention
-window and hard size limits, in `history.json`. Captured audio is never retained
-by default.
+window and hard size limits, in `history.json`. A dictation's audio is not
+kept on disk by default, except the clip of a dictation whose transcription
+failed (see [Transcription and the API key](#transcription-and-the-api-key)).
 
 ## Control commands
 
 The `hex` control commands ([docs/cli.md](cli.md)) drive the running tray app
 as they do on macOS: `status`, `start`, `quit`, `restart`, `dictation
 start|stop|cancel|toggle` (with `stop --print`), `paste-last`, `settings`,
-`model`, `window`, `vocabulary`, `history clear`, `check-for-updates`,
-`launch-at-login` (the Run key), `onboarding reset`, `logs`, and `commands
-init|check`, `annotate`, `meetings record|stop|copy-last`, `history`, and
-`mcp`. They reach it through its local API (`local-api.json` in
-`%APPDATA%\hex` and the bearer-authenticated `POST /control`). Dictation commands go
-to the listener's own loop as a shortcut press would, and `annotate`
-start, stop, cancel, and status wait for its capture host. `history`,
-`meetings`, and `mcp` work as on macOS. `hex restart`
-quits, waits for the drain, and starts `hex app --hidden` again.
+`model`, `key`, `labs`, `window`, `vocabulary`, `history clear`,
+`check-for-updates`, `launch-at-login` (the Run key), `onboarding reset`,
+`logs`, and `commands init|check`, `annotate`, `meetings
+record|stop|copy-last`, `history`, and `mcp`. They reach it through its local
+API (`local-api.json` in `%APPDATA%\hex` and the bearer-authenticated
+`POST /control`). Dictation commands go to the listener's own loop as a
+shortcut press would, and `annotate` start, stop, cancel, and status wait for
+its capture host. `history`, `meetings`, and `mcp` work as on macOS.
+`hex restart` quits, waits for the drain, and starts `hex app --hidden`
+again. `key`, `model status`, `model check`, and `model transcribe` run in
+the `hex` process itself, with or without the app.
 
 ## Custom Transformations
 
@@ -239,28 +281,36 @@ hex app
 ├── named event already held -> signal it (the running app shows its window) -> exit
 └── becomes the app                                   // windows::rune::open
     ├── the local API's POST /control -> control::host::answer
-    ├── runtime thread: WindowsDesktopHost (listener, model preparation, OpenCode, transformations, updater), publishes every 250 ms
+    ├── runtime thread: WindowsDesktopHost (listener, language, OpenCode, transformations), publishes every 250 ms
     ├── main thread: rune::App's winit loop and the window; rune::Tray runs on its own thread
     ├── --hidden -> windowless start; close -> hide (keep_running)
     ├── tray Show or a relaunch -> AppHandle::open (shows and focuses)
-    └── tray Quit / Ctrl-C / restart into an update -> AppHandle::quit -> runtime stops the listener
+    └── tray Quit / Ctrl-C -> AppHandle::quit -> runtime stops the listener
 ```
 
 - Quit Hex in the window or the tray stops the listener and ends the app;
   closing the window only hides it.
-- The window uses the shared Rune panes (General, Modes,
-  History, the transcription picker, first-run setup) with Windows rows:
-  Launch at login (the current-user Run key), no terminal-paste row. The
-  sidebar footer holds Check for updates, and Download update for unmanaged
-  installs. Shortcuts are recorded by
-  polling the keyboard with the listener's hook suspended, because modifier-only chords never reach the window as key events.
-- Models are prepared in-process through `transcription/preparation`; the
-  runtime saves the selection when it is ready and restarts the listener.
-- Enable on launch waits until first-run setup has recorded completion.
-- The dictation HUD is a Rune overlay (`rune_hud.rs`, shared with Linux): a
-  HUD thread steps the shared indicator model and Dot scope, and the
-  overlay's compositor draws each frame on the GPU with `rune_hud.wgsl`; Rune shows it in a topmost tool window
-  with `WS_EX_NOACTIVATE|WS_EX_TRANSPARENT|WS_EX_LAYERED`, shown with
+- The window uses the shared Rune panes (General with the transcription
+  language and the API key, Output, History, Labs, first-run setup) with
+  Windows rows: Launch at login (the current-user Run key, which names
+  the `hex.exe` that set it), and no terminal-paste row in General (Terminal
+  paste is a lab on Windows). Shortcuts are recorded by polling the keyboard
+  with the listener's hook suspended, because modifier-only chords never
+  reach the window as key events.
+- The runtime saves a chosen language and hands it to the running listener,
+  which uses it from the next dictation. The Labs features that switch with
+  the keyboard layout or the frontmost app change only the language.
+- Enable on launch waits until first-run setup has recorded completion, and
+  the listener waits for an API key.
+- The window and the HUD draw on the GPU through Rune (wgpu). The Rune
+  revision `Cargo.toml` pins uses Direct3D 12 on Windows, and Vulkan only on
+  a PC with no Direct3D 12 adapter. Closing the window gives the window and
+  its GPU surface back (`release_gpu_when_closed`), so a Hex sitting in the
+  tray holds no Direct3D window.
+- The dictation HUD is a Rune overlay (`rune_hud.rs`, shared with Linux): its
+  compositor steps the shared indicator model and Dot scope and draws each
+  frame on the GPU with `rune_hud.wgsl`. Rune shows it in a topmost tool
+  window with `WS_EX_NOACTIVATE|WS_EX_TRANSPARENT|WS_EX_LAYERED`, shown with
   `SW_SHOWNOACTIVATE`, 12 pt from the top or 24 pt above the taskbar. The
   same model, shaders, and overlay run on Linux; on Windows it is only
   type-checked.
@@ -278,77 +328,68 @@ hex app
   `ThemeChanged` when the OS theme actually changed. The subclass removes
   itself when the window is destroyed.
 - Without a tray (creation failed) closing the window quits Hex.
-  See the [single-process plan](plans/single-process.md#windows-under-rune).
 
-**This app has never run on Windows.** Earlier releases shipped a GPUI app
-that a person did run; that app is gone, and the Rune app replaces it in the
-next release, so a person must run it on Windows (x64 and ARM64) before that
-release. It is type-checked by cross-compiling on Linux with
-[cargo-xwin](https://github.com/rust-cross/cargo-xwin):
+### Type-Checking From Linux
+
+The Windows code is checked by cross-compiling on Linux with
+[cargo-xwin](https://github.com/rust-cross/cargo-xwin), for the x64 target:
 
 ```sh
 rustup target add x86_64-pc-windows-msvc && cargo install cargo-xwin
 # clang-cl, lld-link, and llvm-lib must be on PATH (llvm-lib can be a
-# symlink to rustup's llvm-tools llvm-ar).
-mkdir -p /tmp/no-transcribe/lib
-echo '{"libraries":[],"shared":false}' > /tmp/no-transcribe/lib/transcribe-link.json
-# TRANSCRIBE_DIR skips the transcribe.cpp/Vulkan CMake build; nothing links in check.
-TRANSCRIBE_DIR=/tmp/no-transcribe cargo xwin clippy --target x86_64-pc-windows-msvc \
-  --all-targets -- -D warnings
+# symlink to llvm-ar).
+cargo xwin check --target x86_64-pc-windows-msvc
 ```
 
-For ARM64, add the `aarch64-pc-windows-msvc` target and set
-`XWIN_CROSS_COMPILER=clang`: ring's aarch64 build forces the GNU-style
-`clang` driver, which rejects the clang-cl `/imsvc` flags cargo-xwin passes
-by default. Also set `CARGO_FEATURE_NO_NEON=1`: blake3 (through Rune) builds
-NEON C that the xwin sysroot's `arm64_neon.h` macros break under that driver.
+That type-checks every Rust path for that target, including Rune and the
+Windows modules. It compiles the C in build scripts (QuickJS, blake3) for
+the target but never links or runs anything, so it says nothing about how
+Hex behaves on a PC.
 
-That checks every Rust path, including Rune, wgpu's DX12 and Vulkan
-backends, and the Windows modules; it compiles C build scripts (ring) for
-the target but never links, builds transcribe.cpp, or runs anything.
+## Local HTTP API
 
-## Local Transcription Service
-
-Not available on Windows in this build. The `windows-shell` branch generalized
-the authenticated local API (`service` and `service --embedded`) across
-platforms, but `dev` has since reshaped it for macOS; porting it onto that
-version is follow-up work.
+The app starts Hex's local HTTP API (`LocalApi::start_for_app` in
+`src/windows/rune.rs`) and writes its discovery file to
+`%APPDATA%\hex\local-api.json`. It serves `POST /control` for the `hex`
+commands, `POST /transcriptions`, `/dictations`, and
+[`/streams`](streams.md). A request that carries audio sends that audio on to
+ElevenLabs with your key; without a key it answers `409 api-key-missing`.
 
 ## macOS Parity
 
 The target is product and visual parity with macOS, using native Windows
 adapters where the operating-system APIs differ. A direct copy of AppKit,
-CoreAudio event taps, Metal, `SMAppService`, Accessibility, or
-ScreenCaptureKit code would not run on Windows; the Windows implementation must
-preserve the same user contract through Win32, WASAPI, Rune (wgpu), the
-current-user startup registry, UI Automation, and Windows capture APIs.
+CoreAudio event taps, `SMAppService`, Accessibility, or ScreenCaptureKit code
+would not run on Windows; the Windows implementation must preserve the same
+user contract through Win32, WASAPI, Rune (wgpu), the current-user startup
+registry, UI Automation, and Windows capture APIs.
+
+In the table, Implemented means the code exists and type-checks for Windows.
+None of it has been run in this fork.
 
 | Area | Windows status |
 | --- | --- |
-| Local hold-to-dictate, Toggle mode, timestamped boundaries, paste | Implemented |
-| Live model, shortcut, and microphone selection | Implemented |
+| Hold-to-dictate, Toggle mode, timestamped boundaries, paste | Implemented |
+| Language, shortcut, and microphone changes while listening | Implemented; applied in place when nothing records |
 | Double-tap lock and Paste Last Dictation | Implemented |
 | Clipboard preservation and generation-safe restoration | Implemented |
-| Recording tones and click-through recording/processing HUD | Implemented; a CPU port of the macOS Metal shader drawn in a Rune overlay, never run on Windows |
+| Recording tones and click-through recording/processing HUD | Implemented; a Rune overlay drawn on the GPU (`rune_hud.wgsl`), shared with Linux |
 | History retention, list, detail, search, copy, delete, and clear | Implemented |
-| Text replacements | Implemented in the Windows Modes pane using the shared phrase-boundary replacement engine |
-| Application picker in Modes | Implemented; lists Start menu shortcuts, App Paths, and apps with an open window, with each executable's icon; "Choose a file…" opens the native dialog through `rune::FileDialogs` |
-| Interface language | Implemented on every OS; English, Polish, Chinese, Japanese, German, Spanish, and Ukrainian |
-| Resident tray and Launch at login | Implemented; the tray menu (shared with Linux) has Paste last dictation, the speech-model picker, and the recording state |
-| Application modes with per-mode corrections, OpenCode rewriting, and transformations | Implemented on the shared ordered processing policy; global and contextual profiles persist their own corrections, model, reasoning variant, deadline, and ordered built-in/TypeScript transformations, while modes match by application name — physical end-to-end paste/UI validation remains |
-| Vocabulary as Whisper and Qwen3-ASR's context prompt | Implemented |
+| Text replacements | Implemented with the shared phrase-boundary replacement engine |
+| Application picker for per-app modes | Implemented; lists Start menu shortcuts, App Paths, and apps with an open window, with each executable's icon; "Choose a file…" opens the native dialog through `rune::FileDialogs` |
+| Interface language | Implemented on every OS; English, Polish, Simplified and Traditional Chinese, Japanese, German, Spanish, Ukrainian, Portuguese (Brazil), French, and Russian |
+| Resident tray and Launch at login | Implemented; the tray menu (shared with Linux) has the recording state, Show Hex, Paste last dictation, the meeting items while Meetings is on, Enable / Disable Hex, and Quit Hex |
+| Application modes with per-mode corrections, OpenCode rewriting, and transformations | Implemented on the shared ordered processing policy; global and contextual profiles persist their own corrections, OpenCode model, reasoning variant, deadline, and ordered built-in/TypeScript transformations, while modes match by application name |
+| Vocabulary | Sent to Scribe as keyterms while Labs › Vocabulary biasing is on and the boost is not Off; "sounds like" spellings are not sent |
 | Release microphone while idle | Implemented; mutually exclusive with audio pre-roll, as documented in Settings |
 | While-dictating audio control (mute other apps or pause media) | Implemented via WASAPI session volumes and GSMTC |
-| Signed automatic self-update for managed installs | Implemented for x64 and ARM64; the same ed25519 key and `https://anoma.ly/hex/files` origin as Linux, one feed per architecture, activating into a user-local versions directory. Checks 10 s after launch and every 6 h (or Check for updates); a staged update shows Restart to update in the tray menu and the window's sidebar footer, and the tray tooltip says an update is available. Source builds keep the GitHub release link (Download update); CI test builds never check |
 | Web-domain mode rules and browser context via UI Automation | Implemented; the page URL comes from the browser's UIA document element, bounded so a hung provider degrades to application-only context |
-| Managed installer with Start Menu integration and clean uninstall | Implemented as `.github/release/install-windows.ps1`; it creates the self-updating versions layout, and updates retarget the managed shortcut and Launch-at-login entry |
-| First-run onboarding | Implemented; a fresh install picks a dictation language, downloads its recommended model with live progress, and starts listening only once setup is recorded — the shared first-run story, with a Microphone page only while the privacy switch is off and the practice game on the real shortcut |
-| Activity pane with the live session and recent dictations | Implemented in developer builds; the shared read-only pane (phases and timing; the event log keeps no dictated text) |
-| Developer Meetings, live drafts, and meeting paste | Missing |
-| Local transcription API and public TypeScript SDK host lifecycle on Windows | Missing; see Local Transcription Service |
-| Streaming finish with whole-clip fallback | Implemented on GPU devices with Parakeet Unified English |
+| First-run onboarding | Implemented; the shared first run asks for the ElevenLabs API key before anything else, and Hex starts listening only once setup is recorded |
+| Meetings | Implemented (Labs, off by default): the microphone plus system audio through WASAPI loopback (`src/meeting/windows.rs`). Every chunk, the other participants' voices included, is sent to ElevenLabs. See [meetings](features/meetings.md) |
+| Local HTTP API | Started by the app; see [Local HTTP API](#local-http-api) |
+| Live session with whole-clip fallback | Implemented; a session is opened only with Labs › Live text on or Final text set to Live |
 
-Settings live in `%APPDATA%\hex\settings.json`, the same file macOS and
+Settings live in `%APPDATA%\hex\settings.json`, in the format macOS and
 Linux use.
 
 The Windows window uses the shared design system
@@ -373,16 +414,10 @@ empty look-alike screens do not count as parity.
 The Windows listener preserves physical press/release timestamps, keeps audio
 capture off the transcription and paste worker, and restores the previous
 clipboard only when no newer clipboard change supersedes it.
-`check-windows` builds and tests the optimized MSVC release for x64 and ARM64
-in Release's check and stable channels; pull requests only compile x64. The remaining code
-parity slice is the developer-only Meetings surface after the physical matrix
-is green. Shared
-first-run onboarding, complete OpenCode mode rewriting controls, and the bounded
-TypeScript transformation host already ship. Windows releases are built for
-x64 and ARM64 by
-[`release.yml`](../.github/workflows/release.yml) with
-[`scripts/build-windows.sh`](../scripts/build-windows.sh), Authenticode-signed,
-and published to the Anomaly release service with the other platforms
-(`docs/releasing.md`); [`.github/release/install-windows.ps1`](../.github/release/install-windows.ps1)
-installs from its stable manifest. Users install
-with the command under [Install](#install).
+
+[`check-windows.yml`](../.github/workflows/check-windows.yml) runs on pull
+requests and by hand. Its x64 job runs `cargo fmt --check`, Clippy, the tests
+(`cargo nextest`), and a release build, then checks that `hex.exe` imports no
+Visual C++ runtime DLL, does not import `vulkan-1.dll` at load time, and is a
+GUI program. Its ARM64 job runs the tests and a release build. Each job
+uploads its `hex.exe` as a workflow artifact; nothing is signed or published.

@@ -1,48 +1,48 @@
 # Roadmap
 
-Hex ships the macOS product loop: configurable hold-to-talk local dictation,
-optional context-aware OpenCode post-processing, a Metal HUD, bounded paste
-workers, settings, and a signed app bundle. Meetings (beta) is a
-persisted opt-in (`meetings.enabled`, default off). Windows (x64 and ARM64) and
-x86_64 Linux (i3/X11 and compatible wlroots Wayland compositors) betas provide
-hotkey dictation, Modes, History, the shared Rune window, and signed user-local
-updates; they do not yet include meetings. Nix packaging for
-Linux is implemented and awaiting supported-host validation before release.
-The authenticated local transcription service now implements discovery,
-direct-child embedding, model preparation, and bounded host-audio transcription;
-`@kitlangton/hex@0.3.0` publishes ready transcribers through Promise and Effect
-entrypoints. Local Electron capture and native transcription have been exercised;
-signed helper packaging and a signed first-consumer integration remain. Follow the
-[embedded desktop delivery plan](docs/plans/typescript-sdk.md); Apple Silicon
-macOS is the proposed first target, not a cross-platform availability promise.
+This is the work list of a personal fork of
+[anomalyco/hex](https://github.com/anomalyco/hex) that transcribes through the
+ElevenLabs Scribe cloud API. Hex has configurable hold-to-talk dictation,
+optional context-aware OpenCode post-processing, the HUD, bounded paste
+workers, Modes, History, and the shared Rune window. Meetings (beta) is a
+persisted opt-in (`meetings.enabled`, default off). The fork is developed and
+verified on Linux; see [Fork](#fork) for what is not.
+
+Most items below come from upstream's roadmap and are kept where they still
+apply. Items about macOS and Windows describe code this fork has not run.
+
+## Fork
+
+Known to be undone or unverified:
+
+- No real request was ever made to ElevenLabs during development (no API key
+  was available), so every path is unverified against the real service:
+  dictation with Final text Batch and with Final text Live, live text, a
+  recorded meeting, an Annotate narration, a `/streams` client, and a failed
+  dictation retried with `hex model transcribe`.
+- Latency is unmeasured. `scripts/scribe-latency.py` times the batch and live
+  paths once a key is available.
+- The Scribe realtime WebSocket connects directly and ignores the proxy Hex
+  uses for HTTPS.
+- Windows: the code is type-checked by cross compilation only. It has never
+  been run.
+- macOS: the code was edited without being compiled or run.
 
 ## Validate The Rune Desktop App
 
 The window, menu-bar and tray hosts, HUDs, meeting capsules, and onboarding now
-run only on Rune (GPUI is gone). Linux has been run in a real session; macOS
-has been compiled, tested, and launched without being seen on screen; Windows
-has only been cross-compiled. Before releasing `dev`, a person runs each
+run only on Rune. In this fork Linux has been run in a real session (KDE
+Wayland); Windows has only been cross-compiled and macOS has not been
+compiled. A person runs each
 OS through the checklist in [the Rune port plan](docs/plans/rune-ui.md#needs-a-person-to-look), including
 the Windows x64 and ARM64 tray app, the macOS HUD and meeting capsules, and
 shortcut capture on every OS. Restore application icons in the Modes picker
 (removed with GPUI) on Rune's raster images, and add native file dialogs on
 macOS and Windows.
 
-## Validate The macOS Release
-
-Runtime logs now live in Application Support, first-run setup installs the
-selected dictation model, and the release flow signs, notarizes,
-staples, Gatekeeper-assesses, and publishes Sparkle updates through R2.
-
-The quarantined public DMG and a genuine automatic 2.0.0-to-2.0.1 Sparkle update
-have been validated on the development Mac. Before broadly sharing it, validate
-the DMG from a clean macOS account, including every TCC permission, model
-installation, and source-free launch. Preserve the stable bundle identity that
-owns Microphone, Accessibility, and Automation permissions.
-
 ## Finish Settings And First-Run Health
 
-Later, split features from settings into two windows (Kit, 2026-10-24; deferred
+Later, split features from settings into two windows (deferred
 in favour of the one-window feature-owned panes): the Hex window keeps what you
 use, History and Meetings recordings, and a separate Settings window (⌘, and
 the menu bar's Settings…) holds General, Modes,
@@ -52,41 +52,26 @@ Microphone selection, idle-safe live switching, unavailable-device fallback,
 sound-effect volume, application/browser-host processing modes, and the native
 `SMAppService` login-item toggle now ship. Runtime settings changes project live
 and persist atomically; launch-at-login remains owned by macOS rather than the
-settings file. A persistent menu-bar item keeps Settings, Paste Last, updates,
+settings file. A persistent menu-bar item keeps Settings, Paste Last,
 and Quit reachable when the Dock icon is hidden. Settings now surfaces revoked
-Microphone or Accessibility access after onboarding, and
-supported transcription runtimes expose automatic language detection. Modes own
+Microphone or Accessibility access after onboarding. Modes own
 corrections, optional OpenCode rewriting, and ordered text transformations;
 stage failures preserve the preceding pipeline output. Do not add a generalized
 processor framework without a concrete need beyond this shipped sequence.
 
-Keep Swift and Rust separate. Prefer the old app's existing Sparkle update window
-with a website-only informational item to install the new app manually, with no
-data import or automatic replacement.
-Follow [`docs/plans/swift-app-handoff.md`](docs/plans/swift-app-handoff.md).
-The new app uses identity `com.kitlangton.hex2`, display name `Hex`, and filename
-`Hex.app`, with data in `hex`. Use Kit's approved
-Developer ID signing team and validate the new identity before release. The legacy
-S3 feed must never install a Rust payload. Publish
-the updated Rust artifact first, then the separately validated legacy feed notice.
-No Swift rebuild should be necessary for the notice.
-
 ## Validate The Linux Beta
 
-Run a genuine signed update between two published versions on the target
-Arch/i3 machine. Verify exact artifact validation, atomic activation, restart,
-and retained-version rollback. Smoke-test installation, model download, the CLI
-microphone override, hotkey rebinding, locked capture, cancellation, automatic
-paste, systemd autostart, launch forwarding (`Activate`), and closing the window
-without stopping accepted work. Linux no longer uses a tray.
+Smoke-test a source install (`scripts/install-linux.sh`), the API key step,
+the CLI microphone override, hotkey rebinding, locked capture, cancellation,
+automatic paste, systemd autostart, launch forwarding (`Activate`), and closing
+the window without stopping accepted work.
 
-Keep app-managed updates limited to the user-local direct-install layout. A
-future Arch package must leave updates to the package manager. Nix owns its
-packaged installation and optional Home Manager service. Validate the Wayland
-beta on a compatible compositor with physical portal shortcuts, the `hex`
+Nix owns its packaged installation and optional Home Manager service; rebuild
+and check it after the move to Scribe. Validate the Wayland
+beta on compositors other than KWin with physical portal shortcuts, the `hex`
 commands bound in a desktop without the portal, microphone, foreground paste,
 click-through HUD, and window close leaving the process running while `hex quit`
-drains and exits. See [`docs/plans/linux.md`](docs/plans/linux.md). Add
+drains and exits. Add
 context, meetings, or broader Wayland support only as explicit later capability
 slices.
 
@@ -124,7 +109,7 @@ A simultaneous passive HID/annotated probe confirmed the different units for
 real modifier events. Annotated-session timestamps now enter the audio timeline
 without scaling; callback-level regressions cover lock, short-tap discard, and
 exact delayed release trimming. Keep physical shortcuts, assistive modifier and
-key chords, non-empty captures, and immediate HUD onset in the release smoke
+key chords, non-empty captures, and immediate HUD onset in the smoke
 checks; changing tap location requires revalidating the clock as well as routing.
 
 Version 2.1.11 also recovers blocked modifier gestures after missed releases and
@@ -170,7 +155,7 @@ explicit shortcut opt-in, prove generation while automatic processing is off at
 the generation boundary, and reuse the isolated native keyboard test harness.
 Do not pre-publish an uncommitted transcript and attempt to repair it afterward.
 
-The microphone and dictation model remain warm by default. The shipped
+The microphone remains warm by default. The shipped
 `Release when idle` microphone option opens the device on shortcut press, removes
 pre-roll, and adds first-capture latency. `Do nothing` is the default
 recording-audio behavior. Idle-sleep prevention is automatic and scoped to
@@ -196,13 +181,9 @@ Authenticated developer control now rides the existing loopback API through the
 debug-only `hex dev` subcommand: it inspects app state, drives semantic HUD
 scenarios, opens/focuses panes, and toggles command mode.
 Extend the same bounded typed channel with fixture-audio capture, microphone
-recovery, model switching, permission snapshots, deterministic screenshots,
+recovery, language switching, permission snapshots, deterministic screenshots,
 and assertions over capture/job/UI state. MCP may wrap this protocol later; it
 must not become a second control server or settings authority.
-When that wrapper exists, publish it as a standard npm stdio package with a
-`bin` entry so clients can run it through `npx -y`, and publish matching MCP
-Registry metadata. Do not publish an MCP package before the protocol exposes a
-real supported user capability.
 
 ## Generalize Context From Evidence
 
@@ -246,13 +227,12 @@ beside the call app's, and drops ScreenCaptureKit's shared capture clock. Revisi
 only if signal-level suppression proves insufficient, with a per-device opt-in.
 
 `hex mcp` serves meetings to agents read-only over stdio (full-text BM25
-with stemming and fuzzy matching, transcripts, stored notes). Next: on-device
+with stemming and fuzzy matching, transcripts, stored notes). Next:
 semantic search only when full-text misses real paraphrased queries
 (NaturalLanguage embeddings through a Swift bridge, cached under
 `~/Library/Caches/hex/meeting-index`), EventKit attendees in
 `list_meetings`, and a one-shot Granola CSV import
-([granola-import.md](docs/plans/granola-import.md)). Keep it a CLI subcommand;
-the npm-package guidance above applies only to a developer-control wrapper.
+([granola-import.md](docs/plans/granola-import.md)). Keep it a CLI subcommand.
 
 Give durable transcript entries stable identities so live-to-final reconciliation,
 incremental UI refresh, and meeting-delta paste can advance without rereading
@@ -263,24 +243,6 @@ Add end-to-end coverage for voice-triggered start/stop, shutdown during capture,
 forced final-transcription failure, and live provider detection. Evaluate
 synchronized playback, echo annotation, summarization, and person-level
 diarization only against real meeting recordings.
-
-## Recommend Better Models To Existing Users
-
-After the Rune port is fully done (the macOS app has passed its smoke test),
-add a gentle, dismissible "recommended update" hint in the model picker and
-Settings for users whose saved model is no longer recommended for their
-language, explaining how to switch. Language routing already keeps their model
-and lists it in the picker ([plan](docs/plans/language-recommendations.md)); the
-hint never switches or downloads anything itself.
-
-## Shared Engine Service
-
-Later, not started. Move the engine into a launchd service
-(`anomaly.hex.engine`) serving the same `/streams` and `/transcriptions` API;
-the Hex UI becomes a client. Today the running app serves
-[`/streams`](docs/streams.md) on dictation's loaded model, with dictation
-first; the service keeps that contract, so stream clients such as Seer don't
-change.
 
 ## Grow Labs › Screenshots
 
@@ -301,5 +263,3 @@ plugin framework.
 
 Do not generalize the concrete macOS and Linux X11 adapters into a platform
 framework. Add seams only when a second implemented adapter requires one.
-Follow the remaining capability contracts and exit criteria in
-[`docs/plans/linux.md`](docs/plans/linux.md).

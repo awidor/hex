@@ -1,29 +1,38 @@
 # Live transcription streams (`/streams`)
 
-`/streams` lets another app on this computer transcribe its own audio live on Hex's
-loaded dictation model. The app records the microphone (or anything else) and
-pushes 16 kHz mono samples; Hex sends partial text while it listens, one final
+`/streams` lets another app on this computer transcribe its own audio live
+through Hex. The app records the microphone (or anything else) and pushes
+16 kHz mono samples; Hex sends partial text while it listens, one final
 segment per window, and the final text when the app finishes.
 
-This is the API of the planned shared engine service (`ROADMAP.md`, "Shared
-engine service"). Today the running Hex app serves it; later a launchd service
-(`anomaly.hex.engine`) will serve the same routes and the Hex UI will become
-one more client. Clients written against this document should not need to
-change.
+Hex transcribes nothing itself. All audio pushed to `/streams` is sent on to
+ElevenLabs (Scribe) with the user's API key and is billed to that key, so an
+app that pushes audio here is sending it to ElevenLabs. No request was ever
+made to the real ElevenLabs service while this was built (no API key was
+available): how the routes behave against it, and how fast text comes back,
+are unmeasured.
 
-The code is `src/local_api/streams.rs` (routes) and `src/transcription/stream.rs`
-(windows, priority, lease).
+The running Hex app serves the routes. The code is
+`src/local_api/streams.rs` (routes) and `src/transcription/stream.rs`
+(windows, priority, lease); the requests to ElevenLabs are in
+`src/transcription/scribe.rs` and `src/transcription/scribe/live.rs`.
 
 ## Availability
 
-- The running Hex app on macOS, Linux, and Windows, with a GGUF model loaded
-  by dictation (on Linux and Windows, once the listener is on).
-- `GET /capabilities` reports `"streams": true` when the routes exist, and
-  `"outputProcessing": true` when `process=global` would run (Labs › Process
-  API transcripts on, and the running app installed its processor).
-- Streams never load, download, or switch a model. They use whatever model
-  and language dictation holds; if there is none, creating a stream answers
-  `503 model-not-loaded`.
+- The running Hex app on macOS, Linux, and Windows, while dictation's engine
+  runs (on Linux and Windows, once the listener is on) and an ElevenLabs API
+  key is set (`hex key set`, Settings › General, or `ELEVENLABS_API_KEY`).
+  This fork has only been run on Linux: its Windows code is type-checked by
+  cross compilation only, and its macOS code was edited without being
+  compiled or run.
+- `GET /capabilities` reports `"streams": true` when the routes exist,
+  `"apiKeySet"` for whether a key is set, and `"outputProcessing": true` when
+  `process=global` would run (Labs › Process API transcripts on, and the
+  running app installed its processor).
+- There is one model, `scribe_v3`, which runs at ElevenLabs. A stream uses the
+  language dictation holds and never changes it. Without a key, creating a
+  stream answers `409 api-key-missing`; without a running engine,
+  `503 engine-unavailable`.
 
 ## Discovery and auth
 
@@ -58,15 +67,21 @@ them; 100 ms to 1 s per request is typical.
 ### `POST /streams`
 
 ```json
-{ "sampleFormat": "f32le", "sampleRate": 16000, "model": "parakeet_v3", "language": "en" }
+{ "sampleFormat": "f32le", "sampleRate": 16000, "model": "scribe_v3", "language": "en" }
 ```
 
-`model` and `language` are optional; when given they must match what
-dictation holds, or the answer is `409 model-mismatch` with the held ones:
+`model` and `language` are optional. `model`, when given, must be
+`scribe_v3`; any other name answers `400 unknown-model`. `language`, when
+given, must be the one dictation holds, or the answer is `409 model-mismatch`
+with the held ones:
 
 ```json
-{ "code": "model-mismatch", "model": "parakeet_v3", "language": "auto" }
+{ "code": "model-mismatch", "model": "scribe_v3", "language": "auto" }
 ```
+
+Without an API key the answer is `409 api-key-missing` with a `message` that
+says how to set one. It is checked after the body itself, so a wrong sample
+rate, format, or model is reported first.
 
 `201`:
 
@@ -74,7 +89,7 @@ dictation holds, or the answer is `409 model-mismatch` with the held ones:
 {
   "id": 3,
   "ownerToken": "hex_9f…",
-  "model": "parakeet_v3",
+  "model": "scribe_v3",
   "language": "auto",
   "sampleRate": 16000,
   "sampleFormat": "f32le",
@@ -83,8 +98,10 @@ dictation holds, or the answer is `409 model-mismatch` with the held ones:
 }
 ```
 
-`partials` is `true` only when the loaded model can stream on its device; a
-model that can't sends segments and the final only.
+`partials` says whether Hex opens a live session for each window and so
+sends `partial` events. With Scribe it is always `true`. It does not promise
+that a session connects: a window whose session fails still gets its
+`segment` (see [Scheduling](#scheduling-dictation-always-comes-first)).
 
 ### `POST /streams/{id}/audio`
 
@@ -100,7 +117,7 @@ replaces an older one. Events stay readable after the stream ends, until the
 next stream is created.
 
 ```text
-data: {"type":"ready","id":3,"model":"parakeet_v3","language":"auto","sampleFormat":"f32le","partials":true}
+data: {"type":"ready","id":3,"model":"scribe_v3","language":"auto","sampleFormat":"f32le","partials":true}
 
 data: {"type":"partial","segment":0,"stable":"so the plan for","tentative":" today"}
 
@@ -112,7 +129,7 @@ data: {"type":"final","text":"So the plan for today is the release. …","segmen
 | `type` | Meaning |
 | --- | --- |
 | `ready` | Sent first: the stream's model and format. |
-| `partial` | The window being transcribed. `stable` is committed text the model won't revise; `tentative` may still change. Replaces the previous partial for the same `segment`. Only when `partials` is true. |
+| `partial` | The window being transcribed. `stable` is the text the window's live session has committed; `tentative` is its uncommitted text and may still change. Hex asks for a commit only when the window closes. Replaces the previous partial for the same `segment`. Only when `partials` is true. |
 | `segment` | A finished window's final text (empty windows send none). |
 | `final` | Every segment joined; the stream has ended. |
 | `error` | `{"code","message"}`; the stream has ended (see codes below). |
@@ -184,30 +201,47 @@ every few seconds. The lease doesn't run while finishing.
 
 ## Scheduling: dictation always comes first
 
-Hex's dictation shares the engine, and the hotkey must never wait for a
-stream. So:
+Hex's dictation shares the engine: one thread that sends every request to
+ElevenLabs, in order. The hotkey must never wait for a stream. So:
 
-- Audio is cut into windows at pauses (at most 25 s). Each window is fed to
-  the engine as a *yielding* live stream, at most 0.4 s ahead of what the
-  engine has decoded, so a dictation request queues behind very little.
-- Any dictation request (the shortcut's capture stream, a whole-clip
+- Audio is cut into windows at pauses (at most 25 s). Each window opens its
+  own realtime session (`scribe_v3_live`, a WebSocket to ElevenLabs) as a
+  *yielding* live stream, fed at most 0.4 s ahead of what the engine thread
+  has passed on, so a dictation request queues behind very little. When the
+  window closes, Hex commits the session and its text becomes the segment.
+- Any dictation request (the shortcut's own live session, a whole-clip
   transcription) closes the yielding stream first, and a yielding stream is
-  refused while a dictation stream is open.
-- From the shortcut press until dictation's text is done, a stream feeds the
-  engine nothing; its audio waits in the backlog and catches up afterwards.
-- A window whose live stream dictation closed restarts from the window's start
-  once dictation is idle. A window that completes while that can't happen, or
-  any window on a model that can't stream, is transcribed offline as one
-  foreground request on the loaded model: after any dictation already sent,
-  before meeting chunks (the same class as capture-word requests).
+  refused while a dictation's live session is open.
+- While dictation is busy, a stream sends the engine nothing; its audio waits
+  in the backlog and catches up afterwards. On macOS that is from the
+  shortcut press until dictation's text is done; on Linux and Windows it is
+  while the engine runs a dictation's live session or its final
+  transcription.
+- A window whose session dictation closed starts a new session from the
+  window's start once dictation is idle. A window that completes while that
+  can't happen, or whose session failed or did not return its text within
+  3 s of the commit, is uploaded whole to the batch model (`scribe_v3`) as
+  one foreground request: after any dictation already sent, before meeting
+  chunks (the same class as capture-word requests). The code calls this the
+  "offline" path because the clip is complete; it still goes over the
+  network.
+
+A window that restarts or falls back is sent to ElevenLabs more than once:
+to each session that heard part of it, and then as a whole clip. The
+WebSocket connects directly, without the HTTP proxy Hex uses for its HTTPS
+requests; where it can't connect, windows produce no partials and are
+uploaded whole. While Labs › Vocabulary biasing is on and its boost is not
+Off, the saved vocabulary is sent as keyterms with a stream's requests too.
 
 Dictation's capture never waits on the engine: its audio is recorded
-independently and losslessly. Only its transcription can wait, and only for
-work already running, because a decode can't be aborted on Metal: the feed in
-flight (at most 0.4 s of audio, a few tens of milliseconds, inside the 300 ms
-hold threshold) or, rarely, one offline window (up to 25 s of audio) that
-started while dictation was idle. Streams go ahead of meeting chunks because
-a stream's app is waiting for text now, while meetings catch up.
+independently. Only its transcription can wait, and only for a request the
+engine thread has already started. Feeding a session only queues audio and
+returns at once, so in practice that is one window's whole-clip upload (up
+to 25 s of audio) that started while dictation was idle; it runs to its
+answer or its timeout (30 s plus the clip's length, with one retry). How
+long it takes against the real service is unmeasured. Streams go ahead of
+meeting chunks because a stream's app is waiting for text now, while
+meetings catch up.
 
 ## Error codes
 
@@ -219,12 +253,13 @@ has no body.
 | 400 | `invalid-request` | Create body isn't the JSON above, or `process` is not `global`, `true`, or `1` (or is repeated). |
 | 400 | `unsupported-sample-rate` | `sampleRate` isn't 16000. |
 | 400 | `unsupported-sample-format` | Not `f32le` or `s16le`. |
-| 400 | `unknown-model` | `model` isn't a Hex model id. |
+| 400 | `unknown-model` | `model` isn't `scribe_v3` (with a `message`). |
 | 400 | `invalid-audio` | Partial sample or non-finite float. |
 | 401 | (no body) | Missing or wrong bearer token. |
 | 403 | `processing-disabled` | `process` was asked for with a processor installed but Labs › Process API transcripts off. |
 | 404 | `stream-not-found` | Unknown id, replaced stream, or wrong stream token. |
-| 409 | `model-mismatch` | Requested model/language isn't the held one. |
+| 409 | `api-key-missing` | No ElevenLabs API key is set (with a `message`). |
+| 409 | `model-mismatch` | Requested language isn't the one dictation holds. |
 | 409 | `processing-unavailable` | `process` was asked for and no processor is installed (for example `hex service`). |
 | 409 | `stream-busy` | Another stream is live. |
 | 409 | `stream-ended` | Audio or heartbeat after the end. |
@@ -236,13 +271,16 @@ has no body.
 | 415 | `unsupported-content-type` | Wrong `Content-Type`. |
 | 429 | `queue-full` | A processing run is already under way; retry after it ends. |
 | 429 | `stream-backlog-full` | 120 s not yet transcribed; slow down or wait. |
+| 500 | `token-generation-failed`, `stream-start-failed` | Hex could not create the stream. |
 | 503 | `engine-unavailable` | Hex's dictation engine isn't running. |
-| 503 | `model-not-loaded` | Dictation holds no GGUF model (for example Apple Speech). |
+| 503 | `model-not-loaded` | The engine holds no language selection yet. |
 | 503 | `shutting-down` | Hex is quitting. |
 | 504 | `stream-finish-timeout` | `finish` waited 120 s; the stream continues. |
 
-`model-changed` means the user switched dictation's model during the stream;
-start a new one. `hex-quitting` means Hex quit.
+`model-changed` means dictation's language changed during the stream (the
+model is always `scribe_v3`); start a new one. `transcription-failed` carries
+the reason in `message`, such as a refused key, no quota, or no connection.
+`hex-quitting` means Hex quit.
 
 ## Meeting finished events (`GET /meetings/events`, Labs)
 
