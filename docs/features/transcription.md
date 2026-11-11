@@ -74,12 +74,16 @@ The key audio is sent with                       // transcribe.key
 │       ELEVENLABS_API_KEY overrides the saved key
 ├── hex key status [--json] -> set or not, source, last four characters, key file path
 ├── hex key clear -> removes the saved key; a key in the environment is left alone
-└── hex key check, hex model check, Test key -> GET /v1/user with the key
+└── hex key check, hex model check, Test key -> POST /v1/speech-to-text with
+    │   the key and model_id only (no file)
     ├── Sends no audio and spends no quota
-    ├── 2xx -> accepted
-    ├── 403 -> accepted (a key limited to Speech to Text may not read the account)
+    ├── 400 or 422 (only the audio is missing) -> accepted: ElevenLabs checks
+    │   the key and its permissions before the request's fields
     ├── No key -> api-key-missing, before any request
-    ├── 401 -> api-key-invalid
+    ├── 401 invalid_api_key -> api-key-invalid
+    ├── 401 missing_permissions -> api-key-permission (a real key created
+    │   without Speech to Text access); account endpoints such as /v1/user are
+    │   not used, because a key restricted to Speech to Text cannot read them
     ├── Quota, rate limit, 5xx, unreachable (15 s limit) -> failed, with the cause
     └── CLI exits 1 on every failure
 
@@ -208,7 +212,23 @@ Live session -> realtime model scribe_v3_live    // transcribe.live
 ├── Audio -> input_audio_chunk messages, base64 PCM, at most 0.5 s each
 ├── partial_transcript -> tentative text; committed_transcript -> stable text
 ├── Release -> one empty chunk with commit=true -> the committed text
-│   └── Nothing said -> insufficient_audio_activity or commit_throttled -> no text
+│   ├── Nothing said -> insufficient_audio_activity or commit_throttled -> no text
+│   └── Under 0.3 s of audio since the last commit -> no commit is sent
+│       (ElevenLabs refuses one); the earlier commits are the text
+├── A long segment is committed by the session itself    // transcribe.live-commit
+│   ├── 15 s uncommitted and a 0.3 s pause, 22 s and a 0.12 s pause, or
+│   │   28 s with no pause at all
+│   ├── Why: ElevenLabs commits on its own after about 35 s, mid-word, and
+│   │   the commit after that came back empty against the real service
+│   ├── A commit ElevenLabs made unasked, or a finish that returns no text
+│   │   for words it had shown -> the session is unusable; the whole clip
+│   │   is transcribed by the batch model
+│   └── Checks: a_long_segment_is_committed_at_its_next_pause,
+│       continuous_speech_is_committed_before_elevenlabs_would,
+│       a_session_elevenlabs_committed_on_its_own_is_not_trusted,
+│       a_finish_that_returns_nothing_for_shown_words_is_not_trusted,
+│       a_finish_with_almost_no_new_audio_sends_no_commit (fake server);
+│       the 41.8 s clip against the real service (opt-in test)
 ├── Its text is provisional unless Final text is Live    // transcribe.final-text
 ├── A failed session reports itself on the next feed or at the finish; the
 │   whole clip is transcribed by the batch model instead
@@ -582,17 +602,50 @@ Privacy
 `HEX_ELEVENLABS_URL` can point requests at an ElevenLabs data-residency host;
 it changes where audio goes, not how long it is kept.
 
+## Verified Against ElevenLabs
+
+On 2026-11-11, on Linux, with a key restricted to Speech to Text:
+
+- The batch request Hex sends is accepted with every field it can carry
+  (`the_real_api_accepts_the_request_hex_sends`, opt-in).
+- `hex model transcribe` returned two speech clips (2.9 s and 9.8 s) word for
+  word, and `hex key check` accepted the key.
+- A good key's check answers 400 `invalid_parameters` (only the audio is
+  missing), an unknown key 401 `invalid_api_key`, and account endpoints
+  (`/v1/user`, `/v1/models`) answer a restricted key 401 `missing_permissions`,
+  which is why the check does not use them.
+- The realtime session shows partial text while audio streams, and its text
+  was correct on a 2.9 s clip and, with the session's own commits at pauses,
+  on a 41.8 s clip (`the_real_live_api_streams_partials_and_commits_the_text`,
+  opt-in; `HEX_LIVE_TEST_WAV` names another clip).
+- ElevenLabs commits on its own after about 35 s of uncommitted audio, cutting
+  mid-word ("sparkle-"), and the manual commit after it came back with empty
+  text although partials for the remaining speech had arrived (seen on every
+  attempt). Hex therefore commits a long segment itself and treats a session
+  that was committed for it, or that returns nothing for words it showed, as
+  unusable (see the realtime map above).
+- Latency from this computer, median of 5 runs (3 for the long clip's live
+  path), measured by [`scripts/scribe-latency.py`](../../scripts/scribe-latency.py):
+
+  | Clip | Batch: request to text | Live: commit to text |
+  | --- | --- | --- |
+  | 2.9 s | 463 ms | 177 ms |
+  | 9.8 s | 821 ms | 174 ms |
+  | 41.8 s | 1.5 s | 160 ms |
+
+  The batch figures include a new TLS connection for each request. Hex opens
+  its connection when a capture starts, so its own batch time should be
+  lower; that was not measured.
+
 ## Not Verified
 
-- No real request was ever made to ElevenLabs during development: no API key
-  was available. Every wire detail above (fields, message names, status codes,
-  error bodies, limits) is from ElevenLabs' documentation and is exercised only
-  against fake servers on loopback.
-- Latency is unmeasured on both paths.
-  [`scripts/scribe-latency.py`](../../scripts/scribe-latency.py) measures it
-  with the same requests Hex sends (batch upload, and a live session streamed
-  at speaking pace then committed); it has not been run.
-- Linux (KDE Wayland): compiled and unit-tested; not run against ElevenLabs.
+- The app was never launched after the change: the window, shortcuts, the
+  microphone path, pasting, onboarding, and a dictation from key press to
+  pasted text are untested on every OS.
+- What `no_verbatim`, `numbers_format`, and keyterms do to a transcript (they
+  are accepted; their effect was not inspected), the real answers for spent
+  quota and rate limits, and meetings, captures, and `/streams` against the
+  real service.
 - Windows: type-checked by cross compilation only; never run.
 - macOS: edited without being compiled or run.
 - A listed check is a locator, not a recorded passing run.

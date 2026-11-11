@@ -375,8 +375,12 @@ pub fn transcribe_wav_bytes(wav: &[u8], selection: &TranscriptionSelection) -> R
     ScribeTranscriber::load(selection)?.transcribe(clip.samples())
 }
 
-/// Checks the saved key against ElevenLabs without sending audio or spending
-/// quota: `GET /v1/user`, which any valid key may read.
+/// Checks a key against ElevenLabs without sending audio or spending quota:
+/// a Speech to Text request with no file. ElevenLabs authenticates the key
+/// and its permissions first, so an unknown or restricted key is refused as
+/// such, and a usable one is refused only for the missing audio. (Account
+/// endpoints are no test: a key restricted to Speech to Text cannot read
+/// them.)
 pub fn check_key(secret: &str) -> std::result::Result<(), ScribeError> {
     let base = base_url();
     let agent = crate::net::agent(&base, |config| {
@@ -393,12 +397,21 @@ fn check_key_at(
     base: &str,
     secret: &str,
 ) -> std::result::Result<(), ScribeError> {
+    const BOUNDARY: &str = "hex-scribe-key-check";
+    let body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model_id\"\r\n\r\n{}\r\n--{BOUNDARY}--\r\n",
+        client::MODEL
+    );
     let request = ureq::http::Request::builder()
-        .method("GET")
-        .uri(format!("{base}/v1/user"))
+        .method("POST")
+        .uri(format!("{base}/v1/speech-to-text"))
         .header("xi-api-key", secret)
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
         .header("accept", "application/json")
-        .body(())
+        .body(body.into_bytes())
         .map_err(|_| ScribeError::InvalidKey)?;
     let mut response = agent
         .run(request)
@@ -413,9 +426,11 @@ fn check_key_at(
         .limit(64 * 1024)
         .read_to_string()
         .unwrap_or_default();
-    // A key limited to Speech to Text may not read the account: it is valid.
     match ScribeError::from_response(status, &body) {
-        ScribeError::Rejected { status: 403, .. } => Ok(()),
+        // Authenticated and permitted; only the audio is missing.
+        ScribeError::Rejected {
+            status: 400 | 422, ..
+        } => Ok(()),
         error => Err(error),
     }
 }
@@ -451,20 +466,27 @@ mod tests {
         assert!(!transcriber("http://127.0.0.1:9", "de").matches_selection(&english));
     }
 
+    /// What ElevenLabs answers a Speech to Text request that has no file.
+    const NO_FILE: &str = r#"{"detail":{"type":"validation_error","code":"invalid_parameters","message":"Must provide either file or a URL parameter.","status":"invalid_parameters","param":"file"}}"#;
+
     #[test]
     fn a_key_is_checked_without_audio() {
-        let (base, server) = serve(vec![(200, r#"{"user_id":"u"}"#.into())]);
+        let (base, server) = serve(vec![(400, NO_FILE.into())]);
 
         check_key_at(&super::client::tests::agent(), &base, "sk_ok").unwrap();
 
         let received = server.join().unwrap();
-        assert!(received[0].head.starts_with("GET /v1/user "));
+        assert!(received[0].head.starts_with("POST /v1/speech-to-text "));
         assert_eq!(received[0].header("xi-api-key").as_deref(), Some("sk_ok"));
-        assert!(received[0].body.is_empty());
+        assert_eq!(received[0].field("model_id").as_deref(), Some("scribe_v3"));
+        assert!(
+            !String::from_utf8_lossy(&received[0].body).contains("name=\"file\""),
+            "no audio is sent"
+        );
     }
 
     #[test]
-    fn a_refused_key_is_reported_and_a_scoped_key_is_accepted() {
+    fn an_unknown_key_and_a_restricted_key_are_each_named() {
         let agent = super::client::tests::agent();
         let (base, server) = serve(vec![(
             401,
@@ -476,12 +498,16 @@ mod tests {
         );
         server.join().unwrap();
 
-        // A key limited to Speech to Text cannot read the account.
         let (base, server) = serve(vec![(
-            403,
-            r#"{"detail":{"status":"missing_permissions","message":"no user_read"}}"#.into(),
+            401,
+            r#"{"detail":{"status":"missing_permissions","message":"The API key you used is missing the permission speech_to_text to execute this operation."}}"#.into(),
         )]);
-        assert_eq!(check_key_at(&agent, &base, "sk_scoped"), Ok(()));
+        let error = check_key_at(&agent, &base, "sk_scoped").unwrap_err();
+        assert!(
+            matches!(error, ScribeError::MissingPermission(_)),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("speech_to_text"), "{error}");
         server.join().unwrap();
     }
 

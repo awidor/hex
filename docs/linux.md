@@ -9,9 +9,10 @@ The build scripts accept x86_64 and ARM64 (aarch64) Linux, and the code covers
 X11 and Wayland. This fork was developed and verified on KDE Plasma (Wayland)
 only: what this guide says about other desktops and compositors (GNOME,
 Hyprland, Sway, niri, i3/X11) describes code inherited from upstream Hex that
-was not run here. No real request was ever made to ElevenLabs during
-development (no API key was available), so behaviour against the real service,
-and its latency, are unmeasured.
+was not run here. Against the real ElevenLabs service only the command line
+and the two request paths were run (see
+[features/transcription.md](features/transcription.md#verified-against-elevenlabs));
+the app itself was never launched after the change.
 
 Audio uses ALSA, including PipeWire systems with ALSA compatibility. The
 window draws with Vulkan (the Rune UI renders through wgpu), so it needs a

@@ -120,11 +120,15 @@ relying on these numbers.
 
 ## Not verified
 
-- No real request was ever made to ElevenLabs while this fork was developed,
-  because no API key was available. How Hex behaves against the real service,
-  and how long a transcription takes, are unmeasured.
-  `scripts/scribe-latency.py` measures both paths once you have a key; each
-  run is billed.
+- Against the real ElevenLabs service only the command line and the two
+  request paths were run (2026-11-11): `hex key check`, `hex model transcribe`
+  on real speech (word for word on two clips), and the realtime session on a
+  3 s and a 42 s clip. From this computer the batch model answered in about
+  0.5 s for a 3 s clip, 0.8 s for 10 s, and 1.5 s for 42 s; the realtime model
+  answered its final commit in about 0.17 s at any length.
+  `scripts/scribe-latency.py` repeats the measurement; each run is billed.
+  Details are in
+  [docs/features/transcription.md](docs/features/transcription.md#verified-against-elevenlabs).
 - The app was never launched after the change, on any OS: the window, the
   shortcuts, the microphone path, pasting, and a real first run are untested.
   What was run: the unit tests, the rendered UI scenes, and the `hex` command

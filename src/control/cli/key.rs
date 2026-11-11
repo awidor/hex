@@ -247,6 +247,7 @@ pub(super) fn error_code(error: &ScribeError) -> &'static str {
     match error {
         ScribeError::MissingKey => "api-key-missing",
         ScribeError::InvalidKey => "api-key-invalid",
+        ScribeError::MissingPermission(_) => "api-key-permission",
         _ => "failed",
     }
 }

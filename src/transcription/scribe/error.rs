@@ -9,8 +9,11 @@ use std::fmt;
 pub enum ScribeError {
     /// No API key is saved and `ELEVENLABS_API_KEY` is not set.
     MissingKey,
-    /// ElevenLabs refused the key (HTTP 401).
+    /// ElevenLabs does not know the key.
     InvalidKey,
+    /// The key is real but was created without a permission the request
+    /// needs (ElevenLabs keys can be restricted); the text names it.
+    MissingPermission(String),
     /// The account has no transcription quota left.
     QuotaExceeded,
     /// Too many requests at once (HTTP 429).
@@ -52,6 +55,10 @@ impl ScribeError {
         if code.contains("quota") || status == 402 {
             return Self::QuotaExceeded;
         }
+        // A restricted key is also answered with HTTP 401, with its own status.
+        if code.contains("missing_permission") {
+            return Self::MissingPermission(message);
+        }
         if status == 401 || code.contains("invalid_api_key") || code.contains("missing_api_key") {
             return Self::InvalidKey;
         }
@@ -78,6 +85,13 @@ impl fmt::Display for ScribeError {
             Self::InvalidKey => {
                 formatter.write_str("ElevenLabs refused the API key; check it in Settings")
             }
+            Self::MissingPermission(detail) if detail.is_empty() => formatter.write_str(
+                "the ElevenLabs API key lacks the Speech to Text permission; create a key that has it",
+            ),
+            Self::MissingPermission(detail) => write!(
+                formatter,
+                "the ElevenLabs API key lacks a permission ({detail}); create a key with Speech to Text access"
+            ),
             Self::QuotaExceeded => {
                 formatter.write_str("the ElevenLabs account has no transcription quota left")
             }
@@ -160,6 +174,31 @@ mod tests {
             ScribeError::from_response(
                 400,
                 r#"{"detail":{"status":"invalid_api_key","message":"Invalid API key"}}"#
+            ),
+            ScribeError::InvalidKey
+        );
+    }
+
+    #[test]
+    fn a_restricted_key_is_told_apart_from_an_unknown_one() {
+        // Both arrive as HTTP 401; these bodies are ElevenLabs' own.
+        let restricted = ScribeError::from_response(
+            401,
+            r#"{"detail":{"type":"authentication_error","code":"unauthorized","message":"The API key you used is missing the permission speech_to_text to execute this operation.","status":"missing_permissions"}}"#,
+        );
+        let ScribeError::MissingPermission(detail) = &restricted else {
+            panic!("{restricted:?}");
+        };
+        assert!(detail.contains("speech_to_text"), "{detail}");
+        assert!(!restricted.retryable());
+        assert!(
+            restricted.worth_retrying_later(),
+            "a new key can send the clip"
+        );
+        assert_eq!(
+            ScribeError::from_response(
+                401,
+                r#"{"detail":{"type":"authentication_error","code":"unauthorized","message":"Invalid API key","status":"invalid_api_key"}}"#,
             ),
             ScribeError::InvalidKey
         );

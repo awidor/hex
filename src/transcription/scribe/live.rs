@@ -7,6 +7,13 @@
 //! holds a capture: a failed session reports itself on the next feed or at
 //! the finish, and the engine transcribes the whole clip instead.
 //!
+//! The session commits by itself at a pause once a segment is long
+//! ([`CommitPolicy`]). ElevenLabs otherwise commits on its own after about
+//! 35 s of audio, mid-word, and against the real service the commit that
+//! followed such an automatic one came back empty: the words after it were
+//! lost. A session that sees an automatic commit anyway, or gets no text for
+//! words it had shown, reports itself unusable so the whole clip decides.
+//!
 //! The session connects directly; the computer's HTTP proxy (`net::proxy`)
 //! is not used for the WebSocket.
 
@@ -45,6 +52,19 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often a waiting finish looks at its cancel token.
 const CANCEL_POLL: Duration = Duration::from_millis(20);
 
+/// Uncommitted audio after which the session commits at the next pause.
+const COMMIT_AFTER_SAMPLES: usize = 15 * 16_000;
+/// The pause that commit waits for.
+const COMMIT_PAUSE_SAMPLES: usize = 4_800;
+/// Uncommitted audio after which a shorter pause is enough.
+const COMMIT_SOON_SAMPLES: usize = 22 * 16_000;
+const COMMIT_SOON_PAUSE_SAMPLES: usize = 1_920;
+/// Uncommitted audio after which the session commits without a pause, well
+/// before ElevenLabs' own commit at about 35 s.
+const COMMIT_NOW_SAMPLES: usize = 28 * 16_000;
+/// ElevenLabs refuses a commit of less uncommitted audio than this.
+const MIN_COMMIT_SAMPLES: usize = 4_800;
+
 /// Why a finish did not use a session's text: the session only ever showed
 /// provisional words, and the whole clip decides the transcript.
 pub const PROVISIONAL: &str = "live text is provisional; the whole clip decides";
@@ -72,9 +92,45 @@ struct State {
     committed: String,
     /// The uncommitted segment's text.
     tentative: String,
-    /// Commits the server has answered.
-    commits: u64,
+    /// Commits this session sent, and how many of them were answered.
+    commits_sent: u64,
+    commits_answered: u64,
+    /// The finish's commit was sent.
+    final_sent: bool,
+    /// ElevenLabs committed without being asked.
+    auto_committed: bool,
+    /// The finish's commit came back empty although words had been shown.
+    dropped_tail: bool,
     failed: Option<String>,
+}
+
+impl State {
+    /// Every commit sent has its answer, the finish's included.
+    fn finished(&self) -> bool {
+        self.final_sent && self.commits_answered >= self.commits_sent
+    }
+
+    /// One answer to a commit. `text` is the committed segment, `None` when
+    /// ElevenLabs answered that there was nothing to commit.
+    fn answer(&mut self, text: Option<&str>) {
+        let asked = self.commits_answered < self.commits_sent;
+        if asked {
+            self.commits_answered += 1;
+        } else if text.is_some() {
+            self.auto_committed = true;
+        }
+        let segment = text.unwrap_or_default();
+        if asked && self.finished() && segment.is_empty() && !self.tentative.is_empty() {
+            self.dropped_tail = true;
+        }
+        if !segment.is_empty() {
+            if !self.committed.is_empty() {
+                self.committed.push(' ');
+            }
+            self.committed.push_str(segment);
+        }
+        self.tentative.clear();
+    }
 }
 
 #[derive(Default)]
@@ -154,13 +210,9 @@ impl StreamFeed for LiveSession {
         if self.provisional {
             return Err(PROVISIONAL.into());
         }
-        let answered = {
-            let state = self.shared.lock();
-            if let Some(reason) = &state.failed {
-                return Err(reason.clone());
-            }
-            state.commits
-        };
+        if let Some(reason) = &self.shared.lock().failed {
+            return Err(reason.clone());
+        }
         self.outgoing
             .send(Outgoing::Commit)
             .map_err(|_| self.ended())?;
@@ -169,7 +221,13 @@ impl StreamFeed for LiveSession {
         loop {
             // An answer that arrived stands, even when the connection closed
             // right after it.
-            if state.commits > answered {
+            if state.finished() {
+                if state.auto_committed {
+                    return Err("ElevenLabs committed the live session on its own".into());
+                }
+                if state.dropped_tail {
+                    return Err("the live session returned no text for its last words".into());
+                }
                 return Ok(state.committed.trim().to_string());
             }
             if let Some(reason) = &state.failed {
@@ -235,6 +293,58 @@ fn run(config: Config, incoming: Receiver<Outgoing>, shared: &Shared, cancel: &C
     }
 }
 
+/// When the session commits by itself: at a pause once the segment is long,
+/// at a shorter pause once it is longer, and without one before ElevenLabs
+/// would commit on its own.
+#[derive(Default)]
+struct CommitPolicy {
+    speech: crate::transcription::pause_segmenter::SpeechFrames,
+    /// Samples not yet a whole 20 ms frame.
+    frame: Vec<f32>,
+    /// Audio sent since the last commit.
+    uncommitted: usize,
+    /// Quiet audio at the end of what was sent.
+    quiet: usize,
+}
+
+impl CommitPolicy {
+    /// Takes `samples` in, returning the length of the prefix after which
+    /// to commit, when a commit is due inside them.
+    fn commit_within(&mut self, samples: &[f32]) -> Option<usize> {
+        use crate::transcription::pause_segmenter::FRAME_SAMPLES;
+        let mut taken = 0;
+        while taken < samples.len() {
+            let take = (FRAME_SAMPLES - self.frame.len()).min(samples.len() - taken);
+            self.frame.extend_from_slice(&samples[taken..taken + take]);
+            taken += take;
+            self.uncommitted += take;
+            if self.frame.len() < FRAME_SAMPLES {
+                break;
+            }
+            if self.speech.classify(&self.frame).quiet {
+                self.quiet += FRAME_SAMPLES;
+            } else {
+                self.quiet = 0;
+            }
+            self.frame.clear();
+            let due = self.uncommitted >= COMMIT_NOW_SAMPLES
+                || (self.uncommitted >= COMMIT_SOON_SAMPLES
+                    && self.quiet >= COMMIT_SOON_PAUSE_SAMPLES)
+                || (self.uncommitted >= COMMIT_AFTER_SAMPLES && self.quiet >= COMMIT_PAUSE_SAMPLES);
+            if due {
+                self.committed();
+                return Some(taken);
+            }
+        }
+        None
+    }
+
+    fn committed(&mut self) {
+        self.uncommitted = 0;
+        self.quiet = 0;
+    }
+}
+
 /// Sends queued audio and reads the server's text until the session's owner
 /// drops it, cancels it, or it fails.
 fn pump(
@@ -244,16 +354,36 @@ fn pump(
     cancel: &CancelToken,
     sent_samples: &mut usize,
 ) -> Result<(), String> {
+    let mut policy = CommitPolicy::default();
     loop {
         loop {
             match incoming.try_recv() {
                 Ok(Outgoing::Audio(samples)) => {
-                    for chunk in samples.chunks(MAX_CHUNK_SAMPLES) {
-                        send(socket, &audio_message(chunk, false))?;
-                        *sent_samples += chunk.len();
+                    let mut rest = samples.as_slice();
+                    while !rest.is_empty() {
+                        let cut = policy.commit_within(rest);
+                        let (now, later) = rest.split_at(cut.unwrap_or(rest.len()));
+                        for chunk in now.chunks(MAX_CHUNK_SAMPLES) {
+                            send(socket, &audio_message(chunk, false))?;
+                            *sent_samples += chunk.len();
+                        }
+                        if cut.is_some() {
+                            commit(socket, shared, false)?;
+                        }
+                        rest = later;
                     }
                 }
-                Ok(Outgoing::Commit) => send(socket, &audio_message(&[], true))?,
+                Ok(Outgoing::Commit) => {
+                    // ElevenLabs refuses a commit of almost no audio; then
+                    // the commits already answered are the whole text.
+                    if policy.uncommitted >= MIN_COMMIT_SAMPLES {
+                        commit(socket, shared, true)?;
+                    } else {
+                        shared.lock().final_sent = true;
+                        shared.changed.notify_all();
+                    }
+                    policy.committed();
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Ok(()),
             }
@@ -273,6 +403,18 @@ fn pump(
             Err(error) => return Err(format!("the live session's connection failed ({error})")),
         }
     }
+}
+
+/// Sends a commit and counts it, so its answer is told from an automatic
+/// commit; `last` marks the finish's.
+fn commit(socket: &mut Socket, shared: &Shared, last: bool) -> Result<(), String> {
+    // Counted before it is sent: its answer cannot arrive first.
+    {
+        let mut state = shared.lock();
+        state.commits_sent += 1;
+        state.final_sent |= last;
+    }
+    send(socket, &audio_message(&[], true))
 }
 
 fn send(socket: &mut Socket, message: &str) -> Result<(), String> {
@@ -311,25 +453,12 @@ fn receive(text: &str, shared: &Shared) -> Result<(), String> {
             shared.changed.notify_all();
         }
         "committed_transcript" | "committed_transcript_with_timestamps" => {
-            let segment = body("text");
-            let mut state = shared.lock();
-            if !segment.is_empty() {
-                if !state.committed.is_empty() {
-                    state.committed.push(' ');
-                }
-                state.committed.push_str(&segment);
-            }
-            state.tentative.clear();
-            state.commits += 1;
-            drop(state);
+            shared.lock().answer(Some(&body("text")));
             shared.changed.notify_all();
         }
         // A commit with nothing said answers with one of these and no text.
         "insufficient_audio_activity" | "commit_throttled" => {
-            let mut state = shared.lock();
-            state.tentative.clear();
-            state.commits += 1;
-            drop(state);
+            shared.lock().answer(None);
             shared.changed.notify_all();
         }
         "session_started" | "warning" | "" => {}
@@ -558,7 +687,7 @@ mod tests {
         let cancel = CancelToken::new();
         let mut session = LiveSession::open(config(&base, false), &cancel).unwrap();
 
-        session.feed(&vec![0.5; 1_600]).unwrap();
+        session.feed(&vec![0.5; 6_400]).unwrap();
         let partial = wait_for(&session, |partial| !partial.tentative.is_empty());
         assert_eq!(partial.stable, "");
         assert_eq!(partial.tentative, "hello wor");
@@ -590,15 +719,37 @@ mod tests {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(audio["audio_base_64"].as_str().unwrap())
             .unwrap();
-        assert_eq!(bytes.len(), 1_600 * 2);
+        assert_eq!(bytes.len(), 6_400 * 2);
         assert_eq!(commit["commit"], true);
         assert_eq!(commit["audio_base_64"], "");
     }
 
+    /// A tone with a quiet stretch, as a sentence, a pause, and another.
+    fn speech(samples: usize) -> Vec<f32> {
+        (0..samples)
+            .map(|index| (index as f32 * 0.05).sin() * 0.3)
+            .collect()
+    }
+
+    /// Reads audio messages until a commit arrives; returns the samples seen.
+    fn audio_until_commit(socket: &mut WebSocket<TcpStream>) -> usize {
+        let mut samples = 0;
+        loop {
+            let message = next_json(socket);
+            if message["commit"] == true {
+                return samples;
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(message["audio_base_64"].as_str().unwrap())
+                .unwrap();
+            samples += bytes.len() / 2;
+        }
+    }
+
     #[test]
-    fn committed_segments_accumulate_ahead_of_the_tentative_text() {
+    fn a_long_segment_is_committed_at_its_next_pause() {
         let (base, server) = serve(|socket, _| {
-            next_json(socket);
+            let first = audio_until_commit(socket);
             say(
                 socket,
                 serde_json::json!({"message_type": "committed_transcript", "text": "First part."}),
@@ -607,21 +758,125 @@ mod tests {
                 socket,
                 serde_json::json!({"message_type": "partial_transcript", "text": "second"}),
             );
-            next_json(socket);
+            let second = audio_until_commit(socket);
             say(
                 socket,
                 serde_json::json!({"message_type": "committed_transcript", "text": "Second part."}),
+            );
+            (first, second)
+        });
+        let cancel = CancelToken::new();
+        let mut session = LiveSession::open(config(&base, false), &cancel).unwrap();
+
+        // Quiet first, as a capture's pre-roll is, so the noise floor starts
+        // low. Then 16 s of speech, a 0.5 s pause, and 2 s more: the pause is
+        // where the long segment is committed, with no finish asked yet.
+        let mut clip = vec![0.0; 8_000];
+        clip.extend(speech(16 * 16_000));
+        clip.extend(vec![0.0; 8_000]);
+        clip.extend(speech(2 * 16_000));
+        for chunk in clip.chunks(1_600) {
+            session.feed(chunk).unwrap();
+        }
+        let partial = wait_for(&session, |partial| !partial.tentative.is_empty());
+        assert_eq!(partial.stable, "First part.");
+        assert_eq!(partial.tentative, " second");
+        assert_eq!(session.finalize().unwrap(), "First part. Second part.");
+
+        let (first, second) = server.join().unwrap();
+        // Committed inside the pause: after the speech and 0.3 s of quiet.
+        assert_eq!(first, 8_000 + 16 * 16_000 + COMMIT_PAUSE_SAMPLES);
+        assert_eq!(first + second, clip.len());
+    }
+
+    #[test]
+    fn continuous_speech_is_committed_before_elevenlabs_would() {
+        let mut policy = CommitPolicy::default();
+        // Speech without a pause: one 20 ms frame in ten dips, as syllables
+        // do, which keeps the noise floor low and is far too short to
+        // commit at.
+        let mut clip = vec![0.0; 8_000];
+        for frame in 0..(40 * 50) {
+            if frame % 10 == 9 {
+                clip.extend(vec![0.0; 320]);
+            } else {
+                clip.extend(speech(320));
+            }
+        }
+        let cut = policy.commit_within(&clip).expect("a commit is due");
+        assert_eq!(cut, COMMIT_NOW_SAMPLES);
+        assert!(cut < 35 * 16_000, "before the automatic commit");
+        // The count starts again after it.
+        assert_eq!(policy.commit_within(&clip[cut..]), None);
+    }
+
+    #[test]
+    fn a_session_elevenlabs_committed_on_its_own_is_not_trusted() {
+        let (base, server) = serve(|socket, _| {
+            next_json(socket);
+            // Nothing asked for this one.
+            say(
+                socket,
+                serde_json::json!({"message_type": "committed_transcript", "text": "First part-"}),
+            );
+            next_json(socket);
+            say(
+                socket,
+                serde_json::json!({"message_type": "committed_transcript", "text": ""}),
             );
         });
         let cancel = CancelToken::new();
         let mut session = LiveSession::open(config(&base, false), &cancel).unwrap();
 
-        session.feed(&vec![0.1; 800]).unwrap();
-        let partial = wait_for(&session, |partial| !partial.tentative.is_empty());
-        assert_eq!(partial.stable, "First part.");
-        assert_eq!(partial.tentative, " second");
-        assert_eq!(session.finalize().unwrap(), "First part. Second part.");
+        session.feed(&speech(6_400)).unwrap();
+        wait_for(&session, |partial| !partial.stable.is_empty());
+        let error = session.finalize().unwrap_err();
+        assert_eq!(error, "ElevenLabs committed the live session on its own");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_finish_that_returns_nothing_for_shown_words_is_not_trusted() {
+        let (base, server) = serve(|socket, _| {
+            next_json(socket);
+            say(
+                socket,
+                serde_json::json!({"message_type": "partial_transcript", "text": "the last words"}),
+            );
+            next_json(socket);
+            say(
+                socket,
+                serde_json::json!({"message_type": "committed_transcript", "text": ""}),
+            );
+        });
+        let cancel = CancelToken::new();
+        let mut session = LiveSession::open(config(&base, false), &cancel).unwrap();
+
+        session.feed(&speech(6_400)).unwrap();
+        wait_for(&session, |partial| !partial.tentative.is_empty());
+        let error = session.finalize().unwrap_err();
+        assert_eq!(
+            error,
+            "the live session returned no text for its last words"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_finish_with_almost_no_new_audio_sends_no_commit() {
+        // ElevenLabs refuses a commit of under 0.3 s of audio.
+        let (base, server) = serve(|socket, _| {
+            next_json(socket);
+            // The session ends without a commit: the next read is its close.
+            matches!(socket.read(), Ok(Message::Text(_)))
+        });
+        let cancel = CancelToken::new();
+        let mut session = LiveSession::open(config(&base, false), &cancel).unwrap();
+
+        session.feed(&speech(1_600)).unwrap();
+        assert_eq!(session.finalize().unwrap(), "");
+        drop(session);
+        assert!(!server.join().unwrap(), "no commit was sent");
     }
 
     #[test]
@@ -677,11 +932,12 @@ mod tests {
     fn a_cancelled_finish_stops_waiting() {
         let (base, server) = serve(|socket, _| {
             // Never answers the commit.
-            next_json(socket);
+            audio_until_commit(socket);
             let _ = socket.read();
         });
         let cancel = CancelToken::new();
         let mut session = LiveSession::open(config(&base, false), &cancel).unwrap();
+        session.feed(&speech(6_400)).unwrap();
         let canceller = cancel.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
@@ -694,10 +950,68 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// The one test that opens a real session, and so the only check of the
+    /// realtime protocol as ElevenLabs speaks it. It is billed (about three
+    /// seconds of audio) and runs only when asked:
+    /// `ELEVENLABS_API_KEY=… cargo test --bin hex the_real_live_api -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "streams three seconds of audio to ElevenLabs with ELEVENLABS_API_KEY"]
+    fn the_real_live_api_streams_partials_and_commits_the_text() {
+        let key = std::env::var("ELEVENLABS_API_KEY").expect("ELEVENLABS_API_KEY is set");
+        // "Send the patch to OpenCode for review.", or the 16 kHz mono WAV
+        // HEX_LIVE_TEST_WAV names (a long one crosses ElevenLabs' own commit
+        // at about 36 s; its text is then only printed).
+        let own = std::env::var("HEX_LIVE_TEST_WAV").ok();
+        let wav = own.clone().unwrap_or_else(|| {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/vocabulary/audio/term-opencode-2.wav"
+            )
+            .to_string()
+        });
+        let samples: Vec<f32> = hound::WavReader::open(wav)
+            .unwrap()
+            .samples::<i16>()
+            .map(|sample| f32::from(sample.unwrap()) / f32::from(i16::MAX))
+            .collect();
+        let cancel = CancelToken::new();
+        let mut session = LiveSession::open(
+            Config {
+                base: crate::transcription::scribe::client::DEFAULT_BASE.into(),
+                key: key.trim().into(),
+                language: Some("en".into()),
+                keyterms: vec!["OpenCode".into()],
+                no_verbatim: false,
+                provisional: false,
+            },
+            &cancel,
+        )
+        .unwrap();
+
+        // At speaking pace, as a held shortcut feeds it.
+        let mut heard_partial = false;
+        for chunk in samples.chunks(1_600) {
+            session.feed(chunk).expect("the session takes audio");
+            std::thread::sleep(Duration::from_millis(100));
+            let partial = session.partial();
+            heard_partial |= !partial.stable.is_empty() || !partial.tentative.is_empty();
+        }
+        let committed = Instant::now();
+        let text = session.finalize().expect("the commit is answered");
+        println!(
+            "text: {text:?}; partial while speaking: {heard_partial}; commit answered in {} ms",
+            committed.elapsed().as_millis()
+        );
+        assert!(
+            own.is_some() || text.to_lowercase().contains("patch"),
+            "{text:?}"
+        );
+    }
+
     #[test]
     fn a_commit_with_nothing_said_returns_no_text() {
         let (base, server) = serve(|socket, _| {
-            next_json(socket);
+            audio_until_commit(socket);
             say(
                 socket,
                 serde_json::json!({"message_type": "insufficient_audio_activity", "error": "quiet"}),
@@ -706,6 +1020,7 @@ mod tests {
         let cancel = CancelToken::new();
         let mut session = LiveSession::open(config(&base, false), &cancel).unwrap();
 
+        session.feed(&vec![0.0; 6_400]).unwrap();
         assert_eq!(session.finalize().unwrap(), "");
         server.join().unwrap();
     }

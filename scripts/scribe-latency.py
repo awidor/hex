@@ -28,6 +28,7 @@ import argparse
 import base64
 import json
 import os
+import select
 import socket
 import ssl
 import statistics
@@ -42,6 +43,7 @@ import wave
 
 DEFAULT_BASE = "https://api.elevenlabs.io"
 CHUNK_SAMPLES = 1_600  # 100 ms at 16 kHz
+MID_COMMIT_SECONDS = 20.0
 
 
 def api_key():
@@ -156,6 +158,13 @@ class WebSocket:
         data, self.buffer = self.buffer[:count], self.buffer[count:]
         return data
 
+    def ready(self, timeout):
+        """Whether a message can be read within `timeout` seconds."""
+        if self.buffer or getattr(self.sock, "pending", lambda: 0)():
+            return True
+        readable, _, _ = select.select([self.sock], [], [], timeout)
+        return bool(readable)
+
     def send(self, text):
         payload = text.encode()
         mask = os.urandom(4)
@@ -225,18 +234,12 @@ def live(base, key, pcm, language):
     started = time.monotonic()
     session = WebSocket(url, {"xi-api-key": key})
     connected = time.monotonic() - started
-    step = CHUNK_SAMPLES * 2
-    begun = time.monotonic()
-    for index, offset in enumerate(range(0, len(pcm), step)):
-        # Speaking pace: chunk N is due N * 100 ms after the first.
-        wait = begun + index * 0.1 - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-        session.send(chunk_message(pcm[offset : offset + step], False))
-    committed_at = time.monotonic()
-    session.send(chunk_message(b"", True))
     text = []
-    while True:
+    sent = answered = 0
+
+    def read_one():
+        """Reads one message and counts it when it answers a commit."""
+        nonlocal answered
         raw = session.receive()
         if raw is None:
             sys.exit("the live session closed before it answered the commit")
@@ -244,12 +247,36 @@ def live(base, key, pcm, language):
         kind = message.get("message_type", "")
         if kind.startswith("committed_transcript"):
             text.append(message.get("text", "").strip())
-            break
-        if kind in ("partial_transcript", "session_started", "warning"):
-            continue
-        if kind in ("insufficient_audio_activity", "commit_throttled"):
-            break
-        sys.exit(f"live session failed: {kind}: {message.get('error', '')}")
+            answered += 1
+        elif kind in ("insufficient_audio_activity", "commit_throttled"):
+            answered += 1
+        elif kind not in ("partial_transcript", "session_started", "warning"):
+            sys.exit(f"live session failed: {kind}: {message.get('error', '')}")
+
+    step = CHUNK_SAMPLES * 2
+    uncommitted = 0.0
+    begun = time.monotonic()
+    for index, offset in enumerate(range(0, len(pcm), step)):
+        # Speaking pace: chunk N is due N * 100 ms after the first.
+        wait = begun + index * 0.1 - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        session.send(chunk_message(pcm[offset : offset + step], False))
+        uncommitted += 0.1
+        # Hex commits a long segment itself (at a pause; here simply every
+        # 20 s), because ElevenLabs otherwise commits on its own after about
+        # 35 s and the commit after that one comes back empty.
+        if uncommitted >= MID_COMMIT_SECONDS:
+            session.send(chunk_message(b"", True))
+            sent += 1
+            uncommitted = 0.0
+    while session.ready(0.05):
+        read_one()
+    committed_at = time.monotonic()
+    session.send(chunk_message(b"", True))
+    sent += 1
+    while answered < sent:
+        read_one()
     latency = time.monotonic() - committed_at
     session.close()
     return connected, latency, " ".join(part for part in text if part)

@@ -33,9 +33,14 @@ code, copy, or docs that say or imply otherwise.
   wherever platform support is described, and never claim a Windows or macOS
   behavior was tested here. Statements below about macOS and Windows describe
   what the code is written to do.
-- Not done: no real request was ever made to ElevenLabs during development
-  (no API key was available). Behavior against the real service, and its
-  latency, are unmeasured. `scripts/scribe-latency.py` times the batch and
+- Against the real ElevenLabs service only the command line and the two
+  request paths were run (2026-11-11; see "Verified Against ElevenLabs" in
+  `docs/features/transcription.md`): the batch request, the key check, and
+  the realtime session, which exposed two things the fake servers could not
+  (a key restricted to Speech to Text cannot read account endpoints, and
+  ElevenLabs' own commit after about 35 s loses the words that follow).
+  Meetings, captures, `/streams`, and the app as a whole were not run against
+  it. `scripts/scribe-latency.py` times the batch and
   live paths with the requests Hex sends; it needs a key and every run is
   billed.
 

@@ -11,3 +11,6 @@ __pycache__/
 /result-*
 /.render
 /captures
+
+# Local secrets (the ElevenLabs API key for tests); never committed.
+.env

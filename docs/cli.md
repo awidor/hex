@@ -178,7 +178,8 @@ ends up in your shell history. The key is saved to the owner-only file
 `elevenlabs.key` in Hex's data folder and is never printed. `ELEVENLABS_API_KEY`
 wins over the saved key for the process that has it in its environment; on
 Linux that is not the background service (see [linux.md](linux.md)). `key check`
-and `model check` exit 1 with `api-key-missing`, `api-key-invalid`, or the
+and `model check` exit 1 with `api-key-missing`, `api-key-invalid`,
+`api-key-permission` (a real key created without Speech to Text access), or the
 reason ElevenLabs could not be reached. See
 [features/transcription.md](features/transcription.md).
 
@@ -398,7 +399,8 @@ shortcut-in-use        another Hex shortcut already uses that binding
 not-found              no such capture, or it has no scrawl.json yet
 unknown-model          any model id but `scribe_v3`
 api-key-missing        no ElevenLabs API key is set (`hex key set`)
-api-key-invalid        ElevenLabs refused the key
+api-key-invalid        ElevenLabs does not know the key
+api-key-permission     the key is real but lacks the Speech to Text permission
 feature-off            the command needs an opt-in that is off (Meetings)
 disabled               a Labs toggle the command needs is off (the message names it)
 not-ready              Hex is waiting for setup (permissions or the API key)
