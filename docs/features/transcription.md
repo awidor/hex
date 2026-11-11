@@ -294,8 +294,9 @@ Settings › General › Transcription › Final text  // transcribe.final-text
 ├── Batch (default) -> "Most accurate: the whole clip is transcribed when you release"
 │   ├── No live text shown -> no live session; one batch request at release
 │   └── Live text shown -> a live session shows provisional words and is
-│       never committed; the batch request still decides the text
-│       (source=offline), so the audio is sent twice
+│       never asked for the final text (it still commits a long segment at
+│       a pause, which only settles the words shown); the batch request
+│       decides the text (source=offline), so the audio is sent twice
 └── Live -> "Fastest: uses the live model's text"
     ├── The session's committed text is the transcript (source=stream); no
     │   second upload
