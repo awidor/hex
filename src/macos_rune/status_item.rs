@@ -9,9 +9,6 @@ use objc2_app_kit::{NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSStatusB
 use objc2_foundation::{MainThreadMarker, NSData, NSObject, NSSize, NSString};
 
 use crate::app_settings::{AppSettings, HotkeyBinding};
-use crate::desktop::tray_menu::model_menu_entries;
-use crate::transcription::models::{MODELS, TranscriptionModelId};
-use crate::transcription::preparation::PreparationStatus;
 
 const IDLE_ICON_PNG: &[u8] = include_bytes!("../../assets/icons/menubar-idle@2x.png");
 const RECORDING_ICON_PNG: &[u8] = include_bytes!("../../assets/icons/menubar-recording@2x.png");
@@ -20,9 +17,6 @@ const STATUS_ICON_POINTS: f64 = 18.0;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatusItemAction {
     OpenSettings,
-    OpenModels,
-    SelectModel(TranscriptionModelId),
-    CancelModelPreparation,
     PasteLast,
     /// Copy History entry `id` (Labs › Copy recent dictations).
     CopyRecentDictation(u64),
@@ -58,23 +52,6 @@ objc2::define_class!(
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: &AnyObject) {
             let _ = self.ivars().actions.try_send(StatusItemAction::OpenSettings);
-        }
-
-        #[unsafe(method(openModels:))]
-        fn open_models(&self, _sender: &AnyObject) {
-            let _ = self.ivars().actions.try_send(StatusItemAction::OpenModels);
-        }
-
-        #[unsafe(method(selectModel:))]
-        fn select_model(&self, sender: &NSMenuItem) {
-            if let Some(model) = model_from_tag(sender.tag()) {
-                let _ = self.ivars().actions.try_send(StatusItemAction::SelectModel(model));
-            }
-        }
-
-        #[unsafe(method(cancelModelPreparation:))]
-        fn cancel_model_preparation(&self, _sender: &AnyObject) {
-            let _ = self.ivars().actions.try_send(StatusItemAction::CancelModelPreparation);
         }
 
         #[unsafe(method(pasteLast:))]
@@ -191,14 +168,13 @@ enum Row {
     CopyLastMeetingTranscript,
     /// Labs › Screenshots: hidden until the menu opens with it on.
     RestoreCapture,
-    SpeechModel,
     Separator,
     Settings,
     Update,
     Quit,
 }
 
-const ROWS: [Row; 15] = [
+const ROWS: [Row; 14] = [
     Row::MeetingStatus,
     Row::StopMeeting,
     Row::CopySection,
@@ -209,7 +185,6 @@ const ROWS: [Row; 15] = [
     Row::CopyRecentDictation,
     Row::CopyLastMeetingTranscript,
     Row::RestoreCapture,
-    Row::SpeechModel,
     Row::Separator,
     Row::Settings,
     Row::Update,
@@ -230,7 +205,6 @@ impl Row {
             Row::CopyRecentDictation => "Copy Recent Dictation",
             Row::CopyLastMeetingTranscript => "Copy Last Meeting Transcript",
             Row::RestoreCapture => "Restore Last Capture",
-            Row::SpeechModel => "Speech Model",
             Row::Settings => "Settings…",
             Row::Update => "Check for Updates…",
             Row::Quit => return Some(format!("Quit {}", crate::app_paths::app_name())),
@@ -253,8 +227,7 @@ impl Row {
             Row::MeetingSeparator
             | Row::Separator
             | Row::CopySection
-            | Row::CopyRecentDictation
-            | Row::SpeechModel => return None,
+            | Row::CopyRecentDictation => return None,
         })
     }
 
@@ -356,11 +329,6 @@ struct StatusItemController {
     update_title: RefCell<String>,
     _menu: Retained<NSMenu>,
     target: Retained<StatusItemTarget>,
-    model_items: Vec<(TranscriptionModelId, Retained<NSMenuItem>)>,
-    model_empty: Retained<NSMenuItem>,
-    model_preparing: Retained<NSMenuItem>,
-    model_cancel: Retained<NSMenuItem>,
-    model_error: Retained<NSMenuItem>,
 }
 
 thread_local! {
@@ -379,48 +347,6 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
         NSMenu::alloc(mtm),
         &NSString::from_str("Copy Recent Dictation"),
     );
-    let models = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Speech Model"));
-    models.setAutoenablesItems(false);
-    let model_items = MODELS
-        .iter()
-        .enumerate()
-        .filter(|(_, model)| model.available())
-        .map(|(index, model)| {
-            let item = add_item(&models, &target, model.name, sel!(selectModel:), mtm);
-            item.setTag(index as isize);
-            item.setHidden(true);
-            (model.id, item)
-        })
-        .collect();
-    let model_empty = add_item(
-        &models,
-        &target,
-        "No downloaded models",
-        sel!(openModels:),
-        mtm,
-    );
-    model_empty.setEnabled(false);
-    models.addItem(&NSMenuItem::separatorItem(mtm));
-    let model_preparing = add_item(&models, &target, "Preparing model…", sel!(openModels:), mtm);
-    model_preparing.setEnabled(false);
-    model_preparing.setHidden(true);
-    let model_cancel = add_item(
-        &models,
-        &target,
-        "Cancel Model Switch",
-        sel!(cancelModelPreparation:),
-        mtm,
-    );
-    model_cancel.setHidden(true);
-    let model_error = add_item(
-        &models,
-        &target,
-        "Model switch failed — open Settings…",
-        sel!(openModels:),
-        mtm,
-    );
-    model_error.setHidden(true);
-    add_item(&models, &target, "Manage Models…", sel!(openModels:), mtm);
 
     let update_managed = crate::updater::managed_by_policy();
     let mut rows = Vec::with_capacity(ROWS.len());
@@ -444,7 +370,6 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
                     match row {
                         Row::CopySection => item.setSubmenu(Some(&meeting_sections_menu)),
                         Row::CopyRecentDictation => item.setSubmenu(Some(&recent_menu)),
-                        Row::SpeechModel => item.setSubmenu(Some(&models)),
                         _ => {}
                     }
                     item
@@ -507,11 +432,6 @@ pub fn install() -> Result<Receiver<StatusItemAction>> {
             update_title: RefCell::new("Check for Updates…".into()),
             _menu: menu,
             target,
-            model_items,
-            model_empty,
-            model_preparing,
-            model_cancel,
-            model_error,
         });
     });
     Ok(receiver)
@@ -568,50 +488,8 @@ fn add_item(
     item
 }
 
-fn model_from_tag(tag: isize) -> Option<TranscriptionModelId> {
-    MODELS
-        .get(usize::try_from(tag).ok()?)
-        .filter(|model| model.available())
-        .map(|model| model.id)
-}
-
 pub fn installed() -> bool {
     STATUS_ITEM.with(|controller| controller.borrow().is_some())
-}
-
-pub fn update_transcription(settings: &AppSettings, status: &PreparationStatus) {
-    STATUS_ITEM.with(|controller| {
-        let controller = controller.borrow();
-        let Some(controller) = controller.as_ref() else {
-            return;
-        };
-        let entries = model_menu_entries(
-            settings,
-            status.model.is_some(),
-            crate::transcription::models::is_installed,
-        );
-        for (model, item) in &controller.model_items {
-            let entry = entries.iter().find(|entry| entry.model == *model);
-            item.setHidden(entry.is_none());
-            if let Some(entry) = entry {
-                item.setTitle(&NSString::from_str(&entry.title));
-                item.setState(if entry.selected { 1 } else { 0 });
-                item.setEnabled(entry.enabled);
-            }
-        }
-        controller.model_empty.setHidden(!entries.is_empty());
-        controller.model_preparing.setHidden(status.model.is_none());
-        controller.model_cancel.setHidden(status.model.is_none());
-        if let Some(model) = status.model {
-            controller
-                .model_preparing
-                .setTitle(&NSString::from_str(&format!(
-                    "Preparing {}…",
-                    crate::transcription::models::definition(model).name,
-                )));
-        }
-        controller.model_error.setHidden(status.error.is_none());
-    });
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1016,7 +894,6 @@ mod tests {
                 "Copy Recent Dictation".into(),
                 "Copy Last Meeting Transcript".into(),
                 "Restore Last Capture".into(),
-                "Speech Model".into(),
                 "—".into(),
                 "Settings…".into(),
                 "Check for Updates…".into(),
@@ -1027,10 +904,7 @@ mod tests {
         assert_eq!(Row::Quit.command_key(), Some("q"));
         // Every row with neither a submenu nor a separator does something.
         for row in ROWS {
-            let opens_submenu = matches!(
-                row,
-                Row::CopySection | Row::CopyRecentDictation | Row::SpeechModel
-            );
+            let opens_submenu = matches!(row, Row::CopySection | Row::CopyRecentDictation);
             assert_eq!(
                 row.action().is_some(),
                 row.title().is_some() && !opens_submenu,
@@ -1090,18 +964,6 @@ mod tests {
         );
         assert_eq!(long, "A long dictation that goes on and on well past…");
         assert_eq!(long.chars().count(), 47);
-    }
-
-    #[test]
-    fn menu_tags_only_resolve_available_catalog_models() {
-        assert_eq!(model_from_tag(-1), None);
-        assert_eq!(model_from_tag(MODELS.len() as isize), None);
-        for (index, model) in MODELS.iter().enumerate() {
-            assert_eq!(
-                model_from_tag(index as isize),
-                model.available().then_some(model.id)
-            );
-        }
     }
 
     #[test]

@@ -356,7 +356,7 @@ fn launch_publishes_the_saved_selection_before_the_worker_starts() {
     let _restore = RestoredRuntime;
     let file = SettingsFile::new(b"{}");
     let saved = TranscriptionSelection {
-        model: TranscriptionModelId::WhisperLargeV3Turbo,
+        model: TranscriptionModelId::ScribeV3,
         language: "fr".into(),
     };
     AppSettings {

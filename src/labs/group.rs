@@ -109,16 +109,9 @@ impl Feature {
             | Self::ShareShortcut
             | Self::CapsLockDictation
             | Self::PauseMenu => Group::Shortcuts,
-            Self::KeyboardModelSwitching
-            | Self::AppModelSwitching
-            | Self::UnloadIdle
-            | Self::PickerSortFilter
-            | Self::BenchmarkDetails
-            | Self::PickerActiveFirst
-            | Self::ModelInPlace
-            | Self::PickerDownloaded
-            | Self::ParakeetUltra
-            | Self::TranscribeFiles => Group::Models,
+            Self::KeyboardModelSwitching | Self::AppModelSwitching | Self::TranscribeFiles => {
+                Group::Models
+            }
         }
     }
 }

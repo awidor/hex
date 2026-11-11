@@ -1,7 +1,8 @@
 //! Vocabulary: a sheet from General's Vocabulary row with one row per term
 //! and its "sounds like" spellings, edited in place and saved when typing
-//! pauses, like a mode's corrections. The boost has no control here; it
-//! stays a setting (`hex settings set vocabulary_boost`).
+//! pauses, like a mode's corrections, and one switch for whether
+//! transcription is biased toward the terms (`vocabulary_boost`: Scribe has
+//! no strength, so the switch saves Off or Normal).
 
 use rune::tok::motion::{SETTLE, SETTLE_EXIT};
 use rune::{El, SpringPair, TextEdit, Transition, Tx, col, edit_access, el, row, text};
@@ -9,11 +10,13 @@ use rune_kit::{ControlSize, TextInput};
 
 use super::Ui;
 use super::controls::{
-    ButtonKind, DESCRIPTION, Paint, button, modal_scrim_transition, modal_transition, note,
+    ButtonKind, DESCRIPTION, METRICS, Paint, button, modal_scrim_transition, modal_transition,
+    note, toggle_row,
 };
 use super::lists::remove_button;
 use crate::desktop::i18n::{tr, tr_fill, tr_named};
-use crate::dictation::vocabulary::{self, VocabularyEntry};
+use crate::dictation::vocabulary::{self, VocabularyBoost, VocabularyEntry};
+use crate::transcription::models::{TranscriptionModelId, definition};
 
 const MODAL_WIDTH: f32 = 620.0;
 const PADDING: f32 = 18.0;
@@ -136,29 +139,14 @@ pub(super) fn summary(ui: &Ui) -> String {
     }
 }
 
-/// Why the list doesn't reach transcription, when the selected model takes
-/// none (Parakeet biases toward it; Whisper and Qwen3-ASR read it as a
-/// prompt).
-pub(super) fn unused_note(ui: &Ui) -> Option<String> {
-    let model = crate::transcription::models::definition(ui.settings.transcription.model);
-    (!model.uses_vocabulary()).then(|| {
-        tr_fill(
-            "{} doesn't use these terms; rewriting and search still do",
-            model.name,
-        )
-    })
-}
-
-/// How many terms the selected model reads, when that is fewer than the
-/// list holds: Parakeet's bias cap, or Whisper's and Qwen3-ASR's prompt
-/// budget, as transcription applies them.
+/// How many terms transcription uses, when that is fewer than the list
+/// holds: Scribe takes no keyterm over a few words or with brackets.
 fn budget_note(ui: &Ui) -> Option<String> {
     let entries = ui.vocabulary.project();
-    let read = crate::transcription::models::definition(ui.settings.transcription.model)
-        .vocabulary_terms_read(&entries);
+    let read = definition(TranscriptionModelId::ScribeV3).vocabulary_terms_read(&entries);
     (read < entries.len()).then(|| {
         tr_named(
-            "This model reads the first {read} of {total} terms",
+            "Transcription uses {read} of {total} terms; ElevenLabs doesn't take the rest",
             &[
                 ("read", &read.to_string()),
                 ("total", &entries.len().to_string()),
@@ -167,11 +155,45 @@ fn budget_note(ui: &Ui) -> Option<String> {
     })
 }
 
+/// Whether transcription is biased toward the terms.
+fn boosted(ui: &Ui) -> bool {
+    ui.settings.vocabulary_boost != VocabularyBoost::Off
+}
+
+/// The switch for biasing transcription toward the terms, saying what it
+/// needs or how many terms are used.
+fn boost_row(ui: &Ui, p: Paint) -> El {
+    let on = boosted(ui);
+    let about = if !ui.settings.labs.vocabulary_biasing {
+        tr("Transcription uses these only with Labs › Vocabulary biasing on; rewriting and search always do")
+            .to_owned()
+    } else {
+        budget_note(ui).filter(|_| on).unwrap_or_else(|| {
+            tr("Sends these terms to ElevenLabs with each dictation so it favors them").to_owned()
+        })
+    };
+    toggle_row(
+        p,
+        "vocabulary-boost",
+        tr("Use in transcription"),
+        about.as_str(),
+        on,
+        |ui: &mut Ui| {
+            let boost = if boosted(ui) {
+                VocabularyBoost::Off
+            } else {
+                VocabularyBoost::Normal
+            };
+            ui.update(|settings| settings.vocabulary_boost = boost);
+        },
+    )
+    .mx(-METRICS.row_px)
+}
+
 /// Opens the sheet alone, with an empty row to type into when the list is
 /// empty.
 pub(super) fn open(ui: &mut Ui) {
     super::settings::cancel_capture(ui);
-    super::picker::close(ui);
     super::explainer::close(ui);
     super::sound_sets::close(ui);
     ui.open = None;
@@ -314,7 +336,7 @@ pub(super) fn modal(ui: &Ui, p: Paint) -> Option<[El; 2]> {
             )
             .default_button(),
         );
-    let mut heading = col()
+    let heading = col()
         .key("heading")
         .gap(4.0)
         .child(
@@ -339,25 +361,6 @@ pub(super) fn modal(ui: &Ui, p: Paint) -> Option<[El; 2]> {
                 .color(p.muted())
                 .wrap(),
         );
-    let biases = crate::transcription::models::definition(ui.settings.transcription.model)
-        .vocabulary_use()
-        == crate::transcription::models::VocabularyUse::Bias;
-    let unused = unused_note(ui).or_else(|| {
-        (biases && !ui.settings.labs.vocabulary_biasing).then(|| {
-            tr("Transcription uses these only with Labs › Vocabulary biasing on; rewriting and search always do")
-                .to_string()
-        })
-    });
-    let unused = unused.or_else(|| budget_note(ui));
-    if let Some(unused) = unused {
-        heading = heading.child(
-            text(unused)
-                .key("unused")
-                .font(DESCRIPTION)
-                .color(p.muted())
-                .wrap(),
-        );
-    }
     let mut panel = col()
         .key("vocabulary")
         .role("dialog")
@@ -373,6 +376,7 @@ pub(super) fn modal(ui: &Ui, p: Paint) -> Option<[El; 2]> {
         // Presses inside the panel stay inside.
         .on_press(|_: &mut Ui| {})
         .child(heading)
+        .child(boost_row(ui, p))
         .child(terms);
     if ui.vocabulary.clamped() {
         panel = panel.child(
@@ -381,7 +385,7 @@ pub(super) fn modal(ui: &Ui, p: Paint) -> Option<[El; 2]> {
                 tr("Up to 16 spellings per term are saved, and 64 characters per term or spelling."),
                 p.danger(),
             )
-            .mx(-super::controls::METRICS.row_px),
+            .mx(-METRICS.row_px),
         );
     }
     panel = panel.child(footer);
@@ -417,7 +421,7 @@ pub(super) fn fixture(ui: &mut Ui, filled: bool) {
             ("cappuccino", "capuchin, cap a chino"),
             ("OpenCode", "open code"),
             ("Rune", "roon"),
-            ("Parakeet", ""),
+            ("ElevenLabs", "eleven labs"),
             ("Dax", "Dex, Docs"),
         ] {
             let _ = vocabulary::add(
@@ -595,35 +599,35 @@ mod tests {
     }
 
     #[test]
-    fn the_sheet_says_how_many_terms_the_model_reads() {
-        use crate::transcription::models::TranscriptionModelId;
+    fn the_switch_says_how_many_terms_transcription_uses() {
         let mut ui = ui();
-        let entries: Vec<_> = (0..52)
+        let entries: Vec<_> = (0..40)
             .map(|n| VocabularyEntry {
-                term: format!("A longer project name {n}"),
+                term: format!("Project name {n}"),
                 sounds_like: Vec::new(),
             })
             .collect();
         ui.vocabulary = VocabularyEditor::new(&entries);
-        ui.settings.transcription.model = TranscriptionModelId::WhisperLargeV3Turbo;
-        let read = vocabulary::terms_read(&entries, "whisper");
-        assert!(read < entries.len());
+        assert_eq!(budget_note(&ui), None, "a list Scribe takes whole");
+        // Scribe takes no keyterm of more than five words.
+        ui.vocabulary.push(
+            TextEdit::new("one two three four five six"),
+            TextEdit::default(),
+        );
         assert_eq!(
             budget_note(&ui).unwrap(),
-            format!("This model reads the first {read} of 52 terms")
+            "Transcription uses 40 of 41 terms; ElevenLabs doesn't take the rest"
         );
-        ui.settings.transcription.model = TranscriptionModelId::ParakeetV3;
-        assert_eq!(budget_note(&ui), None);
-        for n in 52..70 {
-            ui.vocabulary
-                .push(TextEdit::new(format!("Extra {n}")), TextEdit::default());
-        }
-        assert_eq!(
-            budget_note(&ui).unwrap(),
-            "This model reads the first 64 of 70 terms"
-        );
-        ui.settings.transcription.model = TranscriptionModelId::SenseVoiceSmall;
-        assert!(unused_note(&ui).is_some());
+    }
+
+    #[test]
+    fn the_switch_saves_off_or_normal() {
+        let mut ui = ui();
+        assert!(boosted(&ui), "on by default");
+        ui.settings.vocabulary_boost = VocabularyBoost::Strong;
+        assert!(boosted(&ui), "any saved strength is on");
+        ui.update(|settings| settings.vocabulary_boost = VocabularyBoost::Off);
+        assert!(!boosted(&ui));
     }
 
     #[test]

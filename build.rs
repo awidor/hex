@@ -23,30 +23,7 @@ fn main() {
         println!("cargo::rustc-cfg=hex_capture");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-            // transcribe-cpp's static manifest records OpenBLAS as an absolute
-            // link argument, which Cargo does not propagate through the -sys
-            // crate to this final binary. Keep it after the static archives so
-            // GNU ld's --as-needed does not discard it before seeing cblas_*.
-            println!("cargo:rustc-link-arg=-lopenblas");
-        }
         if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-            // transcribe-cpp's Vulkan backend links the vulkan-1 import
-            // library by name without its search path. The DLL itself ships
-            // with the GPU driver, so it is delay-loaded: a missing or
-            // Vulkan 1.0 loader must not stop Hex at launch (#1240;
-            // `windows::vulkan` keeps ggml off it then).
-            println!("cargo:rerun-if-env-changed=VULKAN_SDK");
-            if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
-                if let Some(sdk) = std::env::var_os("VULKAN_SDK") {
-                    println!(
-                        "cargo:rustc-link-search=native={}",
-                        PathBuf::from(sdk).join("Lib").display()
-                    );
-                }
-                println!("cargo:rustc-link-arg=/DELAYLOAD:vulkan-1.dll");
-                println!("cargo:rustc-link-lib=delayimp");
-            }
             #[cfg(windows)]
             embed_windows_resources();
         }
@@ -58,9 +35,7 @@ fn main() {
         .expect("xcode-select is required to link ScreenCaptureKit");
     assert!(output.status.success(), "xcode-select -p failed");
     let developer_dir = String::from_utf8(output.stdout).expect("Xcode path must be UTF-8");
-    compile_swift_bridge("apple_speech", "HEXAppleSpeechBridge", &[]);
     println!("cargo:rustc-link-lib=framework=AVFAudio");
-    println!("cargo:rustc-link-lib=framework=Speech");
     // AVFoundation decodes an imported meeting's audio into a 16 kHz WAV.
     compile_swift_bridge("meeting_import", "HEXMeetingImportBridge", &[]);
     println!("cargo:rustc-link-lib=framework=AudioToolbox");

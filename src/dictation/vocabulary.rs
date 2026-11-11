@@ -1,9 +1,8 @@
 //! The shared vocabulary: names Hex should know (people, projects,
 //! products), each with spellings a transcript may show instead ("sounds
 //! like"). Search uses it to find a term's likely mis-transcriptions,
-//! prompts can read it through [`terms`], Parakeet biases its transcripts
-//! toward it through [`transcription_bias`], and Whisper and Qwen3-ASR read
-//! it as their context prompt through [`transcription_prompt`].
+//! prompts can read it through [`terms`], and Scribe is biased toward it
+//! through [`keyterms`].
 
 use std::cell::Cell;
 use std::io::Read as _;
@@ -20,10 +19,6 @@ const MAX_TERM_CHARS: usize = 64;
 /// Most entries in the list, and most "sounds like" spellings per entry.
 pub const MAX_ENTRIES: usize = 500;
 const MAX_SOUNDS_LIKE: usize = 16;
-/// Most terms one transcription is biased toward, first in list order: the
-/// engine's own cap (`k_vocab_max_terms` in transcribe.cpp), which keeps the
-/// biasing a bounded cost per decode.
-const MAX_BIASED_TERMS: usize = 64;
 /// Read limit for settings.json when reading it without loading `AppSettings`.
 const SETTINGS_READ_LIMIT: u64 = 4 * 1024 * 1024;
 
@@ -78,9 +73,9 @@ pub(crate) fn serialize_saved<S: serde::Serializer>(
     }))
 }
 
-/// How readily transcription swaps heard words for a vocabulary term that
-/// sounds like them. Measured on real recordings in
-/// `docs/research/vocabulary-boost-results.md`.
+/// Whether transcription is biased toward the vocabulary. Scribe takes the
+/// terms as keyterms with no strength of its own, so every level but `Off`
+/// sends them; the levels stay so settings saved by upstream Hex load.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VocabularyBoost {
@@ -94,17 +89,6 @@ pub enum VocabularyBoost {
 
 impl VocabularyBoost {
     pub const ALL: [Self; 4] = [Self::Off, Self::Light, Self::Normal, Self::Strong];
-
-    /// How much less likely than the heard words, in nats per term piece, a
-    /// term may score and still replace them.
-    fn nats(self) -> f32 {
-        match self {
-            Self::Off => 0.0,
-            Self::Light => 2.0,
-            Self::Normal => 2.5,
-            Self::Strong => 4.0,
-        }
-    }
 
     fn from_index(index: u8) -> Self {
         Self::ALL
@@ -197,106 +181,28 @@ pub fn entries() -> Vec<VocabularyEntry> {
         .clone()
 }
 
-/// The terms and options a Parakeet run biases its transcript with, read
-/// at the start of each run and live stream so settings changes apply to the
-/// next one. `None` while the list is empty or the boost is off.
-pub(crate) fn transcription_bias()
--> Option<(Vec<String>, transcribe_cpp::ParakeetVocabularyOptions)> {
-    // Labs › Vocabulary biasing: transcription takes the list only while on.
+/// The keyterms a Scribe request is biased toward, read at the start of
+/// each request and live session so settings changes apply to the next one.
+/// Empty while the list is empty, the boost is off, or Labs › Vocabulary
+/// biasing is off: keyterms are billed extra, so they are sent only when
+/// asked for.
+pub(crate) fn keyterms() -> Vec<String> {
     if !crate::labs::vocabulary_biasing() {
-        return None;
+        return Vec::new();
     }
-    let boost = VocabularyBoost::from_index(BOOST.load(Ordering::Relaxed));
-    if boost == VocabularyBoost::Off {
-        return None;
+    if VocabularyBoost::from_index(BOOST.load(Ordering::Relaxed)) == VocabularyBoost::Off {
+        return Vec::new();
     }
-    bias_for(&transcription_entries(), boost)
+    keyterms_of(&transcription_entries())
 }
 
-fn bias_for(
-    entries: &[VocabularyEntry],
-    boost: VocabularyBoost,
-) -> Option<(Vec<String>, transcribe_cpp::ParakeetVocabularyOptions)> {
-    let entries = &entries[..entries.len().min(MAX_BIASED_TERMS)];
-    if entries.is_empty() {
-        return None;
-    }
-    let sounds_like = entries
-        .iter()
-        .enumerate()
-        .flat_map(|(index, entry)| {
-            entry
-                .sounds_like
-                .iter()
-                .map(move |spelling| (index, spelling.clone()))
-        })
-        .collect();
-    Some((
-        entries.iter().map(|entry| entry.term.clone()).collect(),
-        transcribe_cpp::ParakeetVocabularyOptions {
-            boost: Some(boost.nats()),
-            sounds_like,
-        },
-    ))
-}
-
-/// How much of the vocabulary a context prompt carries, in characters, for a
-/// model of this architecture; `None` for one without a prompt. Whisper's
-/// prompt slot holds 223 tokens and its engine trims an overlong one from
-/// the front, dropping the first (most important) terms, so the list stays
-/// well inside it. Qwen3-ASR's system message has far more room; the bound
-/// keeps a long list from crowding out the audio or being echoed.
-pub(crate) fn prompt_chars(architecture: &str) -> Option<usize> {
-    match architecture {
-        "whisper" => Some(500),
-        "qwen3_asr" => Some(1_000),
-        _ => None,
-    }
-}
-
-/// How many of `entries`, first in list order, a model of this
-/// architecture reads: Parakeet's bias cap, or the terms that fit the
-/// prompt. The same budget [`transcription_bias`] and
-/// [`transcription_prompt`] apply.
-pub(crate) fn terms_read(entries: &[VocabularyEntry], architecture: &str) -> usize {
-    if architecture == "parakeet" {
-        return entries.len().min(MAX_BIASED_TERMS);
-    }
-    prompt_chars(architecture).map_or(0, |max_chars| prompt_terms(entries, max_chars))
-}
-
-/// The context prompt Whisper and Qwen3-ASR runs read: the first terms in
-/// list order, comma-separated so the echo filter can recognise the list,
-/// and as many as fit `max_chars`. The bias's term cap is Parakeet's and
-/// does not apply here; the character budget is the prompt's own limit.
-/// `None` while the list is empty. Read at the start of each run, like the
-/// bias.
-pub(crate) fn transcription_prompt(max_chars: usize) -> Option<String> {
-    prompt_for(&transcription_entries(), max_chars)
-}
-
-fn prompt_for(entries: &[VocabularyEntry], max_chars: usize) -> Option<String> {
-    let terms = &entries[..prompt_terms(entries, max_chars)];
-    (!terms.is_empty()).then(|| {
-        terms
-            .iter()
-            .map(|entry| entry.term.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
-}
-
-/// How many of the first terms fit `max_chars` joined by ", ".
-fn prompt_terms(entries: &[VocabularyEntry], max_chars: usize) -> usize {
-    let mut chars = 0;
-    for (index, entry) in entries.iter().enumerate() {
-        let separator = if index == 0 { 0 } else { 2 };
-        chars += separator + entry.term.chars().count();
-        if chars > max_chars {
-            return index;
-        }
-    }
-    entries.len()
+/// The terms of `entries` Scribe accepts as keyterms, first in list order.
+/// "Sounds like" spellings are not sent: Scribe has no use for them.
+pub(crate) fn keyterms_of(entries: &[VocabularyEntry]) -> Vec<String> {
+    let terms: Vec<String> = entries.iter().map(|entry| entry.term.clone()).collect();
+    crate::transcription::scribe::client::keyterms(&terms)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Adds each name in recognition hints saved before they merged into the
@@ -580,77 +486,27 @@ mod tests {
     }
 
     #[test]
-    fn transcription_bias_keeps_the_first_terms_and_their_spellings() {
-        assert!(bias_for(&[], VocabularyBoost::Normal).is_none());
-        let mut list = vec![
-            entry("Cappuccino", &["capuchin", "cap a chino"]),
-            entry("Rune", &[]),
-        ];
-        list.extend((0..70).map(|index| entry(&format!("term {index}"), &["x"])));
-        let (terms, options) = bias_for(&list, VocabularyBoost::Strong).unwrap();
-        assert_eq!(terms.len(), MAX_BIASED_TERMS);
-        assert_eq!(terms[..2], ["Cappuccino", "Rune"]);
-        assert_eq!(options.boost, Some(4.0));
-        assert_eq!(
-            options.sounds_like[..2],
-            [(0, "capuchin".into()), (0, "cap a chino".into())]
-        );
-        assert_eq!(options.sounds_like[2], (2, "x".into()));
-        assert!(
-            options
-                .sounds_like
-                .iter()
-                .all(|(index, _)| *index < MAX_BIASED_TERMS)
-        );
-    }
-
-    #[test]
-    fn the_prompt_keeps_the_first_terms_that_fit() {
+    fn keyterms_are_the_terms_scribe_accepts_in_list_order() {
+        assert!(keyterms_of(&[]).is_empty());
         let list = vec![
-            entry("Kaffar", &["Caffer"]),
-            entry("Rodolfo", &[]),
-            entry("Bragelonne", &[]),
+            entry("Kaffar", &["Kafar", "Caffar"]),
+            entry("a name of six words is too long", &[]),
+            entry("Anomaly Innovations", &[]),
+            entry("bad<term>", &[]),
+            entry(&"x".repeat(60), &[]),
         ];
-        assert_eq!(
-            prompt_for(&list, 100).as_deref(),
-            Some("Kaffar, Rodolfo, Bragelonne")
-        );
-        assert_eq!(prompt_for(&list, 20).as_deref(), Some("Kaffar, Rodolfo"));
-        assert_eq!(prompt_for(&list, 3), None);
-        assert_eq!(prompt_for(&[], 100), None);
-        let many: Vec<_> = (0..100).map(|n| entry(&format!("T{n}"), &[])).collect();
-        // Only the character budget limits the prompt, not the bias's term cap.
-        let prompt = prompt_for(&many, 10_000).unwrap();
-        assert_eq!(prompt.split(", ").count(), 100);
-        let prompt = prompt_for(&many, 1_000).unwrap();
-        assert!(prompt.split(", ").count() > MAX_BIASED_TERMS);
-        assert!(prompt.chars().count() <= 1_000);
+
+        // "Sounds like" spellings are never sent; refused terms are skipped.
+        assert_eq!(keyterms_of(&list), ["Kaffar", "Anomaly Innovations"]);
     }
 
     #[test]
-    fn terms_read_counts_exactly_what_transcription_takes() {
-        let many: Vec<_> = (0..200)
-            .map(|n| entry(&format!("Term number {n}"), &[]))
+    fn every_saved_term_fits_scribes_keyterm_limit() {
+        let many: Vec<_> = (0..MAX_ENTRIES)
+            .map(|index| entry(&format!("Term{index}"), &[]))
             .collect();
-        for count in [0, 1, 20, 40, 64, 65, 200] {
-            let list = &many[..count];
-            for architecture in ["whisper", "qwen3_asr"] {
-                let prompt = prompt_for(list, prompt_chars(architecture).unwrap());
-                let taken = prompt.map_or(0, |prompt| prompt.split(", ").count());
-                assert_eq!(
-                    terms_read(list, architecture),
-                    taken,
-                    "{architecture} {count}"
-                );
-            }
-            let biased =
-                bias_for(list, VocabularyBoost::Normal).map_or(0, |(terms, _)| terms.len());
-            assert_eq!(terms_read(list, "parakeet"), biased);
-            assert_eq!(terms_read(list, "sense_voice"), 0);
-        }
-        assert_eq!(terms_read(&many, "parakeet"), MAX_BIASED_TERMS);
-        assert!(terms_read(&many, "whisper") < terms_read(&many, "qwen3_asr"));
-        assert!(terms_read(&many, "qwen3_asr") < many.len());
+        assert_eq!(keyterms_of(&many).len(), MAX_ENTRIES);
+        const { assert!(MAX_ENTRIES <= crate::transcription::scribe::client::MAX_KEYTERMS) };
     }
 
     #[test]
@@ -678,7 +534,6 @@ mod tests {
             serde_json::to_value(VocabularyBoost::Strong).unwrap(),
             serde_json::json!("strong")
         );
-        assert_eq!(VocabularyBoost::default().nats(), 2.5);
     }
 
     #[test]

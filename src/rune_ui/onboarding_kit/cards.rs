@@ -7,18 +7,15 @@ use rune::{
     canvas, col, el, row, text,
 };
 
-use super::super::controls::{KeySize, Paint, key_tray, keycap};
+use super::super::controls::Paint;
 use super::super::lists::allowed;
 use super::field_text;
-use super::mic::mic_level;
 use super::typing::Glyph;
-use super::words::live_words;
 
 pub(crate) const CARD_W: f32 = 404.0;
 const CARD_PAD: f32 = 14.0;
 const RADIUS: f32 = 16.0;
 const ICON: f32 = 32.0;
-const FIELD_H: f32 = 36.0;
 const FIELD_PX: f32 = 12.0;
 const FIELD_PY: f32 = 7.0;
 pub(crate) const FIELD_FONT: TextStyle = TextStyle::new(13.0, 440.0);
@@ -60,24 +57,6 @@ pub(crate) struct Notice {
     pub(crate) field: &'static str,
 }
 
-pub(crate) const FRANK: Notice = Notice {
-    key: "frank",
-    app: App::Messages,
-    from: "Frank",
-    person: None,
-    place: None,
-    body: "your phone is on silent right",
-    field: "iMessage",
-};
-pub(crate) const JAY: Notice = Notice {
-    key: "jay",
-    app: App::Messages,
-    from: "Jay · CEO",
-    person: Some("Jay"),
-    place: None,
-    body: "The investors are in the room. Are we ready to ship?",
-    field: "iMessage",
-};
 pub(crate) const DAX: Notice = Notice {
     key: "dax",
     app: App::Slack,
@@ -99,17 +78,6 @@ pub(crate) const ADAM: Notice = Notice {
 
 #[derive(Clone, Copy)]
 pub(crate) enum Reply<'a> {
-    Empty,
-    Ask {
-        keys: &'a [String],
-        hint: &'a str,
-    },
-    Hearing {
-        partial: &'a str,
-        meter: (f32, f32),
-    },
-    Typing(&'a str),
-    Sent(&'a str),
     Lines {
         sent_bubbles: &'a [String],
         text: &'a str,
@@ -1080,32 +1048,10 @@ fn field(
 ) -> El {
     let k = p.k;
     let focus = match reply {
-        Reply::Hearing { .. } => true,
         Reply::Lines { focus, .. } => focus,
-        _ => false,
+        Reply::Locked(_) => false,
     };
     let body = match reply {
-        Reply::Empty => placeholder(p, n.field).ml(PLACEHOLDER_X),
-        Reply::Ask { keys, hint } => row()
-            .key("ask")
-            .gap(8.0)
-            .center_y()
-            .transition(Transition::opacity())
-            .child(text("Hold").key("hold").font(k.ty.small).color(p.muted()))
-            .child(key_tray(
-                p,
-                "keys",
-                KeySize::Small,
-                keys.iter()
-                    .enumerate()
-                    .map(|(i, cap)| keycap(p, i, cap, KeySize::Small, false)),
-            ))
-            .child(text(hint).key("hint").font(k.ty.small).color(p.muted())),
-        Reply::Hearing { partial: "", .. } => placeholder(p, "Listening…"),
-        Reply::Hearing { partial, .. } | Reply::Typing(partial) => {
-            live_words(p, "words", partial, false, FIELD_FONT, FIELD_LINE).grow(1.0)
-        }
-        Reply::Sent(words) => live_words(p, "words", words, true, FIELD_FONT, FIELD_LINE).grow(1.0),
         Reply::Lines {
             text: typed,
             caret,
@@ -1127,12 +1073,9 @@ fn field(
             .motion_intent(MotionIntent::CUT),
     };
     let trailing = match reply {
-        Reply::Hearing { meter, .. } => Some(mic_level(p, "mic", 16.0, meter.0, meter.1, true)),
-        Reply::Sent(_) => Some(allowed(p, "sent", "Sent").transition(Transition::opacity())),
         Reply::Lines { sent: true, .. } => Some(allowed(p, "sent", "Sent")),
         _ => None,
     };
-    let drawn = matches!(reply, Reply::Lines { .. });
     if matches!(reply, Reply::Locked(_)) {
         // No field at all, only why, in the field's place.
         return row()
@@ -1162,12 +1105,8 @@ fn field(
         )
         .child(body)
         .children(trailing);
-    if drawn {
-        // A draft is wiped or locked on the spot, never cross-faded.
-        field.items_end().instant_changes()
-    } else {
-        field.min_h(FIELD_H).center_y()
-    }
+    // A draft is wiped or locked on the spot, never cross-faded.
+    field.items_end().instant_changes()
 }
 
 /// The placeholder sits clear of the caret before it.

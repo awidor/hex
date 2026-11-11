@@ -8,6 +8,8 @@
 
 use std::io::Write;
 mod human;
+mod key;
+mod model;
 mod transcribe;
 
 use clap::{Args, Subcommand};
@@ -16,6 +18,8 @@ use super::{
     CONTROL_VERSION, CaptureAction, ControlCommand, ControlReply, ControlRequest, ControlResponse,
     Pane,
 };
+pub use key::KeyCommand;
+pub use model::ModelCommand;
 
 pub const EXIT_REFUSED: u8 = 1;
 pub const EXIT_NOT_RUNNING: u8 = 3;
@@ -33,8 +37,8 @@ pub struct Output {
 pub enum ControlCli {
     /// Show what the running Hex is doing.
     ///
-    /// Recording, meeting, model, features, permissions, window, version,
-    /// pid, and memory footprint.
+    /// Recording, meeting, transcription language, API key, features,
+    /// permissions, window, version, pid, and memory footprint.
     Status {
         #[command(flatten)]
         output: Output,
@@ -94,17 +98,18 @@ pub enum ControlCli {
         #[command(flatten)]
         output: Output,
     },
-    /// Transcribe a WAV file with the selected model and print it
-    /// (Labs › Transcribe files).
+    /// Transcribe a WAV file and print the text (Labs › Transcribe files).
     ///
-    /// Nothing is pasted, saved to History, or processed.
+    /// The file's audio is sent to ElevenLabs. Nothing is pasted, saved to
+    /// History, or processed.
     Transcribe {
         /// The WAV file to transcribe.
         file: std::path::PathBuf,
-        /// A model id from `hex model list` (default: the selected model).
+        /// The model id; only `scribe_v3`, the default.
         #[arg(long)]
         model: Option<String>,
-        /// A language the model supports (default: the saved language).
+        /// An ISO 639 code such as `en` or `yue`, or `auto` (default: the
+        /// saved language).
         #[arg(long)]
         language: Option<String>,
         #[command(flatten)]
@@ -124,11 +129,18 @@ pub enum ControlCli {
         #[command(subcommand)]
         command: SettingsCommand,
     },
-    /// List, switch, install, and import transcription models.
+    /// Show the transcription model (ElevenLabs Scribe), set its language,
+    /// and check that it can be reached.
     #[command(visible_alias = "models")]
     Model {
         #[command(subcommand)]
         command: ModelCommand,
+    },
+    /// Set, show, check, or remove the ElevenLabs API key that every
+    /// transcription is sent with.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
     },
     /// Open the Hex window at a pane, or close it.
     Window {
@@ -249,9 +261,9 @@ pub enum SettingsCommand {
     /// all or none; other settings keep their values.
     ///
     /// Values are JSON (`true`, `0.4`, `"option+space"`, `null` for none);
-    /// `transcription.model` and `transcription.language` select a model
-    /// without downloading it. With Hex stopped, writes settings.json
-    /// directly.
+    /// `transcription.language` sets the language Scribe is told to expect
+    /// (`transcription.model` takes only `scribe_v3`). With Hex stopped,
+    /// writes settings.json directly.
     Apply {
         /// A JSON file, or `-` for standard input.
         file: std::path::PathBuf,
@@ -261,83 +273,11 @@ pub enum SettingsCommand {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum ModelCommand {
-    /// Every model with its languages, size, and whether it's installed.
-    List {
-        #[command(flatten)]
-        output: Output,
-    },
-    /// Switch to an installed model. Never downloads.
-    Use {
-        /// A model id from `hex model list`.
-        model: String,
-        /// A language the model supports (default: its best match for the
-        /// current language).
-        #[arg(long)]
-        language: Option<String>,
-        #[command(flatten)]
-        output: Output,
-    },
-    /// Download a model, then switch to it. Without a model, the selected
-    /// one. On Linux and Windows it downloads here when Hex isn't running.
-    Install {
-        model: Option<String>,
-        #[arg(long)]
-        language: Option<String>,
-        #[command(flatten)]
-        output: Output,
-    },
-    /// Stop a download or load in progress.
-    Cancel {
-        #[command(flatten)]
-        output: Output,
-    },
-    /// Whether a model (the selected one unless given) is installed and
-    /// checksum-verified. Runs here; Linux and Windows.
-    Status {
-        model: Option<String>,
-        #[arg(long)]
-        language: Option<String>,
-    },
-    /// The transcribe.cpp compute devices Hex can use. Linux and Windows.
-    Devices,
-    /// Load and prewarm an installed model here. Linux and Windows.
-    Check {
-        model: Option<String>,
-        #[arg(long)]
-        language: Option<String>,
-    },
-    /// Transcribe a WAV file with an installed model here. Linux and Windows.
-    Transcribe {
-        wav: std::path::PathBuf,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        language: Option<String>,
-    },
-    /// Copy a GGUF speech model into Hex after checking its header,
-    /// and print its id. The original is left as it is.
-    Import {
-        path: std::path::PathBuf,
-        /// The name the picker shows (default: the file's general.name).
-        #[arg(long)]
-        name: Option<String>,
-    },
-    /// Rename an imported or found model.
-    Rename { model: String, name: String },
-    /// Check Hex's copy of an import (or a found file) again; a copy whose contents
-    /// still match is ready again.
-    Repair { model: String },
-    /// Remove Hex's copy of an imported model, or forget a found one (its file stays).
-    Remove { model: String },
-}
-
-#[derive(Subcommand, Debug)]
 pub enum OnboardingCommand {
     /// Open the first-run onboarding in the window now, as on a new install.
     ///
-    /// Forgets that onboarding finished. Settings, history, models, and permissions stay,
-    /// so their steps pass at once.
+    /// Forgets that onboarding finished. Settings, history, the API key, and permissions
+    /// stay, so their steps pass at once.
     #[command(visible_alias = "restart")]
     Reset {
         #[command(flatten)]
@@ -464,49 +404,8 @@ pub fn run(command: ControlCli) -> u8 {
             send(ControlCommand::Screenshot { pick }, output)
         }
         ControlCli::Settings { command } => settings(command),
-        ControlCli::Model { command } => match command {
-            ModelCommand::List { output } => send(ControlCommand::ModelList, output),
-            ModelCommand::Use {
-                model,
-                language,
-                output,
-            } => send(ControlCommand::ModelUse { model, language }, output),
-            ModelCommand::Install {
-                model,
-                language,
-                output,
-            } => install_model(model, language, output),
-            ModelCommand::Cancel { output } => send(ControlCommand::ModelCancel, output),
-            ModelCommand::Import { path, name } => report(import_model(&path, name.as_deref())),
-            ModelCommand::Rename { model, name } => report(imported(&model).and_then(|id| {
-                crate::transcription::custom_models::rename(id, &name)?;
-                println!("renamed\t{}", id.as_str());
-                Ok(())
-            })),
-            ModelCommand::Repair { model } => report(imported(&model).and_then(|id| {
-                crate::transcription::custom_models::repair(
-                    id,
-                    &std::sync::atomic::AtomicBool::new(false),
-                )?;
-                println!("ready\t{}", id.as_str());
-                Ok(())
-            })),
-            ModelCommand::Remove { model } => report(imported(&model).and_then(|id| {
-                let settings = crate::app_settings::AppSettings::load().unwrap_or_default();
-                if settings.transcription.model
-                    == crate::transcription::models::TranscriptionModelId::Custom(id)
-                {
-                    color_eyre::eyre::bail!(
-                        "{} is the selected model; choose another with `hex model use` first",
-                        id.as_str()
-                    );
-                }
-                crate::transcription::custom_models::remove(id)?;
-                println!("removed\t{}", id.as_str());
-                Ok(())
-            })),
-            command => offline_model(command),
-        },
+        ControlCli::Model { command } => model::run(command),
+        ControlCli::Key { command } => key::run(command),
         ControlCli::Window { command } => match command {
             WindowCommand::Show { pane, output } => {
                 send(ControlCommand::WindowShow { pane }, output)
@@ -576,208 +475,6 @@ pub fn run(command: ControlCli) -> u8 {
         ControlCli::Experiments { .. } => report(crate::labs::run_retired_experiments()),
         ControlCli::Annotate { command } => capture(command),
     }
-}
-
-/// `hex model install`: the running Hex downloads in the background;
-/// without one, Linux and Windows download and select here.
-fn install_model(model: Option<String>, language: Option<String>, output: Output) -> u8 {
-    let model = match model {
-        Some(model) => model,
-        None => match crate::app_settings::AppSettings::read() {
-            Ok(settings) => settings.transcription.model.as_str().to_owned(),
-            Err(error) => return fail(&format!("couldn't read settings: {error:#}")),
-        },
-    };
-    #[cfg(not(target_os = "macos"))]
-    if !running() {
-        let selection = match selection(Some(model), language) {
-            Ok(selection) => selection,
-            Err(error) => return fail(&format!("{error:#}")),
-        };
-        if let Err(error) = crate::transcription::local_transcriber::install(
-            &selection,
-            &std::sync::atomic::AtomicBool::new(false),
-        ) {
-            return fail(&format!("{error:#}"));
-        }
-        return select_installed(&selection, output);
-    }
-    send(ControlCommand::ModelInstall { model, language }, output)
-}
-
-/// `model install` with no Hex running: make the switch the app would have
-/// made. A Hex that started while the model downloaded takes the choice;
-/// otherwise it is saved under the service lock `settings apply` uses, so a
-/// starting Hex is never written behind. An unchanged selection needs neither.
-#[cfg(not(target_os = "macos"))]
-fn select_installed(
-    selection: &crate::transcription::models::TranscriptionSelection,
-    output: Output,
-) -> u8 {
-    if crate::app_settings::AppSettings::read()
-        .is_ok_and(|settings| settings.transcription == *selection)
-    {
-        let name = crate::transcription::models::definition(selection.model).name;
-        println!("{name} ({}) is already selected", selection.language);
-        return 0;
-    }
-    let handoff = hand_off(
-        || select_in_running_hex(selection, output),
-        || match save_selection(selection) {
-            Ok(message) => {
-                println!("{message}");
-                0
-            }
-            Err(error) => fail(&format!(
-                "the model is installed, but selecting it failed: {error:#}"
-            )),
-        },
-    );
-    match handoff {
-        Handoff::Done(code) => code,
-        #[cfg(target_os = "linux")]
-        Handoff::OlderHex => fail(&format!(
-            "the model is installed, but an older Hex is still running; \
-             run `hex restart`, then `hex model use {}`",
-            selection.model.as_str()
-        )),
-        Handoff::Deadline => fail(&format!(
-            "the model is installed, but Hex is starting and holds its settings; \
-             run `hex model use {}` once it answers",
-            selection.model.as_str()
-        )),
-    }
-}
-
-/// Hands a downloaded model to a Hex that started while it downloaded.
-#[cfg(not(target_os = "macos"))]
-fn select_in_running_hex(
-    selection: &crate::transcription::models::TranscriptionSelection,
-    output: Output,
-) -> u8 {
-    send(
-        ControlCommand::ModelUse {
-            model: selection.model.as_str().to_owned(),
-            language: Some(selection.language.clone()),
-        },
-        output,
-    )
-}
-
-/// Records a downloaded model as the selected one, as the app's own switch
-/// does. An unchanged selection is left alone.
-#[cfg(not(target_os = "macos"))]
-fn save_selection(
-    selection: &crate::transcription::models::TranscriptionSelection,
-) -> color_eyre::Result<String> {
-    let name = crate::transcription::models::definition(selection.model).name;
-    let mut settings = crate::app_settings::AppSettings::load()?;
-    if settings.transcription == *selection {
-        return Ok(format!(
-            "{name} ({}) is already selected",
-            selection.language
-        ));
-    }
-    settings.save_transcription(selection.clone())?;
-    Ok(format!("Switched to {name} ({})", selection.language))
-}
-
-/// `hex model import`: checks, copies, and records the file here, in this
-/// process; a running Hex lists it at once.
-fn import_model(path: &std::path::Path, name: Option<&str>) -> color_eyre::Result<()> {
-    use crate::transcription::custom_models;
-    let id = custom_models::import(path, name, &std::sync::atomic::AtomicBool::new(false))?;
-    let definition = custom_models::definition(id);
-    println!("imported\t{}\t{}", id.as_str(), definition.name);
-    Ok(())
-}
-
-/// The import or found model in use that `model` names.
-fn imported(model: &str) -> color_eyre::Result<crate::transcription::models::CustomModelId> {
-    use crate::transcription::custom_models;
-    crate::transcription::models::CustomModelId::parse(model)
-        .filter(|id| custom_models::is_registered(*id))
-        .ok_or_else(|| {
-            color_eyre::eyre::eyre!("no imported model is {model}; run `hex model list`")
-        })
-}
-
-/// The selection a local model command names: `model` with its remembered
-/// language unless `language` is given, or the selected model.
-#[cfg(not(target_os = "macos"))]
-fn selection(
-    model: Option<String>,
-    language: Option<String>,
-) -> color_eyre::Result<crate::transcription::models::TranscriptionSelection> {
-    let settings = crate::app_settings::AppSettings::read().unwrap_or_default();
-    let model = model.unwrap_or_else(|| settings.transcription.model.as_str().to_owned());
-    super::model_selection(&settings, &model, language.as_deref())
-        .map_err(|error| color_eyre::eyre::eyre!(error.message))
-}
-
-/// `hex model status|devices|check|transcribe`, run in this process.
-#[cfg(not(target_os = "macos"))]
-fn offline_model(command: ModelCommand) -> u8 {
-    use crate::transcription::models::{definition, is_installed, is_verified, model_path};
-    report((|| match command {
-        ModelCommand::Status { model, language } => {
-            let selection = selection(model, language)?;
-            let model = definition(selection.model);
-            let installed = is_installed(model, &selection.language);
-            println!(
-                "{}\t{}\t{}\t{}",
-                if installed { "installed" } else { "missing" },
-                if installed && is_verified(model) {
-                    "verified"
-                } else {
-                    "unverified"
-                },
-                model.name,
-                model_path(model)?.display()
-            );
-            Ok(())
-        }
-        ModelCommand::Devices => {
-            for device in crate::transcription::local_transcriber::devices()? {
-                println!("{device}");
-            }
-            Ok(())
-        }
-        ModelCommand::Check { model, language } => {
-            let transcriber = crate::transcription::local_transcriber::LocalTranscriber::load(
-                &selection(model, language)?,
-            )?;
-            println!("ready\t{}", transcriber.device_label());
-            Ok(())
-        }
-        ModelCommand::Transcribe {
-            wav,
-            model,
-            language,
-        } => {
-            println!(
-                "{}",
-                crate::transcription::local_transcriber::transcribe_wav_with_selection(
-                    &wav,
-                    &selection(model, language)?
-                )?
-            );
-            Ok(())
-        }
-        _ => unreachable!("Hex carries out the other model commands"),
-    })())
-}
-
-/// macOS runs models only inside the app.
-#[cfg(target_os = "macos")]
-fn offline_model(_: ModelCommand) -> u8 {
-    print(
-        ControlReply::error(
-            "unsupported",
-            "this `hex model` command is for Linux and Windows; use `hex model list`",
-        ),
-        Output::default(),
-    )
 }
 
 /// The exit code of a command that runs here rather than in Hex.
@@ -1034,7 +731,7 @@ enum Handoff {
     Deadline,
 }
 
-/// `settings apply`'s wait, shared with `model install`: a Hex that holds the
+/// `settings apply`'s wait, shared with `model use`: a Hex that holds the
 /// service lock may have read settings.json already, so hand the work to the
 /// Hex that answers (`send`), or write it here while the lock is held
 /// (`write`). Only a lock that never answers gives up.
@@ -1091,6 +788,12 @@ fn apply_settings(file: &std::path::Path, output: Output) -> u8 {
         },
         || print(apply_offline(&values), output),
     );
+    finish_handoff(handoff, "hex settings apply", output)
+}
+
+/// The exit code of a handed-off `command`: the work's own, or why no Hex
+/// took it and it couldn't be written here.
+fn finish_handoff(handoff: Handoff, command: &str, output: Output) -> u8 {
     match handoff {
         Handoff::Done(code) => code,
         #[cfg(target_os = "linux")]
@@ -1098,7 +801,7 @@ fn apply_settings(file: &std::path::Path, output: Output) -> u8 {
         Handoff::Deadline => print(
             ControlReply::error(
                 "busy",
-                "Hex is starting but didn't answer; run `hex settings apply` again",
+                format!("Hex is starting but didn't answer; run `{command}` again"),
             ),
             output,
         ),
@@ -1218,7 +921,7 @@ fn restart_older_hex() -> ControlReply {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    ControlReply::done("Restarted Hex; it isn't answering yet (it may be loading its model)")
+    ControlReply::done("Restarted Hex; it isn't answering yet (it may still be starting)")
 }
 
 #[cfg(target_os = "macos")]
@@ -1312,7 +1015,7 @@ fn start_reply() -> ControlReply {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    ControlReply::done("Started Hex; it isn't answering yet (it may be loading its model)")
+    ControlReply::done("Started Hex; it isn't answering yet (it may still be starting)")
 }
 
 /// After a restart's quit on Linux and Windows: waits for the old Hex to
@@ -1469,7 +1172,9 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::control::{StatusReport, settings::SettingValue};
+    use crate::control::{
+        ApiKeyReport, ApiKeySource, ApiKeyStatus, ModelInfo, StatusReport, settings::SettingValue,
+    };
     use crate::dictation::vocabulary::VocabularyEntry;
 
     #[test]
@@ -1587,12 +1292,119 @@ mod tests {
         report.meeting.title = Some("Design sync".into());
         report.meeting.elapsed_seconds = Some(3723);
         report.features.meetings = true;
+        report.model.name = "Scribe v3".into();
+        report.model.language = "de".into();
+        report.permissions.microphone = "ready".into();
+        report.permissions.accessibility = "needs-settings".into();
         let text = human_status(&report);
         assert!(text.starts_with("Hex 2.3.1 (pid 42, 412 MB)\n"));
         assert!(text.contains("Meeting      recording “Design sync” for 1:02:03\n"));
+        assert!(
+            text.contains("Model        Scribe v3, language: German (de)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("API key      not set — run `hex key set`\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Permissions  microphone ready, accessibility needs-settings, API key not set\n"
+            ),
+            "{text}"
+        );
         assert!(text.ends_with("Labs         none\n"));
         report.labs = vec!["live-text".into(), "meetings".into()];
         assert!(human_status(&report).ends_with("Labs         live-text, meetings\n"));
+    }
+
+    fn saved_key() -> ApiKeyReport {
+        ApiKeyReport {
+            source: ApiKeySource::Saved,
+            redacted: "••••abcd".into(),
+        }
+    }
+
+    fn scribe(language: &str, api_key: Option<ApiKeyReport>) -> ModelInfo {
+        ModelInfo {
+            id: "scribe_v3".into(),
+            name: "Scribe v3".into(),
+            live: "scribe_v3_live".into(),
+            selected: true,
+            language: language.into(),
+            api_key,
+            api_url: "https://api.elevenlabs.io".into(),
+        }
+    }
+
+    #[test]
+    fn status_shows_the_language_and_the_key_by_its_tail() {
+        let mut report = StatusReport::default();
+        report.model.name = "Scribe v3".into();
+        report.model.language = "auto".into();
+        report.model.api_key = Some(saved_key());
+        report.model.error = Some("couldn't save settings".into());
+        report.permissions.ready = true;
+        let text = human_status(&report);
+        assert!(
+            text.contains(
+                "Model        Scribe v3, language: auto (Scribe detects it); \
+                 error: couldn't save settings\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("API key      set (••••abcd, saved)\n"),
+            "{text}"
+        );
+        assert!(text.contains("Permissions  ready\n"), "{text}");
+        report.model.api_key = Some(ApiKeyReport {
+            source: ApiKeySource::Environment,
+            redacted: "••••abcd".into(),
+        });
+        assert!(
+            human_status(&report)
+                .contains("API key      set (••••abcd, from ELEVENLABS_API_KEY)\n")
+        );
+    }
+
+    #[test]
+    fn the_model_list_and_status_say_where_audio_goes_and_nothing_about_installs() {
+        let listed = human_models(&[scribe("de", Some(saved_key()))]);
+        assert_eq!(
+            listed,
+            "* scribe_v3  Scribe v3  live: scribe_v3_live  language: German (de)  \
+             API key: set (••••abcd, saved)\n"
+        );
+        let status = human_model(&scribe("auto", None));
+        assert_eq!(
+            status,
+            "Model: Scribe v3 (scribe_v3; live: scribe_v3_live)\n\
+             Language: auto (Scribe detects it)\n\
+             API key: not set — run `hex key set`\n\
+             API: https://api.elevenlabs.io\n\
+             Audio you dictate is sent to ElevenLabs for transcription.\n"
+        );
+        for text in [listed, status] {
+            let text = text.to_lowercase();
+            for word in ["install", "download", "local", "offline", "on-device"] {
+                assert!(!text.contains(word), "`{word}` in {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn key_status_shows_its_source_tail_and_file_and_never_the_key() {
+        let set = human_api_key(&ApiKeyStatus {
+            api_key: Some(saved_key()),
+            key_file: Some("/tmp/hex/elevenlabs.key".into()),
+        });
+        assert_eq!(
+            set,
+            "API key: set (••••abcd, saved)\nKey file: /tmp/hex/elevenlabs.key\n"
+        );
+        let unset = human_api_key(&ApiKeyStatus::default());
+        assert_eq!(unset, "API key: not set — run `hex key set`\n");
     }
 
     #[test]

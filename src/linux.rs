@@ -40,8 +40,8 @@ use crate::linux::service::{Activation, Launch};
 #[command(
     name = "hex",
     version = crate::VERSION,
-    about = "Local, observable voice recognition (Linux beta)",
-    long_about = "Local, observable voice recognition (Linux beta).\n\n\
+    about = "Observable voice dictation through ElevenLabs Scribe (Linux)",
+    long_about = "Observable voice dictation through ElevenLabs Scribe (Linux).\n\n\
         Control commands (status, dictation, settings, model, window, …) drive the one running \
         Hex over its owner-only socket and never launch it, except `start` and `restart`. Every \
         one takes --json for a versioned reply (docs/cli.md). Exit codes: 0 done or nothing to \
@@ -159,15 +159,6 @@ pub(crate) fn run(shutdown: &'static AtomicBool) -> Result<()> {
     if let Some(wayland_display) = adopted {
         tracing::info!(%wayland_display, "adopted the session's Wayland display");
     }
-    // 2.3.1's updater installed this build into its own folder.
-    if matches!(
-        command,
-        Command::App { .. } | Command::Service { embedded: false }
-    ) && crate::updater::legacy::take_over()
-    {
-        return Ok(());
-    }
-
     let event_path = log_dir.join("live.ndjson");
     match command {
         Command::App { hidden, .. } => launch(&activation, !hidden, event_path, shutdown),
@@ -195,7 +186,6 @@ pub(crate) fn run(shutdown: &'static AtomicBool) -> Result<()> {
                     &settings,
                     crate::history::History::open_default(settings.history_retention).ok(),
                 ),
-                None,
                 Default::default(),
                 // Only shortcuts drive a foreground listener: the service's
                 // `hex` commands can't reach it.
@@ -296,8 +286,9 @@ mod tests {
             &["hex", "paste-last"],
             &["hex", "typed-text"],
             &["hex", "settings", "set", "sound_effects", "off"],
-            &["hex", "model", "use", "parakeet_v3", "--language", "pl"],
-            &["hex", "model", "install"],
+            &["hex", "model", "use", "scribe_v3", "--language", "pl"],
+            &["hex", "model", "check"],
+            &["hex", "key", "status"],
             &["hex", "model", "status"],
             &["hex", "window", "show", "history"],
             &["hex", "vocabulary", "add", "Rune"],

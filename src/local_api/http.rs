@@ -146,6 +146,14 @@ impl HttpResponse {
     pub(super) fn code(status: u16, code: &str) -> Self {
         Self::json(status, &serde_json::json!({ "code": code }))
     }
+
+    /// A code with the account of itself a person can act on.
+    pub(super) fn refusal(status: u16, code: &str, message: &str) -> Self {
+        Self::json(
+            status,
+            &serde_json::json!({ "code": code, "message": message }),
+        )
+    }
 }
 
 pub(super) fn reason(status: u16) -> &'static str {

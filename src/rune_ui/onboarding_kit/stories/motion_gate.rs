@@ -1,5 +1,5 @@
-//! The first run under Rune's motion gate: the story "Whole run, slow
-//! download, a sketch" recorded headless around each beat, in dark and
+//! The first run under Rune's motion gate: the story "Whole run, scripted
+//! game" recorded headless around each beat, in dark and
 //! light and under Reduce Motion, and checked for pops, jumps, blinks and
 //! flickers ([`rune::motion_gate`]). `scripts/motion-audit` in Rune reads
 //! the same variables: `MOTION_GATE=<cell part>`, `MOTION_GATE_OUT`,
@@ -28,44 +28,9 @@ const ALLOW: &[AllowRow] = &[
     // Shared-element hand-offs: the element taking over sits in the one
     // leaving's place on the same frame.
     AllowRow::new(
-        "pop-out",
-        "download-progress-pill",
-        "entrance|parks",
-        "flies up as the top bar's pill",
-    )
-    .max(6),
-    AllowRow::new(
-        "pop-out",
-        "download-bar",
-        "sketch",
-        "flies up as the top bar's pill",
-    )
-    .max(3),
-    AllowRow::new(
-        "pop-out",
-        "download-pill-shell",
-        "almost-ready",
-        "flies down as the bar",
-    )
-    .max(3),
-    AllowRow::new(
-        "overshoot",
-        "track/fill",
-        "almost-ready",
-        "fills while the bar it rides lands",
-    )
-    .max(3),
-    AllowRow::new(
         "appear-then-jump",
         "thread/hex-bubble",
         "words",
-        "a sent line arrives whole and the thread makes room",
-    )
-    .max(3),
-    AllowRow::new(
-        "appear-then-jump",
-        "thread/sent-bubble",
-        "handoff",
         "a sent line arrives whole and the thread makes room",
     )
     .max(3),
@@ -74,11 +39,9 @@ const ALLOW: &[AllowRow] = &[
 /// The story as the playground opens it, before Play.
 fn opened() -> Onboard {
     let mut s = Onboard::new(Flow::FirstRun);
-    s.speech = Speech::AfterDownload;
     s.login = super::super::login::LoginAsk::preview();
     s.rehearsal = Some(Rehearsal::new(true));
     s.autoplay = true;
-    s.download_secs = SKETCH_DOWNLOAD_SECS;
     s.manual_override = true;
     s
 }
@@ -156,8 +119,7 @@ fn record(w: &Window, dark: bool, reduced: bool) -> Recording {
     r.rec
 }
 
-/// The window opening on `"Setting up Hex"`: the story as it opens, then
-/// Play.
+/// The window opening on the key step: the story as it opens, then Play.
 fn entrance(dark: bool, reduced: bool) -> Recording {
     let mut r = runtime_at(opened(), dark, reduced);
     r.idle(0.25);
@@ -168,7 +130,7 @@ fn entrance(dark: bool, reduced: bool) -> Recording {
             play(s, now);
         })
     });
-    // The download flies up to the top bar 1 s in.
+    // The key step gives way to the conversation 1.6 s in.
     r.play(3.0);
     r.rec
 }
@@ -188,7 +150,7 @@ fn beat(beat: fn(&Onboard) -> bool, before: f64, length: f64) -> Window {
 
 fn windows() -> Vec<(&'static str, Window)> {
     vec![
-        // The pill flies up and the conversation rises in under it.
+        // The key step leaves and the conversation rises in.
         ("parks", beat(parked, 0.6, 3.0)),
         // Jay's messages land in it, and he answers his own question.
         (
@@ -218,15 +180,7 @@ fn windows() -> Vec<(&'static str, Window)> {
         ),
         ("with-hex", beat(|s| s.step == Step::YourTurn, 0.5, 3.0)),
         ("words", beat(|s| s.step == Step::Hearing, 0.2, 4.0)),
-        (
-            "almost-ready",
-            beat(|s| s.step == Step::Microphone, 0.5, 5.0),
-        ),
-        ("sketch", beat(super::super::sketches::playing, 1.5, 3.5)),
-        (
-            "handoff",
-            beat(|s| s.download.is_some_and(|d| d.done()), 0.5, 9.0),
-        ),
+        ("microphone", beat(|s| s.step == Step::Microphone, 0.5, 5.0)),
         ("game", beat(|s| s.step == Step::Try, 0.5, 8.0)),
     ]
 }

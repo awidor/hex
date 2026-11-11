@@ -78,27 +78,27 @@ const fn read_only(key: &'static str, kind: Kind, about: &'static str, why: &'st
 }
 
 const UNIT: Kind = Kind::Number { min: 0.0, max: 1.0 };
-const MODEL_CHANGE: &str = "change the transcription model with `hex model use`";
+const MODEL_CHANGE: &str = "set the language with `hex model use scribe_v3 --language <code>`, \
+                            or with `hex settings apply`";
 
 /// Choice keys whose values are numbers in settings.json.
-pub(super) const NUMERIC_CHOICES: [&str; 2] =
-    ["meetings.calendar.lead_minutes", "labs.unload_idle_minutes"];
+pub(super) const NUMERIC_CHOICES: [&str; 1] = ["meetings.calendar.lead_minutes"];
 
 pub(super) const KEYS: &[Key] = &[
     key(
         "keyboard_model_switching.enabled",
         Kind::Bool,
-        "Labs: switch the model when the keyboard input source changes (macOS, Windows, X11)",
+        "Labs: switch the transcription language when the keyboard input source changes (macOS, Windows, X11)",
     ),
     key(
         "keyboard_model_switching.mappings",
         Kind::Json,
-        "Input-source IDs mapped to a model and language; absent sources don't switch (macOS, Windows, X11)",
+        "Input-source IDs mapped to a language, as {model, language} with the model scribe_v3; absent sources don't switch (macOS, Windows, X11)",
     ),
     key(
         "labs.app_model_switching",
         Kind::Bool,
-        "Labs: switch the speech model and language with the foreground application (macOS, Windows)",
+        "Labs: switch the transcription language with the foreground application (macOS, Windows)",
     ),
     key(
         "release_microphone_while_idle",
@@ -244,25 +244,37 @@ pub(super) const KEYS: &[Key] = &[
     read_only(
         "transcription.model",
         Kind::Text,
-        "The dictation model",
+        "The transcription model: scribe_v3, ElevenLabs Scribe, which audio is sent to",
         MODEL_CHANGE,
     ),
     read_only(
         "transcription.language",
         Kind::Text,
-        "The dictation language",
+        "The language Scribe is told to expect: an ISO 639 code such as en or yue, or auto to detect it",
         MODEL_CHANGE,
     ),
-    read_only(
-        "transcription_recents",
-        Kind::Json,
-        "Recently used models, each with its language",
-        "Hex records these as you switch models",
+    key(
+        "scribe.no_verbatim",
+        Kind::Bool,
+        "Leave filler words, false starts, and non-speech sounds out of transcripts",
+    ),
+    key(
+        "scribe.numbers_format",
+        Kind::Choice(&["auto", "digits", "words"]),
+        "How Scribe writes numbers: as digits, as words, or auto to let it choose",
+    ),
+    key(
+        "scribe.final_text",
+        Kind::Choice(&["batch", "live"]),
+        "The text a dictation pastes: batch (the whole clip sent at release, the most accurate) \
+         or live (the live session's text, the fastest; the whole clip is still sent when the \
+         session fails)",
     ),
     key(
         "vocabulary_boost",
         Kind::Choice(&["off", "light", "normal", "strong"]),
-        "How readily transcription swaps heard words for a vocabulary term",
+        "Whether the vocabulary is sent to ElevenLabs as keyterms (with Labs › Vocabulary \
+         biasing on); off sends none, and the other levels all send it",
     ),
     key(
         "dictation_processing.default_mode",
@@ -317,22 +329,12 @@ pub(super) const KEYS: &[Key] = &[
     key(
         "labs.vocabulary_biasing",
         Kind::Bool,
-        "Labs: bias Parakeet transcription toward the vocabulary",
+        "Labs: send the vocabulary to ElevenLabs as keyterms that bias transcription, which it bills extra",
     ),
     key(
         "labs.mouse_shortcuts",
         Kind::Bool,
         "Labs: record mouse buttons as shortcuts (macOS)",
-    ),
-    key(
-        "labs.unload_idle",
-        Kind::Bool,
-        "Labs: unload the speech model when idle, freeing its memory",
-    ),
-    key(
-        "labs.unload_idle_minutes",
-        Kind::Choice(&["5", "15", "30", "60"]),
-        "Minutes unused before Labs › Unload model when idle unloads the model",
     ),
     key(
         "labs.restore_shortcut_default",
@@ -403,11 +405,6 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: add a space before a dictation pasted right after a word (macOS)",
     ),
     key(
-        "labs.picker_sort_filter",
-        Kind::Bool,
-        "Labs: sort the Local transcription picker by recommendation, size, or name, and show only models for the saved language",
-    ),
-    key(
         "labs.sided_modifier_chords",
         Kind::Bool,
         "Labs: the shortcut recorder keeps which side each modifier of a modifier-only chord is on, such as Right Command + Right Option (macOS)",
@@ -424,16 +421,6 @@ pub(super) const KEYS: &[Key] = &[
          modifiers such as Option, Globe, or ⌃⌥ (macOS)",
     ),
     key(
-        "labs.benchmark_details",
-        Kind::Bool,
-        "Labs: the Local transcription picker shows each model's raw error rate (WER or CER), benchmark, source, and conditions",
-    ),
-    key(
-        "labs.parakeet_ultra",
-        Kind::Bool,
-        "Labs: Parakeet Ultra, Moondream's post-trained Parakeet v3, in the Local transcription picker; stays on while it is the dictation model",
-    ),
-    key(
         "labs.standalone_special_keys",
         Kind::Bool,
         "Labs: shortcuts may use Menu, Pause, or Scroll Lock, alone or with modifiers (Linux); off puts such a shortcut back to its default",
@@ -446,7 +433,7 @@ pub(super) const KEYS: &[Key] = &[
     key(
         "labs.keep_recordings",
         Kind::Bool,
-        "Labs: dictations saved to History keep their audio, so History can transcribe them again with another model; off stops saving, clearing History deletes it",
+        "Labs: dictations saved to History keep their audio, so History can transcribe them again; off stops saving, clearing History deletes it",
     ),
     key(
         "labs.history_stats",
@@ -496,7 +483,7 @@ pub(super) const KEYS: &[Key] = &[
     key(
         "labs.skip_pauses",
         Kind::Bool,
-        "Labs: a dictation transcribed as a whole clip hears only the start and end of each long pause, so slow computers paste sooner (Linux and Windows)",
+        "Labs: a dictation sent as a whole clip keeps only the start and end of each long pause, so it is billed and answered for less audio (Linux and Windows)",
     ),
     key(
         "labs.stop_when_call_ends",
@@ -584,24 +571,9 @@ pub(super) const KEYS: &[Key] = &[
         "Labs: Output's Try card offers Vocabulary and Fix this, which copies an agent prompt naming the wrong result",
     ),
     key(
-        "labs.picker_active_first",
-        Kind::Bool,
-        "Labs: the speech model picker lists the model in use first",
-    ),
-    key(
-        "labs.model_in_place",
-        Kind::Bool,
-        "Labs: the speech model picker's Use model file where it is… adds a GGUF file without copying it, so several accounts can share one file",
-    ),
-    key(
-        "labs.picker_downloaded",
-        Kind::Bool,
-        "Labs: the speech model picker's All speech models view offers Only downloaded models, with the space they take",
-    ),
-    key(
         "labs.transcribe_files",
         Kind::Bool,
-        "Labs: hex transcribe <file> turns a WAV recording into text with the selected dictation model",
+        "Labs: hex transcribe <file> sends a WAV recording to ElevenLabs and prints its text, in the dictation language",
     ),
     key(
         "labs.api_processing",
@@ -613,7 +585,7 @@ pub(super) const KEYS: &[Key] = &[
         "labs.api_timestamps",
         Kind::Bool,
         "Labs: apps using Hex's local API can ask for each segment's or word's start and end times \
-         in a transcript, as the speech model heard them (timestamps=segment|word)",
+         in a transcript, as Scribe timed them (timestamps=segment|word)",
     ),
     key(
         "labs.speakers_only",
@@ -751,11 +723,6 @@ pub(super) const KEYS: &[Key] = &[
         "Interface language; none follows the system",
     ),
     key(
-        "transcription_device",
-        Kind::Choice(&["auto", "gpu", "cpu"]),
-        "Where the speech model runs: auto (a GPU unless it failed before), gpu, or cpu (Linux and Windows)",
-    ),
-    key(
         "indicator_position",
         Kind::Choice(&["top", "bottom", "hidden"]),
         "Where the dictation HUD appears",
@@ -787,8 +754,8 @@ pub(super) const CAPTURE_KEYS: &[Key] = &[
     ),
     key(
         "capture.transcriber",
-        Kind::Choice(&["parakeet", "apple"]),
-        "What transcribes a capture's narration: Hex's loaded model or Apple's",
+        Kind::Choice(&["scribe", "apple"]),
+        "What transcribes a capture's narration: scribe (ElevenLabs Scribe, as dictation uses it) or apple (Apple's speech recognizer, macOS)",
     ),
     optional(
         "capture.folder",

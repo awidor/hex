@@ -4,20 +4,19 @@
 //! host beside it (`linux_host`); on Windows and macOS the runtime thread
 //! `windows_rune` or `macos_rune` starts (`windows_host`, `macos_host`).
 //! Either way it saves `settings.json` through the host, which adopts it,
-//! and sends the same requests for listening, shortcuts, models, and
-//! updates. `platform::Capabilities` decides which panes and rows each OS
+//! and sends the same requests for listening, shortcuts, the transcription
+//! language, and updates. `platform::Capabilities` decides which panes and rows each OS
 //! shows. Everything is drawn with `rune-kit`'s components in OpenCode's
 //! design language (`rune-theme-opencode`); see `docs/design-system.md`.
 
 mod activity;
+mod api_key;
 #[cfg(hex_capture)]
 pub(crate) mod capture_capsule;
 mod controls;
 #[cfg(target_os = "macos")]
 pub(crate) mod deep_link;
 mod explainer;
-mod found;
-mod found_choice;
 mod fun;
 mod general;
 mod history;
@@ -41,15 +40,12 @@ pub(crate) use self::meetings::meeting_import_failed;
 mod captures;
 mod meetings_host;
 pub(crate) use meetings_host::{meeting_corner_moved, meeting_failed, meeting_provider_chosen};
-mod model_details;
-mod model_import;
 mod models;
 mod modes;
 mod onboarding;
 mod onboarding_kit;
 mod output;
 mod paste_access;
-mod picker;
 mod platform;
 mod platform_settings;
 pub(crate) mod playground;
@@ -66,7 +62,7 @@ mod sidebar;
 mod sidebar_update;
 mod sound_sets;
 mod spark;
-mod speech_model;
+mod speech_language;
 #[cfg(target_os = "macos")]
 pub(crate) mod story_link;
 mod vocabulary;
@@ -370,6 +366,8 @@ fn on_close(ui: &mut Ui, tx: &mut Tx) {
     ui.open = None;
     models::close(ui);
     ui.close_dialogs();
+    // A key typed but not saved doesn't wait in a hidden window.
+    ui.api_key.field.clear();
     // HUD Lab's demo would otherwise stay on screen; reopening starts at
     // General, and coming back to HUD Lab starts the demo again.
     if ui.pane == Pane::HudLab {
@@ -392,7 +390,8 @@ fn on_close(ui: &mut Ui, tx: &mut Tx) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Destination {
     Settings,
-    /// Settings with the transcription picker open.
+    /// General, where the Transcription settings are (`hex window show
+    /// models` and the menu bar still name it).
     Models,
     /// The Meetings pane, with a meeting selected when given.
     Meetings(Option<String>),
@@ -426,13 +425,9 @@ pub(crate) fn show(ui: &mut Ui, destination: Destination, tx: &mut Tx) {
     if pane.shown(ui) {
         ui.select_pane(pane, tx);
     }
-    match destination {
-        Destination::Models => picker::open(ui),
-        Destination::Meetings(Some(id)) => {
-            ui.meetings.view = meetings::View::Recordings;
-            ui.meetings.select(id);
-        }
-        _ => {}
+    if let Destination::Meetings(Some(id)) = destination {
+        ui.meetings.view = meetings::View::Recordings;
+        ui.meetings.select(id);
     }
 }
 
@@ -518,7 +513,7 @@ pub(crate) fn render() {
     playground::attach(app).run();
 }
 
-/// The window's logical size, which every pane and the picker fit.
+/// The window's logical size, which every pane fits.
 const WINDOW_SIZE: (f32, f32) = (980.0, 760.0);
 
 /// One fixed size the user cannot change, which macOS tiling window managers
@@ -588,19 +583,14 @@ struct ServiceView {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Menu {
     Microphone,
-    /// An input source's model in keyboard model switching.
-    InputSourceModel(usize),
-    /// An input source's language in keyboard model switching.
+    /// An input source's language (Labs › Switch model with keyboard
+    /// language).
     InputSourceLanguage(usize),
-    /// A mode's speech model in the Modes pane (Labs › Switch model with app).
-    ModeSpeechModel(modes::Selection),
-    /// A mode's speech language in the Modes pane.
+    /// A mode's language in the Modes pane (Labs › Switch model with app).
     ModeSpeechLanguage(modes::Selection),
     /// How long History keeps dictations.
     HistoryRetention,
-    /// The installed models History's Transcribe again offers.
-    HistoryAgain,
-    /// The language of Transcribe again's chosen model, for that run.
+    /// The language History's Transcribe again runs in.
     HistoryAgainLanguage,
     /// The OpenCode thinking variant.
     Variant,
@@ -621,9 +611,6 @@ enum Menu {
 
 pub(crate) struct Ui {
     settings: AppSettings,
-    /// A test's preferred system language, instead of the host locale.
-    #[cfg(test)]
-    preferred_language: Option<String>,
     service: Service,
     /// This window's app, to know whether it shows (`app` sets it).
     window: Option<rune::AppHandle<Ui>>,
@@ -665,8 +652,8 @@ pub(crate) struct Ui {
     build_preview: Option<BuildKind>,
     capture: Capture,
     vocabulary: vocabulary::VocabularyEditor,
-    /// The model the service was last seen preparing, and since when.
-    preparing: Option<(TranscriptionModelId, Instant)>,
+    /// The ElevenLabs API key: where it comes from, and a new one typed.
+    api_key: api_key::ApiKey,
     /// When a text field last changed without being saved.
     draft_since: Option<Instant>,
     duck_volume_drag: Option<f32>,
@@ -676,9 +663,6 @@ pub(crate) struct Ui {
     captures: captures::CapturesPane,
     modes: modes::ModesPane,
     output: output::OutputPane,
-    picker: picker::Picker,
-    /// Speech models already on this computer, and choosing one.
-    found: found::FoundState,
     explainer: explainer::Explainer,
     sound_sets: sound_sets::SoundSets,
     tour: Option<onboarding::Tour>,
@@ -731,6 +715,7 @@ impl Ui {
             connect.is_some() && crate::linux::clipboard::wayland_without_data_control();
         let mut ui = Self::with(settings, Service::Pending(connect));
         ui.error = error;
+        ui.api_key.source = api_key::Source::read();
         #[cfg(target_os = "linux")]
         {
             ui.platform.paste = paste;
@@ -752,7 +737,7 @@ impl Ui {
         ui.platform.developer =
             crate::dev_build::is_dev_build() && crate::DEVELOPER_FEATURES_ENABLED;
         ui.platform.hud.tuning = crate::rune_hud::dot_scope::lab();
-        ui.tour = onboarding::Tour::start(&ui.settings, &ui.platform);
+        ui.tour = onboarding::Tour::start(ui.api_key.is_set(), &ui.platform);
         onboarding_kit::live::open(&mut ui);
         ui.platform.set_login_item(host::launch_at_login());
         ui
@@ -763,8 +748,6 @@ impl Ui {
         let vocabulary = vocabulary::VocabularyEditor::new(&settings.vocabulary);
         Self {
             settings,
-            #[cfg(test)]
-            preferred_language: None,
             service,
             view: None,
             error: None,
@@ -785,7 +768,7 @@ impl Ui {
             build_preview: None,
             capture: Capture::Idle,
             vocabulary,
-            preparing: None,
+            api_key: api_key::ApiKey::default(),
             draft_since: None,
             duck_volume_drag: None,
             models: models::Models::default(),
@@ -794,8 +777,6 @@ impl Ui {
             captures: captures::CapturesPane::default(),
             modes,
             output: output::OutputPane::default(),
-            picker: picker::Picker::default(),
-            found: found::FoundState::default(),
             explainer: explainer::Explainer::default(),
             sound_sets: sound_sets::SoundSets::default(),
             tour: None,
@@ -822,16 +803,6 @@ impl Ui {
     /// A scene or test: nothing here runs on real time.
     fn is_fixture(&self) -> bool {
         matches!(self.service, Service::Fixture(_))
-    }
-
-    /// The person's first preferred system language: a test's when it sets
-    /// one, else the host locale.
-    fn preferred_language(&self) -> String {
-        #[cfg(test)]
-        if let Some(language) = &self.preferred_language {
-            return language.clone();
-        }
-        crate::desktop::i18n::preferred_language()
     }
 
     fn send(&mut self, request: Request) {
@@ -1090,7 +1061,6 @@ impl Ui {
 
     /// Closes the dialogs and sheets a pane switch or window close ends.
     fn close_dialogs(&mut self) {
-        picker::close(self);
         explainer::close(self);
         sound_sets::close(self);
         vocabulary::close(self);
@@ -1109,6 +1079,8 @@ impl Ui {
         settings::cancel_capture(self);
         self.open = None;
         self.general_search.clear();
+        // A key typed but not saved doesn't stay behind in a pane left.
+        self.api_key.field.clear();
         models::close(self);
         self.close_dialogs();
         self.output.prompt_copied = false;
@@ -1130,7 +1102,7 @@ impl Ui {
 
 /// Shortcut recording takes every key; Command-1 through 9 open the
 /// sidebar's panes in order; otherwise Escape closes Shortcut mode,
-/// the sound sets sheet, the picker, or the open menu.
+/// the sound sets sheet, the vocabulary sheet, or the open menu.
 fn on_key(ui: &mut Ui, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
     if settings::on_key(ui, event, tx) {
         return true;
@@ -1153,7 +1125,6 @@ fn on_key(ui: &mut Ui, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
     }
     if let rune::Key::Command(digit @ '1'..='9') = event.key
         && !event.mods.alt
-        && !ui.picker.open
         && !ui.explainer.open
         && !ui.sound_sets.open
         && !ui.vocabulary.open
@@ -1183,9 +1154,6 @@ fn on_key(ui: &mut Ui, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
         true
     } else if ui.vocabulary.open {
         vocabulary::close(ui);
-        true
-    } else if ui.picker.open {
-        picker::close(ui);
         true
     } else if ui.open.is_some() {
         ui.open = None;
@@ -1247,7 +1215,7 @@ fn setup(ui: &mut Ui, waker: Waker) {
 }
 
 /// Runs before every frame: adopts service updates, follows shortcut
-/// capture, model preparation, the OpenCode catalog, history, and setup, and
+/// capture, the API key, the OpenCode catalog, history, and setup, and
 /// saves paused text edits. True when anything shown changed.
 fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     if clock >= ui.tick_at && ui.window.as_ref().is_some_and(rune::AppHandle::is_visible) {
@@ -1288,9 +1256,12 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     }
     changed |= ui.modes.poll(ui.live());
     changed |= modes::poll_chooser(ui);
-    changed |= model_import::poll(ui);
     changed |= meetings::poll_import(ui);
-    changed |= found::poll(ui);
+    // General and the first run show the key, so they follow one set or
+    // removed outside the window.
+    let key_shown = (ui.first_run.is_some() || (ui.pane == Pane::General && !ui.labs_open))
+        && ui.window.as_ref().is_some_and(rune::AppHandle::is_visible);
+    changed |= api_key::poll(ui, clock, key_shown);
     let login_unknown = ui.platform.login_item.is_none();
     changed |= settings::poll_microphones(ui);
     // General names the input in use; list again when the OS reports an
@@ -1355,14 +1326,6 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
                 changed = true;
             }
         }
-    }
-    let preparing = ui
-        .view
-        .as_ref()
-        .and_then(|view| view.transcription.preparing);
-    if preparing != ui.preparing.map(|(model, _)| model) {
-        ui.preparing = preparing.map(|model| (model, now));
-        changed = true;
     }
     changed |= onboarding::poll(ui);
     changed |= onboarding_kit::live::poll(ui, tx);
@@ -1443,9 +1406,6 @@ fn view(ui: &Ui, cx: &mut Cx<Ui>) -> El {
         .hover_motion_within(Anim::INSTANT, Anim::INSTANT)
         .child(sidebar(ui, p))
         .child(panel);
-    if let Some(modal) = picker::modal(ui, p) {
-        layer.extend(modal);
-    }
     if let Some(modal) = explainer::modal(ui, cx, p) {
         layer.extend(modal);
     }
@@ -1509,7 +1469,7 @@ mod snap_isolation;
 mod keyboard_model_tests;
 
 #[cfg(test)]
-mod speech_model_tests;
+mod speech_language_tests;
 
 #[cfg(test)]
 mod dmg_keycap;

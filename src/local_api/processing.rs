@@ -226,13 +226,18 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
-    use super::super::{LocalApi, LocalApiOptions, current_health};
+    use super::super::{KeyGate, LocalApi, LocalApiOptions, current_health};
     use super::*;
     use crate::desktop::events::EventLog;
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
+    /// An API with an ElevenLabs API key, so streams can be created.
     fn start(processing: Processing) -> LocalApi {
+        start_with_key(processing, KeyGate::gated(|| true))
+    }
+
+    fn start_with_key(processing: Processing, key: KeyGate) -> LocalApi {
         let directory = std::env::temp_dir().join(format!(
             "hex-api-processing-{}-{}",
             std::process::id(),
@@ -247,6 +252,7 @@ mod tests {
             LocalApiOptions {
                 processing,
                 stream_engine: Some(crate::transcription::stream::tests::fake_source()),
+                key,
                 ..LocalApiOptions::default()
             },
             None,
@@ -383,7 +389,7 @@ mod tests {
     fn the_lab_gates_processing_before_the_audio_body_is_read() {
         let api = start(off());
         assert_eq!(
-            refused_transcription(&api, "/transcriptions?model=parakeet_v2&process=global"),
+            refused_transcription(&api, "/transcriptions?model=scribe_v3&process=global"),
             (403, r#"{"code":"processing-disabled"}"#.into())
         );
         let (id, owner) = created(&api);
@@ -400,7 +406,7 @@ mod tests {
     fn a_service_without_a_processor_answers_processing_unavailable() {
         let api = start(on_without_processor());
         assert_eq!(
-            refused_transcription(&api, "/transcriptions?model=parakeet_v2&process=global"),
+            refused_transcription(&api, "/transcriptions?model=scribe_v3&process=global"),
             (409, r#"{"code":"processing-unavailable"}"#.into())
         );
         let (id, owner) = created(&api);
@@ -415,7 +421,7 @@ mod tests {
         // missing processor is named first, not `processing-disabled`.
         let api = start(Processing::gated(None, || false));
         assert_eq!(
-            refused_transcription(&api, "/transcriptions?model=parakeet_v2&process=global"),
+            refused_transcription(&api, "/transcriptions?model=scribe_v3&process=global"),
             (409, r#"{"code":"processing-unavailable"}"#.into())
         );
         let (id, owner) = created(&api);
@@ -433,7 +439,7 @@ mod tests {
         let api = start(processing.clone());
         let _guard = gate(true, &processing).ok().flatten().unwrap();
         assert_eq!(
-            refused_transcription(&api, "/transcriptions?model=parakeet_v2&process=global"),
+            refused_transcription(&api, "/transcriptions?model=scribe_v3&process=global"),
             (429, r#"{"code":"queue-full"}"#.into())
         );
         let (id, owner) = created(&api);
@@ -459,7 +465,7 @@ mod tests {
         ] {
             let api = start(on());
             assert_eq!(
-                refused_transcription(&api, &format!("/transcriptions?model=parakeet_v2&{query}")),
+                refused_transcription(&api, &format!("/transcriptions?model=scribe_v3&{query}")),
                 (400, r#"{"code":"invalid-request"}"#.into()),
                 "{query}"
             );
@@ -483,7 +489,7 @@ mod tests {
             assert_eq!(status, 200, "{query}: {body}");
             let body: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert_eq!(
-                body["processed"], "live 8000 [en] processed",
+                body["processed"], "live 8000 [auto] processed",
                 "{query}: {body}"
             );
         }
@@ -500,7 +506,7 @@ mod tests {
         assert_eq!(body["text"], "live 8000");
         assert_eq!(body["durationMs"], 500);
         assert_eq!(body["segments"][0]["endMs"], 500);
-        assert_eq!(body["processed"], "live 8000 [en] processed");
+        assert_eq!(body["processed"], "live 8000 [auto] processed");
     }
 
     #[test]
@@ -514,9 +520,12 @@ mod tests {
         assert_eq!(body["text"], "live 8000");
         assert!(body.get("processed").is_none(), "{body}");
 
-        let (status, body) = refused_transcription(&api, "/transcriptions?model=parakeet_v2");
+        // An unprocessed upload gets past this lab untouched: without an API
+        // key, the key is the first thing it is refused for.
+        let api = start_with_key(on(), KeyGate::gated(|| false));
+        let (status, body) = refused_transcription(&api, "/transcriptions?model=scribe_v3");
         assert_eq!(status, 409, "{body}");
-        assert_eq!(body, r#"{"code":"model-not-ready"}"#);
+        assert!(body.contains(r#""code":"api-key-missing""#), "{body}");
     }
 
     #[test]

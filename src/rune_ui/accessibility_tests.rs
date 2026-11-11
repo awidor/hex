@@ -222,35 +222,54 @@ fn settings_switches_say_whether_they_are_on() {
 #[test]
 fn choices_name_what_they_choose_and_read_their_value() {
     let rt = runtime("portal");
-    let model = node(&rt, "transcription-control");
-    assert_eq!(name(&model), "Speech model");
+    let language = node(&rt, "transcription-language-control-trigger");
+    assert_eq!(name(&language), "Language");
     assert_eq!(
-        a11y_value(&rt, "transcription-control").as_deref(),
-        Some("Parakeet Unified English")
+        a11y_value(&rt, "transcription-language-control-trigger").as_deref(),
+        Some("English")
     );
     let microphone = node(&rt, "microphone-control");
     assert_eq!(name(&microphone), "Microphone");
     assert!(microphone["value"].as_str().is_some_and(|v| !v.is_empty()));
 }
 
-/// The model picker is a dialog named by its title, the only part of the
-/// window a screen reader reaches while it is open.
+/// The vocabulary sheet is a dialog named by its title, the only part of
+/// the window a screen reader reaches while it is open.
 #[test]
-fn the_model_picker_is_a_named_modal_dialog() {
+fn the_vocabulary_sheet_is_a_named_modal_dialog() {
     let mut rt = runtime("portal");
-    assert!(rt.accessibility_action("transcription-control", Action::Click, None));
+    assert!(rt.accessibility_action("vocabulary-control", Action::Click, None));
     settle(&mut rt);
-    assert!(rt.state.picker.open);
-    let picker = node(&rt, "transcription-picker");
-    assert_eq!(picker["role"], "dialog");
-    assert!(!name(&picker).is_empty());
-    assert!(states(&picker).contains(&"modal"), "{picker}");
+    assert!(rt.state.vocabulary.open);
+    let sheet = node(&rt, "vocabulary");
+    assert_eq!(sheet["role"], "dialog");
+    assert_eq!(name(&sheet), "Vocabulary");
+    assert!(states(&sheet).contains(&"modal"), "{sheet}");
     let tree = rt.accessibility_json();
     assert!(
         !nodes(&tree)
             .iter()
             .any(|(_, node)| node["key"] == "nav-general"),
-        "the window behind the picker leaves the tree"
+        "the window behind the sheet leaves the tree"
+    );
+}
+
+/// The API key's field is named, and never says what was typed into it.
+#[test]
+fn the_api_key_field_is_named_and_keeps_its_text_to_itself() {
+    let mut rt = runtime("portal");
+    rt.state.api_key.field.replace_text("sk_secret_0123456789");
+    settle(&mut rt);
+    let tree = rt.accessibility_json();
+    assert!(
+        nodes(&tree).iter().any(
+            |(path, node)| path.contains("api-key-field") && name(node) == "ElevenLabs API key"
+        ),
+        "the field is named"
+    );
+    assert!(
+        !rt.accessibility_json().to_string().contains("sk_secret"),
+        "a typed key never reaches the accessibility tree"
     );
 }
 
@@ -267,12 +286,12 @@ fn settings_reopened_sends_its_whole_tree_to_the_new_adapter() {
         .service(&mut rt, "Hex")
         .expect("the first window's tree");
     assert!(opened.tree.is_some());
-    assert!(rt.accessibility_action("transcription-control", Action::Click, None));
+    assert!(rt.accessibility_action("vocabulary-control", Action::Click, None));
     settle(&mut rt);
     assert!(
         first
             .service(&mut rt, "Hex")
-            .expect("the picker opened")
+            .expect("the vocabulary sheet opened")
             .tree
             .is_none()
     );
@@ -299,7 +318,7 @@ fn settings_reopened_sends_its_whole_tree_to_the_new_adapter() {
         update
             .nodes
             .iter()
-            .any(|(_, node)| node.author_id() == Some("transcription-control")),
+            .any(|(_, node)| node.author_id() == Some("vocabulary-control")),
         "the reopened window shows Settings"
     );
 }

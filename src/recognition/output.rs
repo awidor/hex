@@ -12,7 +12,7 @@ use crate::dictation::context::ContextSnapshot;
 use crate::dictation::indicator::DictationIndicatorEvent;
 use crate::dictation::{DictationClip, Finish};
 use crate::feedback::{self, Tone};
-use crate::parakeet::{DictationJobId, DictationWorker, TranscriptionTarget};
+use crate::macos_dictation::{DictationJobId, DictationWorker, TranscriptionTarget};
 
 use super::{DictationSink, FinishResult};
 

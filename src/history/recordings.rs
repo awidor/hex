@@ -1,6 +1,7 @@
 //! Labs › Keep recordings: a dictation saved to History keeps its 16 kHz
 //! mono audio as an owner-only 16-bit WAV in `history-audio/<id>.wav`
-//! beside the store, so History can transcribe it again with another model.
+//! beside the store, so History can transcribe it again (in another
+//! language, or after a failed or poor first attempt).
 //!
 //! Audio exists only while the toggle is on as a capture is handed to the
 //! engine ([`Recording::keep`]). The store owns every file: an entry that
@@ -25,7 +26,7 @@ use crate::transcription::service::{
 pub const MAX_RECORDING_BYTES: u64 = 512 * 1024 * 1024;
 const SAMPLE_RATE: u32 = 16_000;
 const DIRECTORY: &str = "history-audio";
-/// How long one Transcribe again may run, model load included.
+/// How long one Transcribe again may run.
 const RETRANSCRIBE_DEADLINE: Duration = Duration::from_secs(10 * 60);
 
 /// One dictation's 16 kHz mono audio, kept for History.
@@ -122,9 +123,9 @@ pub(super) fn sweep(directory: &Path, below: u64, keep: impl Fn(u64) -> bool) {
 }
 
 /// Transcribes the recording at `path` again with `selection`, on a
-/// transcription service of its own: it runs on the dictation engine's model
-/// when that is the one asked for, yielding to dictation, or loads its own
-/// copy for this run. Blocks; call it off the UI thread.
+/// transcription service of its own: it goes through the dictation engine
+/// when that holds the selection asked for, yielding to dictation, or uses
+/// its own transcriber for this run. Blocks; call it off the UI thread.
 pub fn retranscribe(path: &Path, selection: TranscriptionSelection) -> Result<String, String> {
     let file = fs::File::open(path).map_err(|_| "The recording is gone.".to_string())?;
     let clip = AudioClip::decode_wav(BufReader::new(file)).map_err(|error| match error {
@@ -182,7 +183,6 @@ fn restrict_directory(_directory: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcription::models::{CustomModelId, TranscriptionModelId};
 
     #[test]
     fn transcribe_again_returns_once_the_run_ends() {
@@ -198,13 +198,11 @@ mod tests {
         )
         .unwrap();
         let recording = path(&directory, 1);
-        // A model that is not on this computer fails at once, without loading
-        // anything; the answer must still come back (#1089).
+        // A selection Scribe cannot be asked for fails at once, without a
+        // request; the answer must still come back (#1089).
         let selection = TranscriptionSelection {
-            model: TranscriptionModelId::Custom(
-                CustomModelId::parse("custom-0000000000000000").unwrap(),
-            ),
-            language: "en".into(),
+            language: "not a code".into(),
+            ..Default::default()
         };
         let (sender, answer) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -214,7 +212,7 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
         assert!(
             answered.expect("Transcribe again never answered").is_err(),
-            "a missing model cannot transcribe"
+            "an invalid selection cannot transcribe"
         );
     }
 }

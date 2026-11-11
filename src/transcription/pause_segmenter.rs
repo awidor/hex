@@ -89,6 +89,19 @@ impl SpeechFrames {
     }
 }
 
+/// Whether no 20 ms frame of 16 kHz `samples` reaches the level speech needs
+/// (`MINIMUM_SPEECH_DB`, with any DC offset removed). Such audio is silence
+/// or faint room noise: it is not sent for transcription, which is billed by
+/// the second and tends to invent text for it. Anything louder is the
+/// model's to judge.
+pub(crate) fn below_speech_level(samples: &[f32]) -> bool {
+    let mut frames = SpeechFrames::default();
+    samples
+        .chunks(FRAME_SAMPLES)
+        .filter(|frame| frame.len() == FRAME_SAMPLES)
+        .all(|frame| frames.measure(frame).0 <= MINIMUM_SPEECH_DB)
+}
+
 #[derive(Default)]
 pub struct PauseSegmenter {
     speech: SpeechFrames,

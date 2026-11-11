@@ -21,12 +21,9 @@ use hound::WavReader;
 use serde::{Deserialize, Serialize};
 
 use crate::dictation::StreamingResampler;
-#[cfg(target_os = "macos")]
-use crate::transcription::Transcriber;
-#[cfg(not(target_os = "macos"))]
-use crate::transcription::local_transcriber::LocalTranscriber as Transcriber;
 use crate::transcription::models::TranscriptionSelection;
 use crate::transcription::pause_segmenter::PauseSegmenter;
+use crate::transcription::scribe::ScribeTranscriber as Transcriber;
 use crate::transcription::transcript::{Transcript, TranscriptSegment};
 
 use super::echo::{EchoEnvelope, Signal};
@@ -188,10 +185,10 @@ fn transcribe_speech(
     transcribe()
 }
 
-/// Whether the speech detector heard no speech in `samples`, so they skip the
-/// model.
+/// Whether `samples` never reach the level of speech, so they are not sent
+/// for transcription.
 fn speechless(samples: &[f32]) -> bool {
-    let speechless = crate::transcription::speech_detector::contains_speech(samples) == Some(false);
+    let speechless = crate::transcription::pause_segmenter::below_speech_level(samples);
     if speechless {
         tracing::debug!(
             audio_ms = samples_ms(samples.len()),
@@ -704,9 +701,9 @@ fn wait_for_dictation() {
 }
 
 /// Transcribes meeting chunks. In the app this borrows the dictation
-/// engine's loaded model between dictations, at utility QoS, so a meeting
-/// never loads a second copy. A process without an engine, such as the CLI,
-/// loads its own.
+/// engine's transcriber between dictations, so a meeting's requests never
+/// run ahead of a dictation. A process without an engine, such as the CLI,
+/// makes its own.
 pub(super) struct ChunkModel {
     selection: TranscriptionSelection,
     owned: Option<Transcriber>,
@@ -748,7 +745,7 @@ impl ChunkModel {
             self.owned = None;
             return result;
         }
-        // In the app, follow dictation's current choice, such as Apple Speech.
+        // In the app, follow dictation's current language.
         let selection = if engine.is_some() {
             crate::app_settings::transcription_selection().1
         } else {
@@ -783,7 +780,7 @@ impl ChunkModel {
             .map(Chunked::Done)
     }
 
-    /// `None` when the engine has no GGUF model loaded.
+    /// `None` when the engine stopped.
     fn transcribe_shared(
         engine: &crate::transcription::engine::TranscriptionEngine,
         samples: &[f32],
@@ -791,7 +788,6 @@ impl ChunkModel {
         let samples = samples.to_vec();
         enum Shared {
             Busy,
-            NoModel,
             Ran(Result<Transcript>),
         }
         let ran = engine.background(move |model| {
@@ -799,19 +795,16 @@ impl ChunkModel {
             if crate::transcription::engine::dictation_busy() {
                 return Shared::Busy;
             }
-            match engine_model(model) {
-                Some(transcriber) => Shared::Ran(
-                    crate::transcription::background_priority::at_background_priority(|| {
-                        transcriber.transcribe_segments(samples)
-                    }),
-                ),
-                None => Shared::NoModel,
-            }
+            Shared::Ran(
+                crate::transcription::background_priority::at_background_priority(|| {
+                    model.transcribe_segments(samples)
+                }),
+            )
         });
         match ran {
             Ok(None | Some(Shared::Busy)) => Some(Ok(Chunked::Preempted)),
             Ok(Some(Shared::Ran(result))) => Some(result.map(Chunked::Done)),
-            Ok(Some(Shared::NoModel)) | Err(_) => None,
+            Err(_) => None,
         }
     }
 
@@ -826,22 +819,6 @@ impl ChunkModel {
             }
         }
     }
-}
-
-/// The engine's model when meetings can share it. Apple Speech runs outside
-/// this process, so a meeting keeps its own rather than queue dictation
-/// behind it.
-#[cfg(target_os = "macos")]
-fn engine_model(model: &mut crate::transcription::engine::Model) -> Option<&mut Transcriber> {
-    match model.active() {
-        Some(transcriber @ Transcriber::Gguf(_)) => Some(transcriber),
-        _ => None,
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn engine_model(model: &mut crate::transcription::engine::Model) -> Option<&mut Transcriber> {
-    Some(model)
 }
 
 /// What the rolling worker transcribes chunks with: [`ChunkModel`], or a
@@ -864,11 +841,7 @@ fn load_model<'a>(
     if model.is_none() {
         #[cfg(test)]
         tests::MODEL_LOADS.fetch_add(1, Ordering::SeqCst);
-        #[cfg(target_os = "macos")]
-        let loaded = Transcriber::load_selection(selection)?;
-        #[cfg(not(target_os = "macos"))]
-        let loaded = Transcriber::load(selection)?;
-        *model = Some(loaded);
+        *model = Some(Transcriber::load(selection)?);
     }
     model
         .as_mut()
@@ -2188,111 +2161,6 @@ pub(super) fn export_markdown(
     Ok(path)
 }
 
-/// One transcribed chunk, cached by the opt-in meeting replay so echo
-/// suppression can be re-evaluated without the model.
-#[cfg(test)]
-#[derive(Deserialize, Serialize)]
-pub(super) struct ReplayChunk {
-    start: usize,
-    overlap: usize,
-    #[serde(default)]
-    tail: usize,
-    len: usize,
-    transcript: Transcript,
-}
-
-/// Resamples a whole track to 16 kHz, as the rolling worker does.
-#[cfg(test)]
-pub(super) fn replay_resample(rate: u32, samples: &[f32]) -> Vec<f32> {
-    let mut resampler = StreamingResampler::new(rate).unwrap();
-    let mut resampled = samples
-        .chunks(rate as usize)
-        .flat_map(|block| resampler.push(block))
-        .collect::<Vec<_>>();
-    resampled.extend(resampler.finish());
-    resampled
-}
-
-#[cfg(test)]
-pub(super) fn replay_transcribe(model: &mut Transcriber, audio: &[f32]) -> Vec<ReplayChunk> {
-    let mut chunker = Chunker::default();
-    let mut chunks = audio
-        .chunks(RATE)
-        .flat_map(|block| chunker.push(block))
-        .collect::<Vec<_>>();
-    chunks.extend(chunker.finish());
-    chunks
-        .into_iter()
-        .map(|chunk| ReplayChunk {
-            start: chunk.start,
-            overlap: chunk.overlap,
-            tail: chunk.tail,
-            len: chunk.samples.len(),
-            transcript: transcribe_speech(&chunk.samples, || {
-                model.transcribe_segments(chunk.samples.clone())
-            })
-            .unwrap(),
-        })
-        .collect()
-}
-
-/// The track as rolling transcription had it once audio through
-/// `through_ms` was transcribed, on a timeline starting at zero.
-#[cfg(test)]
-pub(super) fn replay_track(
-    source: MeetingSource,
-    chunks: &[ReplayChunk],
-    through_ms: u64,
-) -> TrackTranscript {
-    let mut track = TrackTranscript::new(source, 0);
-    for cached in chunks {
-        if samples_ms(cached.start + cached.len) > through_ms {
-            break;
-        }
-        let chunk = Chunk {
-            start: cached.start,
-            overlap: cached.overlap,
-            tail: cached.tail,
-            samples: vec![0.0; cached.len],
-        };
-        track.accept(&chunk, cached.transcript.clone());
-    }
-    track
-}
-
-#[cfg(test)]
-pub(super) fn replay_envelope(system: &[f32], microphone: &[f32]) -> EchoEnvelope {
-    let mut envelope = EchoEnvelope::default();
-    for (source, audio) in [
-        (MeetingSource::System, system),
-        (MeetingSource::Microphone, microphone),
-    ] {
-        for (index, block) in audio.chunks(RATE).enumerate() {
-            envelope.push(source, index as u64 * 1_000, block, RATE as u32);
-        }
-    }
-    envelope
-}
-
-/// What the pane shows from rolling transcription, the final transcript,
-/// and every entry before echo suppression.
-#[cfg(test)]
-pub(super) fn replay_views(
-    system: &TrackTranscript,
-    microphone: &TrackTranscript,
-    envelope: &EchoEnvelope,
-) -> (RollingView, Vec<TranscriptEntry>, Vec<TranscriptEntry>) {
-    let view = rolling_view([Some(system), Some(microphone)], true, 0, envelope);
-    let entries = system
-        .entries
-        .iter()
-        .chain(&microphone.entries)
-        .cloned()
-        .collect::<Vec<_>>();
-    let (kept, _) = join_entries(entries.clone(), 0, envelope);
-    (view, kept, entries)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2401,7 +2269,6 @@ mod tests {
 
     #[test]
     fn a_speechless_chunk_skips_the_shared_model() {
-        let _detector = crate::transcription::speech_detector::override_for_test(Some(false));
         let mut model = ChunkModel::new(TranscriptionSelection::default());
         let Chunked::Done(transcript) = model.transcribe(&[0.1; 16_000]).unwrap() else {
             panic!("a speechless chunk must not reach the model");
@@ -2412,7 +2279,6 @@ mod tests {
 
     #[test]
     fn speechless_chunks_skip_the_model_and_still_advance_coverage() {
-        let _detector = crate::transcription::speech_detector::override_for_test(Some(false));
         let mut track = TrackTranscript::new(MeetingSource::Microphone, 1_000);
         let chunk = Chunk {
             start: 0,
@@ -2436,7 +2302,10 @@ mod tests {
             start: 0,
             overlap: 0,
             tail: 0,
-            samples: vec![0.1; 30 * RATE],
+            // Loud enough to be sent; the next chunk's steady level is not.
+            samples: (0..30 * RATE)
+                .map(|index| (index as f32 * 0.05).sin() * 0.3)
+                .collect(),
         };
         let spoken = Transcript {
             text: String::new(),
@@ -2451,7 +2320,6 @@ mod tests {
             &first,
             transcribe_speech(&first.samples, || Ok(spoken)).unwrap(),
         );
-        let _detector = crate::transcription::speech_detector::override_for_test(Some(false));
         let second = Chunk {
             start: 28 * RATE,
             overlap: 2 * RATE,
@@ -3082,7 +2950,7 @@ mod tests {
             },
         );
         call.capture(&mut worker, 5.0);
-        let busy = crate::parakeet::dictation_busy_for_test();
+        let busy = crate::macos_dictation::dictation_busy_for_test();
         let released = thread::spawn(move || {
             thread::sleep(Duration::from_millis(400));
             let at = Instant::now();

@@ -13,8 +13,6 @@ mod app_paths;
 mod app_settings;
 #[cfg(target_os = "macos")]
 mod apple_intelligence;
-#[cfg(target_os = "macos")]
-mod apple_speech;
 mod application_catalog;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod audio;
@@ -45,14 +43,14 @@ mod labs;
 mod linux;
 mod local_api;
 #[cfg(target_os = "macos")]
+mod macos_dictation;
+#[cfg(target_os = "macos")]
 mod macos_rune;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod meeting;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod microphone_activity;
 mod net;
-#[cfg(target_os = "macos")]
-mod parakeet;
 #[cfg(target_os = "macos")]
 mod paste;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
@@ -79,7 +77,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 #[cfg(target_os = "macos")]
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use color_eyre::Result;
 #[cfg(target_os = "macos")]
 use color_eyre::eyre::eyre;
@@ -89,8 +87,8 @@ use color_eyre::eyre::eyre;
 #[command(
     name = "hex",
     version = crate::VERSION,
-    about = "Local, observable voice control",
-    long_about = "Local, observable voice control.\n\n\
+    about = "Observable voice dictation through ElevenLabs Scribe",
+    long_about = "Observable voice dictation through ElevenLabs Scribe.\n\n\
         Control commands (status, dictation, meetings record, settings, model, window, …) drive \
         the one running Hex over its owner-only local API and never launch it, except `start` \
         and `restart`. Every one takes --json for a versioned reply (docs/cli.md). Exit codes: \
@@ -115,7 +113,7 @@ pub(crate) const DEVELOPER_FEATURES_ENABLED: bool = cfg!(debug_assertions);
 enum Command {
     #[command(flatten)]
     Control(control::cli::ControlCli),
-    /// Run the desktop app with local dictation.
+    /// Run the desktop app.
     App {
         /// Start in the menu bar without opening the window.
         #[arg(long)]
@@ -160,31 +158,6 @@ enum Command {
         #[command(subcommand)]
         command: MeetingCommand,
     },
-    /// Measure the local transcription runtime against a fixed WAV corpus.
-    #[command(hide = true)]
-    BenchmarkTranscription {
-        /// JSON manifest containing audio paths and reference transcripts.
-        manifest: PathBuf,
-        /// Runtime to measure.
-        #[arg(long, value_enum, default_value = "transcribe-cpp")]
-        backend: TranscriptionBenchmarkBackend,
-        /// Override the default GGUF model path for the transcribe.cpp backend.
-        #[arg(long)]
-        model: Option<PathBuf>,
-        /// Full-corpus passes discarded before measurement.
-        #[arg(long, default_value_t = 1)]
-        warmups: usize,
-        /// Full-corpus measured passes.
-        #[arg(long, default_value_t = 7)]
-        runs: usize,
-    },
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, ValueEnum)]
-enum TranscriptionBenchmarkBackend {
-    Onnx,
-    TranscribeCpp,
 }
 
 #[cfg(target_os = "macos")]
@@ -572,26 +545,6 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::BenchmarkTranscription {
-            manifest,
-            backend,
-            model,
-            warmups,
-            runs,
-        } => {
-            let backend = match backend {
-                TranscriptionBenchmarkBackend::Onnx => transcription::benchmark::Backend::Onnx,
-                TranscriptionBenchmarkBackend::TranscribeCpp => {
-                    transcription::benchmark::Backend::TranscribeCpp {
-                        model: match model {
-                            Some(model) => model,
-                            None => parakeet::default_model_path()?,
-                        },
-                    }
-                }
-            };
-            transcription::benchmark::run(&manifest, warmups, runs, backend)
-        }
     }
 }
 
@@ -879,8 +832,6 @@ mod tests {
 
 #[cfg(target_os = "linux")]
 fn main() -> Result<()> {
-    #[cfg(target_arch = "x86_64")]
-    transcription::cpu_floor::require();
     // Opening ALSA's default device loads libpipewire into this process, and
     // its realtime module asks the desktop portal for a realtime budget and
     // then limits this process's realtime CPU time to it; the portal caches
@@ -895,17 +846,16 @@ fn main() -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn main() -> Result<()> {
-    // DLL search hardening first: the CPU check's message box loads DLLs.
+    // DLL search hardening first, before anything loads a DLL.
     let dll_search = windows::restrict_dll_search();
     // Then, before anything prints, join the terminal that ran `hex`.
     windows::attach_parent_console();
     if let Err(error) = dll_search {
         eprintln!("hex: SetDefaultDllDirectories failed: {error}");
     }
-    windows::vulkan::check();
+    // The window's GPU, not a speech model's: after a launch that crashed
+    // while drawing, this one draws on the high-performance adapter.
     windows::gpu_fallback::choose();
-    #[cfg(target_arch = "x86_64")]
-    transcription::cpu_floor::require();
     windows::run(&SHUTDOWN)
 }
 

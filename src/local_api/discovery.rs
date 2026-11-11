@@ -212,6 +212,14 @@ pub(crate) fn error_code(status: u16, body: &[u8]) -> String {
         .unwrap_or_else(|| format!("http-{status}"))
 }
 
+/// The account a refusal gave of itself, when it gave one.
+pub(crate) fn error_message(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message")?.as_str().map(str::to_owned))
+        .filter(|message| !message.trim().is_empty())
+}
+
 pub(super) fn generate_token() -> Result<String> {
     let mut random = [0_u8; 32];
     getrandom::fill(&mut random).map_err(|error| eyre!("could not generate API token: {error}"))?;
@@ -339,7 +347,7 @@ mod tests {
     /// must survive a body too large for the socket buffers.
     #[test]
     fn a_refusal_survives_a_large_upload() {
-        const BODY: &[u8] = br#"{"code":"model-not-ready"}"#;
+        const BODY: &[u8] = br#"{"code":"api-key-missing","message":"no API key is set"}"#;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -365,7 +373,7 @@ mod tests {
         let (status, body) = send(
             address,
             "hex_test",
-            "/transcriptions?model=parakeet_v2",
+            "/transcriptions?model=scribe_v3",
             "audio/wav",
             &upload,
             Duration::from_secs(10),
@@ -375,5 +383,11 @@ mod tests {
         server.join().unwrap();
         assert_eq!(status, 409);
         assert_eq!(body, BODY);
+        assert_eq!(super::error_code(status, &body), "api-key-missing");
+        assert_eq!(
+            super::error_message(&body).as_deref(),
+            Some("no API key is set")
+        );
+        assert_eq!(super::error_message(br#"{"code":"queue-full"}"#), None);
     }
 }

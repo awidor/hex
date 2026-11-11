@@ -27,23 +27,10 @@ cc = "1"
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
 
-[features]
-onnx-benchmark = ["dep:transcribe-rs"]
-
 # Shipped executables carry no symbol table (about 11 MB on Linux). Panic
 # backtraces lose function names; debug builds keep them.
 [profile.release]
 strip = true
-
-# transcribe.cpp 0.4.1 plus one ggml patch that builds only the Vulkan
-# shaders Hex's models use (see `CMAKE_ARGS` in .cargo/config.toml),
-# Parakeet's vocabulary rescoring (branches hex/parakeet-vocabulary and
-# hex/vocabulary-sounds-like), and a Metal residency heartbeat that sleeps once
-# its keep-alive runs out (branch hex/metal-idle-residency). Drop this once a
-# transcribe.cpp release carries them.
-[patch.crates-io]
-transcribe-cpp = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "bcb639faa4c74a2300ba19e30360cb2355b1663a" }
-transcribe-cpp-sys = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "bcb639faa4c74a2300ba19e30360cb2355b1663a" }
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
@@ -71,16 +58,19 @@ serde_path_to_error = "0.1"
 sha2 = "0.11.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-transcribe-cpp = "=0.4.1"
-transcribe-rs = { git = "https://github.com/cjpais/transcribe-rs", rev = "e37c66b6df43af51fde8dec34f98a07aaf09564c", features = ["onnx"], optional = true }
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.3"
 url = "2.5.8"
-# Hex's HTTPS (`net`): model downloads, update checks, and transformation
+# Hex's HTTPS (`net`): Scribe requests, update checks, and transformation
 # scripts' `fetch`, over the platform's TLS and trusted roots.
 # `native-tls`, not `native-tls-no-default`: ureq 3.4 checks the former's
 # name and panics on any https request without it.
 ureq = { version = "3.4.2", default-features = false, features = ["native-tls"] }
+# The realtime Scribe session (`transcription::scribe::live`): a blocking
+# WebSocket over the same platform TLS, driven by one thread of its own.
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "native-tls"] }
+# Realtime audio chunks travel as base64 text.
+base64 = "0.22"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 capture-core = { path = "crates/capture-core" }
@@ -104,7 +94,6 @@ ctrlc = { version = "3.5.2", features = ["termination"] }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "time"] }
-transcribe-cpp = { version = "=0.4.1", features = ["vulkan"] }
 wayland-backend = "0.3.17"
 wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging", "unstable"] }
@@ -162,12 +151,6 @@ windows-sys = { version = "0.61.2", features = [
 windows = { version = "0.62.2", features = ["Media_Control", "Foundation", "Foundation_Collections", "Win32_Foundation", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_Threading", "Win32_System_Variant", "Win32_UI_Accessibility"] }
 windows-core = "0.62.2"
 windows-future = "0.3.2"
-
-# x64 Windows decodes on the GPU through Vulkan. ARM64 Windows stays CPU-only,
-# as Handy ships it: ggml's ARM CPU backend needs clang-cl, and Vulkan drivers
-# on Windows-on-ARM are not a dependable target yet.
-[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
-transcribe-cpp = { version = "=0.4.1", features = ["vulkan"] }
 
 [workspace.lints.rust]
 # shared-lints begin

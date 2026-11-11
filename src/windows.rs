@@ -7,7 +7,6 @@ pub(crate) mod input;
 pub(crate) mod login_item;
 pub(crate) mod paste;
 pub(crate) mod rune;
-pub(crate) mod vulkan;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand};
 use color_eyre::Result;
-use color_eyre::eyre::{WrapErr, bail};
+use color_eyre::eyre::{WrapErr, bail, eyre};
 use windows_sys::Win32::System::Console::{
     ATTACH_PARENT_PROCESS, AttachConsole, FreeConsole, GetConsoleMode, GetStdHandle,
     STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
@@ -27,18 +26,17 @@ use crate::audio::{AudioInput, AudioInputEvent};
 use crate::desktop::events::{
     DictationPhase, EventLog, TranscriptPhase, VoiceEvent, VoiceState, now_ms,
 };
-use crate::transcription::local_transcriber::LocalTranscriber;
-use crate::transcription::models::{TranscriptionModelId, TranscriptionSelection, validate};
-
-const DEFAULT_MODEL: &str = "parakeet_unified_en";
-const DEFAULT_LANGUAGE: &str = "en";
+use crate::transcription::models::{
+    AUTO_LANGUAGE, TranscriptionModelId, TranscriptionSelection, validate,
+};
+use crate::transcription::scribe::ScribeTranscriber;
 
 #[derive(Parser)]
 #[command(
     name = "hex",
     version = crate::VERSION,
-    about = "Local Hex dictation for Windows",
-    long_about = "Local Hex dictation for Windows.\n\n\
+    about = "Hex dictation for Windows",
+    long_about = "Hex dictation for Windows.\n\n\
         Control commands (status, dictation, settings, model, window, …) drive the one running \
         Hex over its owner-only pipe and never launch it, except `start` and `restart`. Every \
         one takes --json for a versioned reply (docs/cli.md). Exit codes: 0 done or nothing to \
@@ -71,7 +69,7 @@ enum Command {
         #[command(flatten)]
         selection: SelectionArgs,
     },
-    /// Record one microphone capture and transcribe it locally.
+    /// Record one microphone capture and transcribe it.
     Record {
         /// Select an input device by a case-insensitive name fragment.
         #[arg(long)]
@@ -105,21 +103,15 @@ enum Command {
 
 #[derive(Args, Clone)]
 struct SelectionArgs {
-    /// Model id, for example parakeet_v3 or whisper_large_v3_turbo.
-    #[arg(long, default_value = DEFAULT_MODEL)]
-    model: String,
-    /// BCP-47 language code supported by the model, for example en or pl.
-    #[arg(long, default_value = DEFAULT_LANGUAGE)]
+    /// Language code the speech is in, for example en or pl; `auto` detects it.
+    #[arg(long, default_value = AUTO_LANGUAGE)]
     language: String,
 }
 
 impl SelectionArgs {
     fn resolve(&self) -> Result<TranscriptionSelection> {
         let selection = TranscriptionSelection {
-            model: self
-                .model
-                .parse::<TranscriptionModelId>()
-                .wrap_err_with(|| format!("invalid model id: {}", self.model))?,
+            model: TranscriptionModelId::ScribeV3,
             language: self.language.clone(),
         };
         validate(&selection)?;
@@ -130,9 +122,8 @@ impl SelectionArgs {
 /// Loads DLLs only from System32 and Hex's own folder, never the current
 /// folder or PATH. Another app's incompatible `dxcompiler.dll` on PATH
 /// crashed Hex at its first shader compile (#587), and a DLL planted on PATH
-/// must not load into Hex. Hex's own imports loaded before this, except the
-/// delay-loaded vulkan-1.dll (`vulkan`); Windows, the GPU drivers, and COM
-/// load theirs by full path.
+/// must not load into Hex. Hex's own imports loaded before this; Windows,
+/// the GPU drivers, and COM load theirs by full path.
 pub(crate) fn restrict_dll_search() -> std::io::Result<()> {
     use windows_sys::Win32::System::LibraryLoader::{
         LOAD_LIBRARY_SEARCH_APPLICATION_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
@@ -169,11 +160,6 @@ pub fn run(shutdown: &'static AtomicBool) -> Result<()> {
         return Ok(());
     }
     let log_dir = crate::app_paths::init_process_logging(shutdown)?;
-    // 2.3.1's updater installed this build into its own folder.
-    if matches!(command, Command::App { .. }) && crate::updater::legacy::take_over() {
-        return Ok(());
-    }
-
     let event_path = log_dir.join("live.ndjson");
     match command {
         Command::App { hidden, .. } => {
@@ -329,22 +315,31 @@ fn detach_from_console() {
     }
 }
 
-/// Feeds the clip to a live stream as capture would, holding back the last
+/// Feeds the clip to a live session as capture would, holding back the last
 /// 200 ms as the release tail, then measures each path's release latency.
+/// Each path sends the clip to ElevenLabs once, so a run is billed for the
+/// clip twice; the whole-clip time includes connecting.
 fn stream_bench(wav: &Path, speed: f64, selection: &TranscriptionSelection) -> Result<()> {
-    let samples = crate::transcription::local_transcriber::read_wav_for_parakeet(wav)?;
+    // The saved settings decide whether a dictation opens a live session.
+    crate::app_settings::AppSettings::load()?;
+    let file =
+        std::fs::File::open(wav).wrap_err_with(|| format!("could not open {}", wav.display()))?;
+    let clip = crate::transcription::service::AudioClip::decode_wav(std::io::BufReader::new(file))
+        .map_err(|error| eyre!("could not read {}: {error:?}", wav.display()))?;
+    let samples = clip.samples().to_vec();
     let audio_ms = samples.len() / 16;
-    let mut transcriber = LocalTranscriber::load(selection)?;
-    // A warm app has already run inputs of this size; exclude first-run setup.
-    transcriber.transcribe(&samples)?;
+    let mut transcriber = ScribeTranscriber::load(selection)?;
     let started = Instant::now();
     let offline = transcriber.transcribe(&samples)?;
     let offline_ms = started.elapsed().as_millis();
 
     let engine = crate::transcription::engine::TranscriptionEngine::start(transcriber)?;
-    let mut stream = engine
-        .begin()
-        .ok_or_else(|| color_eyre::eyre::eyre!("this model cannot stream on this device"))?;
+    let mut stream = engine.begin().ok_or_else(|| {
+        eyre!(
+            "no live session opened: dictation opens one only with Labs › Live text on \
+             or `scribe.final_text` set to `live`"
+        )
+    })?;
     let held = samples.len().saturating_sub(3_200);
     let feeding = Instant::now();
     for (index, block) in samples[..held].chunks(2_560).enumerate() {
@@ -357,7 +352,7 @@ fn stream_bench(wav: &Path, speed: f64, selection: &TranscriptionSelection) -> R
     let streamed = engine
         .finish(Some(stream), samples)?
         .wait()
-        .map_err(|error| color_eyre::eyre::eyre!(error))?;
+        .map_err(|error| eyre!(error))?;
 
     let differences = word_differences(&offline, &streamed.text);
     println!("audio_ms\t{audio_ms}");
@@ -415,7 +410,7 @@ fn capture(
 ) -> Result<()> {
     shutdown.store(false, Ordering::Relaxed);
     let _instance = crate::desktop::instance::acquire("windows-capture")?;
-    let mut transcriber = LocalTranscriber::load(selection)?;
+    let mut transcriber = ScribeTranscriber::load(selection)?;
     let input = match device {
         Some(name) => AudioInput::open_matching(name)?,
         None => AudioInput::open_system_default()?,
@@ -480,7 +475,7 @@ fn capture(
     emit_state(&events, VoiceState::Transcribing, &device_name)?;
     events.dictation(DictationPhase::Transcribing, "")?;
     let started = Instant::now();
-    let samples = crate::dictation::resample_for_parakeet(&samples, sample_rate);
+    let samples = crate::dictation::resample_to_16k(&samples, sample_rate);
     let text = match transcriber.transcribe_clip(samples) {
         Ok(text) => text.trim().to_string(),
         Err(error) => {
@@ -555,15 +550,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn polish_selection_uses_the_multilingual_parakeet_model() {
+    fn a_language_selects_scribe_in_that_language() {
         let selection = SelectionArgs {
-            model: "parakeet_v3".into(),
             language: "pl".into(),
         }
         .resolve()
         .unwrap();
 
-        assert_eq!(selection.model, TranscriptionModelId::ParakeetV3);
+        assert_eq!(selection.model, TranscriptionModelId::ScribeV3);
         assert_eq!(selection.language, "pl");
     }
 
@@ -575,10 +569,9 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_model_and_language_are_rejected() {
+    fn a_language_that_is_not_a_code_is_rejected() {
         let result = SelectionArgs {
-            model: DEFAULT_MODEL.into(),
-            language: "pl".into(),
+            language: "polish".into(),
         }
         .resolve();
 

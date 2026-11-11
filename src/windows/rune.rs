@@ -3,8 +3,8 @@
 //! - The main thread runs Rune's event loop and the window; the Rune tray
 //!   runs on its own thread.
 //! - The runtime thread owns `WindowsDesktopHost` (the listener, OpenCode,
-//!   transformations, updates) and model preparation, and keeps running while
-//!   the window is hidden. The window reaches it through [`RuntimeHandle`].
+//!   transformations, updates) and keeps running while the window is hidden.
+//!   The window reaches it through [`RuntimeHandle`].
 //! - The named event from `windows_app` keeps one app per session: a later
 //!   launch signals it and the running app shows its window.
 //!
@@ -45,7 +45,7 @@ use crate::desktop::tray_icon;
 use crate::desktop::tray_menu::{TrayCommand, TrayView};
 use crate::history::History;
 use crate::rune_ui::Ui;
-use crate::transcription::models::TranscriptionModelId;
+use crate::transcription::models::{TranscriptionModelId, TranscriptionSelection};
 use crate::windows::app::WindowsDesktopHost;
 
 /// How often the runtime refreshes the listener while nothing is asked.
@@ -66,11 +66,17 @@ pub(crate) enum Request {
         target: ShortcutTarget,
         shortcut: DesktopShortcut,
     },
+    /// The language to transcribe in (the model is always Scribe).
     ChooseModel {
         model: TranscriptionModelId,
         language: String,
     },
-    CancelModel,
+    /// `hex model use`: [`Self::ChooseModel`], answered once the runtime has
+    /// applied it, or with why it could not.
+    ApplyModel {
+        selection: TranscriptionSelection,
+        reply: mpsc::SyncSender<std::result::Result<(), String>>,
+    },
     /// The window saved `settings.json`; adopt it.
     ReloadSettings,
     /// The tray's Enable / Disable Hex.
@@ -531,18 +537,22 @@ impl crate::control::host::Host for WindowsControl {
         }
     }
 
+    /// The runtime validates, saves, and tells the listener before this
+    /// answers, so the reply says whether the language was applied.
     fn choose_model(
         &self,
-        selection: crate::transcription::models::TranscriptionSelection,
+        selection: TranscriptionSelection,
     ) -> std::result::Result<(), ControlError> {
-        self.send(Request::ChooseModel {
-            model: selection.model,
-            language: selection.language,
-        })
-    }
-
-    fn cancel_model(&self) {
-        let _ = self.runtime.send(Request::CancelModel);
+        let (reply, applied) = mpsc::sync_channel(1);
+        self.send(Request::ApplyModel { selection, reply })?;
+        match applied.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(why)) => Err(ControlError::new("failed", why)),
+            Err(_) => Err(ControlError::new(
+                "unavailable",
+                "Hex's runtime didn't answer; try again",
+            )),
+        }
     }
 
     fn check_for_updates(&self) -> std::result::Result<(), ControlError> {
@@ -621,11 +631,6 @@ fn tray_view_for(published: &Published) -> TrayView {
             published.listener.running,
             published.state,
             &published.update_status,
-            crate::desktop::tray_menu::model_menu_entries(
-                &published.settings,
-                published.transcription.preparing.is_some(),
-                crate::transcription::models::is_installed,
-            ),
         )
     }
 }
@@ -886,13 +891,6 @@ fn create_tray(window: rune::AppHandle<Ui>) -> Result<rune::Tray> {
                 let request = match command {
                     TrayCommand::PasteLast => Request::PasteLast,
                     TrayCommand::ToggleListening => Request::ToggleListening,
-                    TrayCommand::UseModel(model) => {
-                        let Some(published) = published else { return };
-                        Request::ChooseModel {
-                            model,
-                            language: published.settings.transcription_for_model(model).language,
-                        }
-                    }
                     TrayCommand::Update => {
                         let Some(action) = published.and_then(|published| {
                             crate::desktop::tray_menu::update_action(&published.update_status)

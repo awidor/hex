@@ -646,7 +646,8 @@ fn the_cancel_shortcut_shows_in_toggle_and_restores_escape() {
 
 #[test]
 fn general_hides_advanced_options_until_asked() {
-    let mut rt = runtime("mac-settings", true, PANE_SIZE);
+    // Tall enough that the rows under the toggle are on screen once open.
+    let mut rt = runtime("mac-settings", true, TALL_SIZE);
     assert!(rt.find("shortcut-mode").is_some(), "under the shortcut");
     assert!(rt.find("avoid-bluetooth-microphone").is_none());
     tap(&mut rt, "advanced-toggle");
@@ -1177,7 +1178,7 @@ fn the_explainer_restarts_when_reduce_motion_turns_off() {
 }
 
 #[test]
-fn the_explainer_picker_and_shortcut_recording_never_share_the_window() {
+fn the_explainer_and_shortcut_recording_never_share_the_window() {
     let mut rt = runtime("mac-settings", true, PANE_SIZE);
     tap(&mut rt, "dictation-hotkey");
     assert!(matches!(
@@ -1188,18 +1189,9 @@ fn the_explainer_picker_and_shortcut_recording_never_share_the_window() {
     assert!(matches!(rt.state.capture, settings::Capture::Idle));
     assert!(sent(&rt).contains(&Request::CancelShortcut));
 
-    picker::open(&mut rt.state);
-    assert!(!rt.state.explainer.open, "the picker closes the explainer");
-    explainer::open(&mut rt.state);
-    assert!(!rt.state.picker.open, "and the explainer the picker");
-
     rt.state
         .select_pane(Pane::History, &mut rune::Tx::default());
     assert!(!rt.state.explainer.open);
-    picker::open(&mut rt.state);
-    rt.state
-        .select_pane(Pane::General, &mut rune::Tx::default());
-    assert!(!rt.state.picker.open);
 }
 
 #[test]
@@ -1641,10 +1633,7 @@ fn active_and_failed_meetings_show_their_state() {
 fn the_mac_first_run_asks_each_permission_then_practices() {
     let mut rt = runtime("mac-onboarding-permissions", true, PANE_SIZE);
     assert_eq!(rt.state.tour.as_ref().unwrap().flow.step(), Step::Setup);
-    assert!(
-        matches!(sent(&rt), [Request::ChooseModel { .. }]),
-        "the model downloads behind the permissions"
-    );
+    assert!(sent(&rt).is_empty(), "nothing is prepared behind the tour");
     tap(&mut rt, "mic-pill-allow");
     assert_eq!(
         asked(&rt),
@@ -1652,11 +1641,11 @@ fn the_mac_first_run_asks_each_permission_then_practices() {
             PermissionAction::RequestMicrophone
         )]
     );
-    // macOS grants everything and the model lands: the practice follows.
+    // macOS grants everything and an API key is set: the practice follows.
     use crate::desktop::onboarding::PermissionState::Ready;
     rt.state.platform.permissions.microphone = Ready;
     rt.state.platform.permissions.accessibility = Ready;
-    rt.state.picker.installed = Some(vec![rt.state.settings.transcription.model]);
+    rt.state.api_key.source = api_key::Source::fixture();
     refresh(&mut rt);
     rt.update(|ui, _| onboarding_kit::live::fixture_resume(ui, Page::Try));
     settle(&mut rt);
@@ -1734,7 +1723,7 @@ fn windows_onboarding_asks_only_for_the_microphone_switch() {
     );
     // Switched on in Settings: the practice follows.
     rt.state.platform.permissions.microphone = crate::desktop::onboarding::PermissionState::Ready;
-    rt.state.picker.installed = Some(vec![rt.state.settings.transcription.model]);
+    rt.state.api_key.source = api_key::Source::fixture();
     refresh(&mut rt);
     rt.update(|ui, _| onboarding_kit::live::fixture_resume(ui, Page::Try));
     settle(&mut rt);
@@ -2202,17 +2191,6 @@ fn a_labs_card_shows_its_description_and_its_switch_turns_it_on() {
 }
 
 #[test]
-fn unload_when_idle_shows_its_minutes_on_its_card_while_on() {
-    let mut rt = runtime("mac-labs", true, (980.0, 4000.0));
-    rt.update(|ui, _| ui.lab_store.group = Some(crate::labs::Feature::UnloadIdle.group()));
-    settle(&mut rt);
-    assert!(rt.find("unload-idle-minutes").is_none(), "hidden while off");
-    tap(&mut rt, "lab-unload-idle");
-    assert!(rt.state.settings.labs.unload_idle);
-    assert!(rt.find("unload-idle-minutes").is_some());
-}
-
-#[test]
 fn caps_lock_light_shows_its_choices_on_its_card_while_on() {
     let mut rt = runtime("mac-labs", true, (980.0, 4000.0));
     rt.update(|ui, _| ui.lab_store.group = Some(crate::labs::Feature::CapsLockDictation.group()));
@@ -2367,18 +2345,18 @@ fn labs_groups_fold_and_remember_it() {
         "Dictation holds Live text, on"
     );
     assert!(
-        rt.find("lab-card-unload-idle").is_none(),
+        rt.find("lab-card-transcribe-files").is_none(),
         "Models holds nothing on"
     );
     tap(&mut rt, "group-models");
-    assert!(rt.find("lab-card-unload-idle").is_some());
+    assert!(rt.find("lab-card-transcribe-files").is_some());
     assert_eq!(rt.state.settings.labs.groups.get("models"), Some(&true));
     tap(&mut rt, "group-dictation");
     assert!(rt.find("lab-card-live-text").is_none());
     assert_eq!(rt.state.settings.labs.groups.get("dictation"), Some(&false));
     tap(&mut rt, "nav-general");
     tap(&mut rt, "nav-labs");
-    assert!(rt.find("lab-card-unload-idle").is_some(), "remembered");
+    assert!(rt.find("lab-card-transcribe-files").is_some(), "remembered");
     assert!(rt.find("lab-card-live-text").is_none(), "remembered");
 
     rt.update(|ui, _| ui.lab_store.search = rune::TextEdit::new("live text".to_string()));
@@ -2393,12 +2371,12 @@ fn labs_groups_fold_and_remember_it() {
     );
 
     let mut rt = runtime("mac-labs", true, (980.0, 4000.0));
-    rt.state.settings.labs.unload_idle = true;
+    rt.state.settings.labs.transcribe_files = true;
     refresh(&mut rt);
-    tap(&mut rt, "lab-unload-idle");
-    assert!(!rt.state.settings.labs.unload_idle);
+    tap(&mut rt, "lab-transcribe-files");
+    assert!(!rt.state.settings.labs.transcribe_files);
     assert!(
-        rt.find("lab-card-unload-idle").is_some(),
+        rt.find("lab-card-transcribe-files").is_some(),
         "turning off a group's last lab leaves it open"
     );
     assert_eq!(rt.state.settings.labs.groups.get("models"), Some(&true));
@@ -2467,7 +2445,7 @@ fn labs_groups_follow_each_os() {
     );
     assert!(rt.find("lab-card-spoken-formatting").is_some());
     assert!(
-        rt.find("lab-card-unload-idle").is_none(),
+        rt.find("lab-card-transcribe-files").is_none(),
         "Models is folded"
     );
 }

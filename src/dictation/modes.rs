@@ -427,7 +427,7 @@ mod tests {
         use crate::app_settings::KeyboardModelChoice;
         use crate::transcription::models::TranscriptionModelId;
         let choice = |language: &str| KeyboardModelChoice {
-            model: TranscriptionModelId::ParakeetV3,
+            model: TranscriptionModelId::ScribeV3,
             language: language.into(),
         };
         let settings = DictationProcessingSettings {

@@ -1,4 +1,4 @@
-//! The onboarding options as playground stories (the `playground`
+//! The first run and its comedy as playground stories (the `playground`
 //! experiment, ⇧⌘D, group Onboarding). Each plays itself on open and on R,
 //! and in a live desktop window pauses on `"Your turn"` with a focused
 //! [`rune::TextEdit`] so you can hold `⌥` and test real voice dictation live.
@@ -14,14 +14,14 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use rune::{Cx, El, Play, Playground, Story, TextEdit, TextStyle, Tx, canvas, col, el, row, text};
+use rune::{Cx, El, Play, Playground, Story, TextEdit, TextStyle, Tx, canvas, col, row, text};
 
 use super::super::controls::Paint;
 use super::cards::{self, Caption, Side, TAP_BOX, bubble};
 use super::dictated::Dictated;
-use super::fixture::{ANSWER_TRY, Download, EXAMPLE_REPLIES, Language, Speech, Take, downloaded};
+use super::fixture::ANSWER_TRY;
 use super::hex_meter::BUILD_SECS;
-use super::hud_stage::{FlowHud, LiveHud};
+use super::hud_stage::LiveHud;
 use super::live::Live;
 use super::scene_script::Script;
 use super::sfx::SfxTrack;
@@ -40,21 +40,12 @@ pub(crate) fn is_live_window() -> bool {
     LIVE_WINDOW.load(Ordering::Relaxed)
 }
 
-const DOWNLOAD_SECS: f64 = 9.0;
-const FIRST_RUN_SECS: f64 = 23.0;
-const SLOW_SECS: f64 = 31.0;
-/// Long enough that `"Almost ready"` waits and a sketch plays before the
-/// model lands, mid-sketch.
-const SKETCH_DOWNLOAD_SECS: f64 = 59.2;
-const DOWNLOAD_HOLD: f64 = 2.8;
-/// How long the first run's `"Setting up Hex"` holds before its download
-/// flies up and `"Without Hex"` opens.
-const FIRST_RUN_HOLD: f64 = 1.6;
+/// How long a story shows the key step before it goes on as if a key had
+/// been pasted. The real first run waits for the person.
+const KEY_HOLD: f64 = 1.6;
+/// How long `"Without Hex · With Hex"` shows its intro before the comedy.
+const INTRO_HOLD: f64 = 1.4;
 const PERMISSIONS_WAIT: f64 = 0.6;
-const CLOSE_SECS: f64 = 0.65;
-const WORD_SECS: f64 = 0.22;
-const EXAMPLE_START: f64 = 0.6;
-const EXAMPLE_GAP: f64 = 0.5;
 // Ask for the next display frame, including 120 Hz displays. Rune paces a
 // hidden or unpaced window itself rather than spinning on a zero deadline.
 pub(super) const FRAME: Duration = Duration::ZERO;
@@ -62,24 +53,21 @@ const SIDE_W: f32 = 240.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Flow {
-    Pill,
-    Fill,
-    Shout,
     Versus,
     FirstRun,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Step {
-    Pick,
-    Started,
+    /// The first run's key step: Hex asks for an ElevenLabs API key.
+    /// `"Without Hex · With Hex"` has no key to ask for and shows its intro.
+    Key,
     Parked,
     YourTurn,
     Hearing,
     Heard,
     Done,
     Microphone,
-    Waiting,
     Try,
     TryHearing,
     TryHeard,
@@ -107,22 +95,24 @@ impl Step {
 
 pub(crate) struct Onboard {
     pub(crate) flow: Flow,
-    pub(crate) speech: Speech,
-    pub(crate) wants: Language,
+    /// An ElevenLabs API key is set, so Hex can transcribe: the key step is
+    /// passed, and the practice can hear.
+    pub(crate) has_key: bool,
+    /// A key was set when this run began, so its key step never showed.
+    pub(crate) had_key: bool,
+    /// A run resumed part-way: its key step goes on to what setup still
+    /// needs, not to the comedy again.
+    pub(crate) resumed: bool,
+    /// Words show while the shortcut is held (Scribe's live session), not
+    /// only once it lifts.
+    pub(crate) streams: bool,
     pub(crate) caps: Vec<String>,
     shortcut_index: usize,
     pub(crate) step: Step,
-    pub(crate) language: Option<Language>,
     pub(crate) now: f64,
     pub(crate) reduced: Cell<bool>,
     pub(crate) motion: super::landing::Motion,
-    download_from: Option<f64>,
-    pub(crate) download: Option<Download>,
-    /// Whether the download showed in the top bar at the last poll, when it
-    /// last flew there or back, and when that poll was
-    /// ([`super::pill::landed`]).
-    pub(crate) pill_up: bool,
-    pub(crate) pill_flew: f64,
+    /// When the story last polled.
     polled: f64,
     pub(crate) parked_from: Option<f64>,
     pub(crate) typing_from: Option<f64>,
@@ -144,13 +134,10 @@ pub(crate) struct Onboard {
     /// `"Without Hex"` as [`Self::timing`] times it.
     pub(crate) scene: typing::Scene,
     pub(crate) partial: &'static str,
-    pub(crate) take: &'static Take,
+    pub(crate) take: &'static super::fixture::Take,
     pub(crate) meter: (f32, f32),
-    examples_from: Option<f64>,
-    closed_from: Option<f64>,
-    pub(crate) closed: f32,
-    download_secs: f64,
-    pub(crate) had_model: bool,
+    /// When the story began: its pages move on its clock from then.
+    started_from: Option<f64>,
     /// Both permissions are on.
     pub(crate) granted: bool,
     /// The microphone is on.
@@ -166,7 +153,6 @@ pub(crate) struct Onboard {
     pub(crate) live_hold_from: Option<f64>,
     /// The `"Your turn"` plate, on the microphone's real level.
     pub(crate) hud: LiveHud,
-    pub(crate) flow_hud: FlowHud,
     /// A dictation's text landed since the plate last stepped.
     pub(crate) hud_landed: bool,
     pub(crate) sfx: SfxTrack,
@@ -190,12 +176,8 @@ pub(crate) struct Onboard {
     /// A story that plays the whole first run by itself: it presses
     /// the Launch Room's row, and its scripted player ends the game.
     pub(crate) autoplay: bool,
-    /// The real download as the first run shows it.
-    pub(crate) replay: replay::Replay,
     /// Where Hex lives once onboarding closes, under `"Hex is ready"`.
     pub(crate) home: super::landing::Home,
-    /// `"Watch another one"` on `"Almost ready"`.
-    pub(crate) sketches: super::sketches::Sketches,
 }
 
 /// A story's dictation of [`ANSWER_TRY`] on the interactive `"Your turn"`,
@@ -262,21 +244,19 @@ impl Onboard {
         };
         Self {
             flow,
-            speech: Speech::Apple,
-            wants: Language::English,
+            // The comedy alone has no key to ask for.
+            has_key: flow == Flow::Versus,
+            had_key: false,
+            resumed: false,
+            streams: true,
             caps: crate::app_settings::AppSettings::default()
                 .dictation_hotkey
                 .keycaps(),
             shortcut_index: 0,
-            step: Step::Pick,
-            language: None,
+            step: Step::Key,
             now: 0.0,
             reduced: Cell::new(false),
             motion: super::landing::Motion::default(),
-            download_from: None,
-            download: None,
-            pill_up: false,
-            pill_flew: f64::NEG_INFINITY,
             polled: f64::NEG_INFINITY,
             parked_from: None,
             typing_from: None,
@@ -291,15 +271,7 @@ impl Onboard {
             partial: "",
             take: Script::chosen().take(),
             meter: (0.0, 0.0),
-            examples_from: None,
-            closed_from: None,
-            closed: 0.0,
-            download_secs: if flow == Flow::FirstRun {
-                FIRST_RUN_SECS
-            } else {
-                DOWNLOAD_SECS
-            },
-            had_model: false,
+            started_from: None,
             granted: false,
             mic_granted: false,
             played: false,
@@ -311,7 +283,6 @@ impl Onboard {
             practice: TextEdit::default(),
             live_hold_from: None,
             hud: LiveHud::default(),
-            flow_hud: FlowHud::default(),
             hud_landed: false,
             sfx: SfxTrack::default(),
             live: None,
@@ -323,9 +294,7 @@ impl Onboard {
             taps: 0,
             toggle: false,
             autoplay: false,
-            replay: replay::Replay::default(),
             home: super::landing::Home::MenuBar,
-            sketches: super::sketches::Sketches::default(),
         }
     }
 
@@ -335,56 +304,6 @@ impl Onboard {
         self.flow == Flow::FirstRun
             && (self.live.is_some() || is_live_window() || self.rehearsal.is_some())
             && !self.scripted_try
-    }
-
-    pub(crate) fn pick(&mut self, language: Language) {
-        if self.step != Step::Pick {
-            return;
-        }
-        self.language = Some(language);
-        self.step = Step::Started;
-        self.download_from = Some(self.now);
-        self.download = Some(Download {
-            language,
-            downloaded: 0,
-            total: language.bytes(),
-        });
-    }
-
-    fn ensure_download(&mut self, finished: bool) {
-        let lang = self.language.unwrap_or(self.wants);
-        self.language = Some(lang);
-        let d = self.download.get_or_insert(Download {
-            language: lang,
-            downloaded: 0,
-            total: lang.bytes(),
-        });
-        if finished {
-            d.downloaded = d.total;
-            self.download_from = None;
-            self.closed = 1.0;
-            self.closed_from = None;
-        } else if self.download_from.is_none() {
-            self.download_from = Some(self.now);
-        }
-    }
-
-    /// Toggles the inline language capsule button (`English` ↔ `French`) on
-    /// `"Setting up Hex"`.
-    pub(crate) fn cycle_language(&mut self) {
-        let next = match self.language.unwrap_or(self.wants) {
-            Language::English => Language::Other,
-            Language::Other => Language::English,
-        };
-        self.wants = next;
-        self.language = Some(next);
-        if let Some(d) = self.download.as_mut() {
-            let ratio = d.fraction();
-            d.language = next;
-            d.total = next.bytes();
-            d.downloaded = (d.total as f64 * f64::from(ratio)).round() as u64;
-        }
-        self.sfx.on_capsule_tap();
     }
 
     /// Cycles the shortcut capsule on `"Your turn"` so clicking it previews
@@ -436,18 +355,16 @@ impl Onboard {
         }
     }
 
-    /// Skip on the demo or the practice: on to the next step setup still
-    /// needs (the permissions, then the model), else Hex is ready.
+    /// Skip on the demo or the practice: on to the permissions setup still
+    /// needs, else Hex is ready.
     pub(crate) fn skip_optional(&mut self) {
         if !self.step.optional() {
             return;
         }
-        if !self.granted {
-            self.resume_setup();
-        } else if !self.can_hear() {
-            self.jump_to_waiting();
-        } else {
+        if self.granted {
             self.jump_to_ready();
+        } else {
+            self.resume_setup();
         }
     }
 
@@ -479,36 +396,22 @@ impl Onboard {
         self.auto_due_at = Some(self.now);
     }
 
-    /// Back to the download page, where the real first run shows its model
-    /// step.
-    pub(crate) fn back_to_download(&mut self) {
+    /// The key step, as a new install opens on it.
+    pub(crate) fn jump_to_key(&mut self) {
         self.manual_override = true;
         self.sfx.clear();
         self.practice.focused = false;
         self.live_hold_from = None;
         self.game = None;
-        self.step = Step::Started;
-        self.auto_due_at = Some(self.now);
-    }
-
-    pub(crate) fn jump_to_download(&mut self) {
-        self.manual_override = true;
-        self.sfx.clear();
-        self.practice.focused = false;
-        self.live_hold_from = None;
-        self.step = Step::Started;
-        let lang = self.wants;
-        self.language = Some(lang);
-        self.download_from = Some(self.now);
-        self.closed_from = None;
-        self.closed = 0.0;
-        self.download = Some(Download {
-            language: lang,
-            downloaded: 0,
-            total: lang.bytes(),
+        self.step = Step::Key;
+        self.sfx.on_key_step(self.now);
+        // A story shows the step a beat; the real first run waits on it.
+        self.auto_due_at = Some(if self.live.is_some() {
+            self.now
+        } else {
+            self.has_key = false;
+            self.now + KEY_HOLD
         });
-        self.sfx.on_download_start(self.now);
-        self.auto_due_at = Some(self.now + DOWNLOAD_HOLD);
     }
 
     pub(crate) fn jump_to_demo(&mut self) {
@@ -516,7 +419,6 @@ impl Onboard {
         self.sfx.clear();
         self.practice.focused = false;
         self.live_hold_from = None;
-        self.ensure_download(false);
         self.voice_from = None;
         self.hud_from = None;
         self.take_from = None;
@@ -605,7 +507,6 @@ impl Onboard {
         self.sfx.clear();
         self.practice.focused = false;
         self.live_hold_from = None;
-        self.ensure_download(false);
     }
 
     /// A real first run resumed while macOS still has a permission to ask.
@@ -621,7 +522,6 @@ impl Onboard {
         self.manual_override = true;
         self.auto_due_at = None;
         self.sfx.clear();
-        self.ensure_download(true);
         self.take_from = None;
         self.hud_from = Some(self.now);
         self.partial = "";
@@ -647,32 +547,11 @@ impl Onboard {
         self.auto_due_at = begin_first_run(self, now).map(|secs| now + secs);
     }
 
-    /// The real first run's `"Almost ready"`, for a run resumed past the
-    /// permissions while the model still downloads.
-    /// The story's `"Almost ready"`, with the download restarted so it
-    /// shows a while before the game.
-    pub(crate) fn jump_to_download_wait(&mut self) {
-        self.jump_to_download();
-        self.step = Step::Waiting;
-        self.sfx.clear();
-        self.sfx.on_almost_ready(self.now);
-        self.auto_due_at = Some(self.now);
-    }
-
-    pub(super) fn jump_to_waiting(&mut self) {
-        self.manual_override = true;
-        self.sfx.clear();
-        self.ensure_download(false);
-        self.step = Step::Waiting;
-        self.auto_due_at = Some(self.now);
-    }
-
     pub(crate) fn jump_to_ready(&mut self) {
         self.manual_override = true;
         self.auto_due_at = None;
         self.practice.focused = false;
         self.live_hold_from = None;
-        self.ensure_download(true);
         self.step = Step::Ready;
         self.ready_from = Some(self.now);
         self.sfx.on_ready(self.now, self.reduced.get());
@@ -685,10 +564,6 @@ impl Onboard {
             .map_or(f64::INFINITY, |from| self.now - from)
     }
 
-    pub(crate) fn downloaded(&self) -> bool {
-        self.download.is_some_and(Download::done)
-    }
-
     pub(crate) fn listening_peak(&self) -> Option<f32> {
         if self.live_hold_from.is_some() {
             return Some(crate::audio::input_level::recent().unwrap_or(0.0));
@@ -696,57 +571,28 @@ impl Onboard {
         matches!(self.step, Step::Hearing | Step::TryHearing).then_some(self.meter.1)
     }
 
-    pub(crate) fn demo_hears(&self) -> bool {
-        self.flow == Flow::FirstRun || self.can_hear()
-    }
-
+    /// Hex can transcribe: an API key is set.
     pub(crate) fn can_hear(&self) -> bool {
-        self.speech == Speech::Apple || self.downloaded()
+        self.has_key
     }
 
     pub(crate) fn streams(&self) -> bool {
-        self.speech == Speech::Apple || self.language.is_some_and(Language::streams)
-    }
-
-    pub(crate) fn example(&self, index: usize) -> (&'static str, bool) {
-        let Some(from) = self.examples_from else {
-            return ("", false);
-        };
-        let mut start = from + EXAMPLE_START;
-        for reply in &EXAMPLE_REPLIES[..index] {
-            start += reply.split_whitespace().count() as f64 * WORD_SECS + EXAMPLE_GAP;
-        }
-        let reply = EXAMPLE_REPLIES[index];
-        let count = reply.split_whitespace().count();
-        let shown = (((self.now - start) / WORD_SECS).floor().max(0.0) as usize).min(count);
-        let end = reply
-            .split_whitespace()
-            .take(shown)
-            .map(str::len)
-            .sum::<usize>()
-            + shown.saturating_sub(1);
-        (
-            &reply[..end],
-            shown == count && self.now - start >= count as f64 * WORD_SECS + 0.3,
-        )
+        self.streams
     }
 }
 
 pub(crate) fn add<S: 'static>(playground: Playground<S>) -> Playground<S> {
     playground
-        .story(story("Prototypes/Onboarding/Option · Pill", || {
-            Onboard::new(Flow::Pill)
-        }))
-        .story(story("Prototypes/Onboarding/Option · Fill", || {
-            Onboard::new(Flow::Fill)
-        }))
-        .story(story("Prototypes/Onboarding/Option · Shout", || {
-            Onboard::new(Flow::Shout)
-        }))
-        .story(story(
-            "Prototypes/Onboarding/Without Hex · With Hex",
-            || Onboard::new(Flow::Versus),
-        ))
+        .story(
+            Story::new(
+                "Prototypes/Onboarding/Without Hex · With Hex",
+                || Onboard::new(Flow::Versus),
+                view,
+            )
+            .poll(poll)
+            .trigger('r', "Play", play)
+            .side(side::side),
+        )
         .story(first_run())
         .story(Story::new(
             "Prototypes/Onboarding/Tapbacks",
@@ -833,7 +679,6 @@ fn first_run() -> Story<Onboard> {
         || {
             super::composition::Layout::Today.choose();
             let mut s = Onboard::new(Flow::FirstRun);
-            s.speech = Speech::AfterDownload;
             s.login = super::login::LoginAsk::preview();
             s
         },
@@ -846,21 +691,18 @@ fn first_run() -> Story<Onboard> {
         let next = s.sfx.style.next();
         s.choose_key_sound(next);
     })
-    .trigger('d', "Finish the download", finish_download)
-    .variant("Download done by the try", |_| {})
-    .variant("Slow download", |s| s.download_secs = SLOW_SECS)
-    .variant("Mac in French", |s| s.wants = Language::Other)
-    .variant("Model already downloaded", |s| s.had_model = true)
+    .variant("New install", |_| {})
+    .variant("API key already set", |s| s.has_key = true)
     .variant("Permissions already granted", |s| s.granted = true)
     .variant("Hex is ready", |s| {
-        s.had_model = true;
+        s.has_key = true;
         s.jump_to_ready();
     })
     .variant("Auto-play video", |s| s.scripted_try = true)
-    .variant("Your turn, model streams", |s| {
+    .variant("Your turn, live words", |s| {
         s.rehearsal = Some(Rehearsal::new(true));
     })
-    .variant("Your turn, model doesn't stream", |s| {
+    .variant("Your turn, words on release", |s| {
         s.rehearsal = Some(Rehearsal::new(false));
     })
     .variant("Whole run, scripted game", |s| {
@@ -875,11 +717,6 @@ fn first_run() -> Story<Onboard> {
     })
     .variant("Whole run, layout C: laptop", |s| {
         whole_run_in(s, super::composition::Layout::Laptop)
-    })
-    .variant("Whole run, slow download, a sketch", |s| {
-        s.rehearsal = Some(Rehearsal::new(true));
-        s.autoplay = true;
-        s.download_secs = SKETCH_DOWNLOAD_SECS;
     })
     .variant("Your turn, keeps tapping", |s| {
         s.rehearsal = Some(Rehearsal::new(true));
@@ -909,28 +746,6 @@ fn whole_run_in(s: &mut Onboard, layout: super::composition::Layout) {
     s.autoplay = true;
 }
 
-fn finish_download(s: &mut Onboard, _: &mut Play<'_, Onboard>) {
-    if let Some(from) = s.download_from.as_mut() {
-        *from -= s.download_secs;
-    }
-}
-
-fn story(name: &'static str, init: fn() -> Onboard) -> Story<Onboard> {
-    Story::new(name, init, view)
-        .poll(poll)
-        .trigger('r', "Play", play)
-        .trigger('d', "Finish the download", finish_download)
-        .variant("macOS 26 and later", |s| s.speech = Speech::Apple)
-        .variant("Windows, Linux, older macOS", |s| {
-            s.speech = Speech::AfterDownload;
-        })
-        .variant("Other language, no Apple Speech", |s| {
-            s.speech = Speech::AfterDownload;
-            s.wants = Language::Other;
-        })
-        .side(side::side)
-}
-
 fn view(s: &Onboard, cx: &mut Cx<Onboard>) -> El {
     let p = Paint::new(cx.system_dark(), cx.env().scale);
     s.reduced.set(cx.is_reduced_motion());
@@ -947,9 +762,9 @@ fn play(s: &mut Onboard, play: &mut Play<'_, Onboard>) {
     s.practice.focused = false;
     s.live_hold_from = None;
     s.sfx.clear();
-    s.examples_from = Some(play.now());
+    s.started_from = Some(play.now());
     if s.rehearsal.is_some() && !s.autoplay {
-        s.had_model = true;
+        s.has_key = true;
         s.granted = true;
         s.jump_to_try();
         play.wake_after(Duration::ZERO);
@@ -964,7 +779,7 @@ fn play(s: &mut Onboard, play: &mut Play<'_, Onboard>) {
         start_first_run(s, play);
         return;
     }
-    play.after(if s.flow == Flow::Versus { 1.4 } else { 2.6 }, advance);
+    play.after(INTRO_HOLD, advance);
     play.wake_after(Duration::ZERO);
 }
 
@@ -980,29 +795,24 @@ fn park(s: &mut Onboard, now: f64) {
     s.step = Step::Parked;
     s.parked_from = Some(now);
     s.typing_from = None;
-    s.sfx.on_parked(now, s.had_model);
+    s.sfx.on_parked(now);
 }
 
-/// Starts the first run at `now`; the story's next beat is due after the
-/// returned seconds.
+/// Starts the first run at `now`: on the key step, or past it with a key
+/// already set. The story's next beat is due after the returned seconds.
 pub(super) fn begin_first_run(s: &mut Onboard, now: f64) -> Option<f64> {
     s.now = now;
-    s.flow_hud = FlowHud::default();
-    s.examples_from = Some(now);
-    s.pick(s.wants);
-    if s.had_model {
-        if let Some(download) = s.download.as_mut() {
-            download.downloaded = download.total;
-        }
-        s.download_from = None;
-        s.closed = 1.0;
-        s.closed_from = None;
+    s.started_from = Some(now);
+    s.resumed = false;
+    s.had_key = s.has_key;
+    if s.has_key {
         park(s, now);
-        Some(0.0)
-    } else {
-        s.sfx.on_download_start(now);
-        Some(FIRST_RUN_HOLD)
+        return Some(0.0);
     }
+    s.step = Step::Key;
+    s.sfx.on_key_step(now);
+    // A story shows the step a beat; the real first run waits on it.
+    Some(if s.live.is_some() { 0.0 } else { KEY_HOLD })
 }
 
 fn advance(s: &mut Onboard, play: &mut Play<'_, Onboard>) {
@@ -1019,53 +829,37 @@ fn advance(s: &mut Onboard, play: &mut Play<'_, Onboard>) {
 /// Moves the story one beat on at `now`; the next is due after the returned
 /// seconds, or waits for the user.
 fn next_beat(s: &mut Onboard, now: f64) -> Option<f64> {
-    const WAIT: f64 = 0.25;
     if s.flow == Flow::FirstRun {
         return first_run_next(s, now);
     }
     match s.step {
-        Step::Pick => {
-            s.pick(s.wants);
-            s.sfx.on_download_start(now);
-            Some(if s.flow == Flow::Shout { 0.6 } else { 0.9 })
-        }
-        Step::Started if s.flow == Flow::Versus => {
+        // The comedy's intro, then the Launch Room's row to press.
+        Step::Key => {
             park(s, now);
             None
         }
-        Step::Started => {
-            s.step = Step::Parked;
-            s.parked_from = Some(now);
-            Some(0.5)
-        }
         Step::Parked if s.typing_from.is_none() => None,
-        Step::Parked if s.can_hear() => {
+        Step::Parked => {
             s.step = Step::YourTurn;
             s.voice_from = Some(now);
             s.hud_from = Some(now);
             s.sfx.on_rewind(now);
             Some(versus::BEFORE_KEY)
         }
-        Step::Parked => Some(WAIT),
         Step::YourTurn => {
             s.step = Step::Hearing;
             hear(s, now);
             Some(Script::chosen().take().release + 0.1)
         }
-        Step::Hearing if s.flow == Flow::Versus => {
+        Step::Hearing => {
             s.step = Step::Heard;
             Some(versus::reply_secs(s))
         }
-        Step::Hearing => {
-            s.step = Step::Heard;
-            Some(1.2)
-        }
-        Step::Heard if s.downloaded() => {
+        Step::Heard => {
             s.step = Step::Done;
             s.sfx.on_score(now);
             Some(SCORE_HOLD)
         }
-        Step::Heard => Some(WAIT),
         Step::Done => {
             s.step = Step::Ready;
             s.ready_from = Some(now);
@@ -1093,10 +887,9 @@ fn hear(s: &mut Onboard, now: f64) {
     s.sfx.on_hex_reply(now, &beats);
 }
 
-/// The first run: `"Without Hex"` and a scripted `"With Hex"` play while
-/// the model downloads, then the microphone, the practice game as the
-/// user's own `"With Hex"` once the model is in, Accessibility, and
-/// `"Hex is ready"`.
+/// The first run: the API key, `"Without Hex"` and a scripted `"With Hex"`,
+/// then the microphone, the practice game as the user's own `"With Hex"`
+/// when a key is set, Accessibility, and `"Hex is ready"`.
 pub(super) fn first_run_next(s: &mut Onboard, now: f64) -> Option<f64> {
     const WAIT: f64 = 0.25;
     match s.step {
@@ -1111,15 +904,29 @@ pub(super) fn first_run_next(s: &mut Onboard, now: f64) -> Option<f64> {
         Step::Accessibility if s.live.as_ref().is_some_and(|live| !live.granted_for(now)) => {
             Some(WAIT)
         }
-        // The real first run's model step holds the download page.
-        Step::Pick | Step::Started if s.live.as_ref().is_some_and(super::live::Live::holds) => {
+        // The real first run holds the key step until a key is set or the
+        // person skips it.
+        Step::Key
+            if s.live
+                .as_ref()
+                .is_some_and(|live| !s.has_key && !live.key.skipped) =>
+        {
             Some(WAIT)
         }
-        Step::Pick | Step::Started => {
+        Step::Key => {
+            // A story goes on as if a key had been pasted.
+            if s.live.is_none() {
+                s.has_key = true;
+            }
+            if s.has_key {
+                s.sfx.on_key_set(now);
+            }
+            if s.resumed {
+                return leave_comedy(s, now);
+            }
             park(s, now);
             first_run_next(s, now)
         }
-        // The conversation is there as the download flies up.
         Step::Parked if s.typing_from.is_none() => {
             s.open_scene();
             Some(s.scene.lead_in() + s.scene.duration() + COMEDY_HOLD)
@@ -1159,7 +966,7 @@ pub(super) fn first_run_next(s: &mut Onboard, now: f64) -> Option<f64> {
             }
             leave_comedy(s, now)
         }
-        Step::Microphone | Step::Waiting => to_practice(s, now),
+        Step::Microphone => to_practice(s, now),
         Step::Try => {
             if s.interactive_try() {
                 return None;
@@ -1199,9 +1006,6 @@ pub(super) fn first_run_next(s: &mut Onboard, now: f64) -> Option<f64> {
 /// Short presses on the practice before it offers tap to start instead.
 pub(crate) const TAPS_BEFORE_TOGGLE: u8 = 2;
 
-/// The longest gap between polls that still plays a flight.
-const FLIGHT_SEEN: f64 = 0.25;
-
 /// How long `"Without Hex"`'s last line holds before the first run moves on,
 /// after the scene's own hold on the removal ([`typing::Timing::fired`]).
 const COMEDY_HOLD: f64 = 0.8;
@@ -1237,29 +1041,16 @@ fn to_accessibility(s: &mut Onboard, now: f64) -> Option<f64> {
     Some(permissions::AX_SECS)
 }
 
-/// On to the practice game as `"With Hex"`, once Hex can hear: until the
-/// model is in, a calm `"Almost ready"`. Hex's shortcut works only with
-/// Accessibility, so a real first run without it asks for it first.
+/// On to the practice game as `"With Hex"`. Hex's shortcut works only with
+/// Accessibility, so a real first run without it asks for it first. Without
+/// an API key Hex can't hear the practice: `"Hex is ready"` says so.
 fn to_practice(s: &mut Onboard, now: f64) -> Option<f64> {
-    const WAIT: f64 = 0.25;
     if s.live.is_some() && !s.granted {
         return to_accessibility(s, now);
     }
     if !s.can_hear() {
-        if s.step != Step::Waiting {
-            s.step = Step::Waiting;
-            s.sfx.on_almost_ready(now);
-        }
-        return Some(WAIT);
-    }
-    // A sketch playing goes on to its next stop first.
-    if s.step == Step::Waiting
-        && let Some(left) = super::sketches::hold(s, now)
-    {
-        return Some(left);
-    }
-    if s.step == Step::Waiting && s.closed < 1.0 {
-        return Some(0.9);
+        s.jump_to_ready();
+        return None;
     }
     s.step = Step::Try;
     s.played = true;
@@ -1337,7 +1128,6 @@ pub(super) fn advance_to(s: &mut Onboard, now: f64, tx: &mut Tx) -> bool {
         tx.launch("w0", "hex-bubble");
     }
     s.hex_seen = hex_sent;
-    super::sketches::advance(s, now, tx);
     if s.manual_override
         && let Some(due) = s.auto_due_at
         && now >= due
@@ -1403,17 +1193,6 @@ pub(super) fn advance_to(s: &mut Onboard, now: f64, tx: &mut Tx) -> bool {
         s.hud.clear();
     }
 
-    // The download flies when its place changes. A jump in the story's
-    // clock (a fixture, a seek) lands it at once.
-    let up = super::pill::up(s);
-    if up != s.pill_up {
-        s.pill_up = up;
-        s.pill_flew = if now - s.polled <= FLIGHT_SEEN {
-            now
-        } else {
-            f64::NEG_INFINITY
-        };
-    }
     // The conversation takes over from the plate it grew on in one frame;
     // its own surface would otherwise fade in as the plate goes, a flash.
     if versus::grown(s, s.polled, now) {
@@ -1428,34 +1207,10 @@ pub(super) fn advance_to(s: &mut Onboard, now: f64, tx: &mut Tx) -> bool {
         || s.auto_due_at.is_some()
         || s.live_hold_from.is_some()
         || (s.interactive_try() && matches!(s.step, Step::Try | Step::TryHeard))
-        || (s.examples_from.is_some() && (s.step < Step::Ready || !s.reduced.get()))
+        || (s.started_from.is_some() && (s.step < Step::Ready || !s.reduced.get()))
         || (s.step == Step::Ready && !s.reduced.get() && s.ready_age() < BUILD_SECS);
     moving |= s.dictated.moving();
 
-    // The real first run's download comes from Hex (`live::poll`).
-    let from = s.download_from.filter(|_| s.live.is_none());
-    if let Some(download) = s.download.as_mut().filter(|_| s.live.is_some()) {
-        if download.done() {
-            s.closed_from.get_or_insert(now);
-        } else {
-            moving = true;
-        }
-    } else if let (Some(from), Some(download)) = (from, s.download.as_mut()) {
-        download.downloaded = downloaded(download.total, now - from, s.download_secs);
-        if download.done() {
-            s.closed_from.get_or_insert(now);
-        } else {
-            moving = true;
-        }
-    }
-    if let Some(from) = s.closed_from {
-        s.closed = if s.reduced.get() {
-            1.0
-        } else {
-            smooth(((now - from) / CLOSE_SECS) as f32)
-        };
-        moving |= s.closed < 1.0;
-    }
     match s.take_from {
         Some(from) => {
             let elapsed = now - from;
@@ -1476,70 +1231,56 @@ pub(super) fn advance_to(s: &mut Onboard, now: f64, tx: &mut Tx) -> bool {
     moving
 }
 
-fn smooth(u: f32) -> f32 {
-    let u = u.clamp(0.0, 1.0);
-    u * u * (3.0 - 2.0 * u)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::fixture::ANSWER_JAY;
     use super::*;
 
-    fn run(flow: Flow, speech: Speech) -> Onboard {
-        let mut s = Onboard::new(flow);
-        s.speech = speech;
-        s.examples_from = Some(0.0);
-        s
-    }
-
     #[test]
-    fn apple_speech_hears_before_the_download_finishes() {
-        let mut s = run(Flow::Pill, Speech::Apple);
-        s.pick(Language::English);
-        assert!(s.can_hear());
-        assert!(!s.downloaded());
-    }
-
-    #[test]
-    fn without_apple_speech_nothing_hears_until_the_model_lands() {
-        let mut s = run(Flow::Pill, Speech::AfterDownload);
-        s.pick(Language::English);
-        assert!(!s.can_hear());
+    fn a_story_shows_the_key_step_then_goes_on_as_if_a_key_were_pasted() {
+        let mut s = Onboard::new(Flow::FirstRun);
+        assert!(!s.can_hear(), "a new install has no key");
+        s.begin_live(0.0);
         let mut tx = Tx::default();
-        poll(&mut s, DOWNLOAD_SECS + 0.1, &mut tx);
-        assert!(s.downloaded());
+        poll(&mut s, KEY_HOLD - 0.1, &mut tx);
+        assert_eq!(s.step, Step::Key);
+        poll(&mut s, KEY_HOLD + 0.1, &mut tx);
+        assert_eq!(s.step, Step::Parked, "the comedy follows the key");
         assert!(s.can_hear());
-        assert!(s.streams());
+        assert!(!s.had_key, "the key step showed this run");
     }
 
     #[test]
-    fn the_multilingual_model_shows_the_reply_on_release() {
-        let mut s = run(Flow::Shout, Speech::AfterDownload);
-        s.pick(Language::Other);
-        assert!(!s.streams());
-        s.take_from = Some(0.0);
+    fn a_run_with_a_key_already_set_opens_on_the_comedy() {
+        let mut s = Onboard::new(Flow::FirstRun);
+        s.has_key = true;
+        s.begin_live(0.0);
+        assert_eq!(s.step, Step::Parked);
+        assert!(s.had_key);
+    }
+
+    #[test]
+    fn a_resumed_key_step_goes_on_to_setup_not_the_comedy() {
+        let mut s = Onboard::new(Flow::FirstRun);
+        s.resumed = true;
+        s.jump_to_key();
         let mut tx = Tx::default();
-        poll(&mut s, 0.8, &mut tx);
-        assert_eq!(s.partial, "");
-        poll(&mut s, ANSWER_JAY.release + 0.1, &mut tx);
-        assert_eq!(s.partial, ANSWER_JAY.text());
+        poll(&mut s, KEY_HOLD + 0.1, &mut tx);
+        assert_eq!(s.step, Step::Microphone);
     }
 
     #[test]
-    fn examples_type_one_after_the_other() {
-        let mut s = run(Flow::Pill, Speech::Apple);
-        s.now = EXAMPLE_START + WORD_SECS * 2.5;
-        assert_eq!(s.example(0), ("Yes, call", false));
-        assert_eq!(s.example(1).0, "");
-        s.now = 20.0;
-        assert_eq!(s.example(0), (EXAMPLE_REPLIES[0], true));
-        assert_eq!(s.example(1), (EXAMPLE_REPLIES[1], true));
+    fn the_comedy_alone_opens_on_its_intro_and_waits_for_the_row() {
+        let mut s = Onboard::new(Flow::Versus);
+        assert!(s.can_hear(), "it has no key to ask for");
+        assert_eq!(next_beat(&mut s, 1.0), None);
+        assert_eq!(s.step, Step::Parked);
+        assert!(versus::waiting_to_start(&s));
     }
 
     #[test]
     fn live_try_pauses_and_completes_when_real_words_paste_in() {
         let mut s = Onboard::new(Flow::FirstRun);
+        s.has_key = true;
         s.jump_to_try();
         assert_eq!(s.step, Step::Try);
         s.practice.text = "Testing live dictation in Hex.".into();
@@ -1553,6 +1294,7 @@ mod tests {
     #[test]
     fn the_practice_goes_straight_to_ready_once_both_permissions_are_on() {
         let mut s = Onboard::new(Flow::FirstRun);
+        s.has_key = true;
         s.granted = true;
         s.jump_to_try();
         s.practice.text = "Testing live dictation in Hex.".into();
@@ -1565,7 +1307,7 @@ mod tests {
     fn the_conversation_opens_in_place_and_jay_arrives_in_it() {
         use crate::feedback::{OnboardingTone, Tone};
         let mut s = Onboard::new(Flow::FirstRun);
-        s.had_model = true;
+        s.has_key = true;
         s.begin_live(0.0);
         let mut tx = Tx::default();
         poll(&mut s, 0.0, &mut tx);
@@ -1597,7 +1339,7 @@ mod tests {
     fn with_hex_plays_itself_after_without_hex_then_asks_for_the_microphone() {
         use crate::feedback::{OnboardingTone, Tone};
         let mut s = Onboard::new(Flow::FirstRun);
-        s.had_model = true;
+        s.has_key = true;
         s.begin_live(0.0);
         let mut tx = Tx::default();
         poll(&mut s, 30.0, &mut tx);
@@ -1647,7 +1389,6 @@ mod tests {
     #[test]
     fn the_first_run_asks_for_the_microphone_then_plays_then_asks_for_accessibility() {
         let mut s = Onboard::new(Flow::FirstRun);
-        s.speech = Speech::AfterDownload;
         s.scripted_try = true;
         s.begin_live(0.0);
         let mut tx = Tx::default();
@@ -1661,6 +1402,7 @@ mod tests {
             now += 0.05;
         }
         let order: Vec<Step> = [
+            Step::Key,
             Step::Parked,
             Step::Heard,
             Step::Microphone,
@@ -1671,7 +1413,7 @@ mod tests {
         .into_iter()
         .filter(|step| steps.contains(step))
         .collect();
-        assert_eq!(order.len(), 6, "{steps:?}");
+        assert_eq!(order.len(), 7, "{steps:?}");
         let at = |step| steps.iter().position(|s| *s == step).unwrap();
         assert!(order.windows(2).all(|w| at(w[0]) < at(w[1])), "{steps:?}");
     }
@@ -1679,7 +1421,6 @@ mod tests {
     #[test]
     fn the_autoplaying_story_plays_the_game_and_reaches_ready_by_itself() {
         let mut s = Onboard::new(Flow::FirstRun);
-        s.speech = Speech::AfterDownload;
         s.rehearsal = Some(Rehearsal::new(true));
         s.autoplay = true;
         s.manual_override = true;
@@ -1713,78 +1454,26 @@ mod tests {
     }
 
     #[test]
-    fn the_slow_download_story_plays_a_sketch_then_the_game() {
+    fn without_a_key_the_practice_is_passed_over_for_hex_is_ready() {
         let mut s = Onboard::new(Flow::FirstRun);
-        s.speech = Speech::AfterDownload;
-        s.rehearsal = Some(Rehearsal::new(true));
-        s.autoplay = true;
-        s.download_secs = SKETCH_DOWNLOAD_SECS;
-        s.manual_override = true;
-        s.auto_due_at = begin_first_run(&mut s, 0.0);
-        let mut tx = Tx::default();
-        let mut now = 0.0;
-        let (mut waiting, mut sketch, mut done, mut tried) = (None, None, None, None);
-        while now < 200.0 && s.step != Step::Ready {
-            poll(&mut s, now, &mut tx);
-            if s.step == Step::Waiting {
-                waiting.get_or_insert(now);
-            }
-            if super::super::sketches::playing(&s) {
-                sketch.get_or_insert(now);
-            }
-            if s.download.is_some_and(|d| d.done()) {
-                done.get_or_insert(now);
-            }
-            if s.step == Step::Try {
-                tried.get_or_insert(now);
-            }
-            now += 1.0 / 60.0;
-        }
-        assert!(waiting.is_some(), "Almost ready waits for the model");
-        let (sketch, done, tried) = (sketch.unwrap(), done.unwrap(), tried.unwrap());
-        assert!(sketch < done && done < tried, "the model lands mid-sketch");
+        s.granted = true;
+        s.has_key = false;
+        s.step = Step::Microphone;
+        assert_eq!(first_run_next(&mut s, 5.0), None);
+        assert_eq!(s.step, Step::Ready, "Hex can't hear a practice yet");
+
+        // Skip on the demo never offers the practice either.
+        let mut s = Onboard::new(Flow::FirstRun);
+        s.granted = true;
+        s.step = Step::Heard;
+        s.skip_optional();
         assert_eq!(s.step, Step::Ready);
-        // Every beat keeps its sound, the sketch's hand-off to the game too.
-        use crate::feedback::{OnboardingTone, Tone};
-        let fired = s.sfx.fired_cues();
-        let sounds = |from: f64, to: f64, tone: fn(Tone) -> bool| {
-            fired
-                .iter()
-                .any(|&(at, t, _)| at >= from && at < to && tone(t))
-        };
-        assert!(sounds(0.0, waiting.unwrap(), |t| matches!(
-            t,
-            Tone::Onboarding(OnboardingTone::Key(..))
-        )));
-        assert!(sounds(sketch, done, |t| matches!(
-            t,
-            Tone::Onboarding(OnboardingTone::Key(..))
-        )));
-        for tone in [
-            |t| matches!(t, Tone::Onboarding(OnboardingTone::ShortcutDown)),
-            |t| matches!(t, Tone::Onboarding(OnboardingTone::Word(_))),
-            |t| matches!(t, Tone::Onboarding(OnboardingTone::Burn)),
-            |t| matches!(t, Tone::Onboarding(OnboardingTone::Triumph(_))),
-        ] as [fn(Tone) -> bool; 4]
-        {
-            assert!(sounds(tried, now, tone));
-        }
-        let longest = fired
-            .windows(2)
-            .map(|w| (w[1].0 - w[0].0, w[0].0))
-            .fold((0.0, 0.0), |a, b| if b.0 > a.0 { b } else { a });
-        assert!(
-            longest.0 < 8.0,
-            "{:.1} s silent from {:.1} s",
-            longest.0,
-            longest.1
-        );
     }
 
     #[test]
     fn skip_shows_two_seconds_in_and_leaves_the_comedy() {
         let mut s = Onboard::new(Flow::FirstRun);
-        s.had_model = true;
+        s.has_key = true;
         s.begin_live(0.0);
         let mut tx = Tx::default();
         poll(&mut s, 30.0, &mut tx);
@@ -1797,14 +1486,14 @@ mod tests {
         assert!(s.skip_scene());
         assert!(matches!(
             s.step,
-            Step::Microphone | Step::Accessibility | Step::Waiting | Step::Try
+            Step::Microphone | Step::Accessibility | Step::Try
         ));
     }
 
     #[test]
     fn skip_leaves_with_hex_too() {
         let mut s = Onboard::new(Flow::FirstRun);
-        s.had_model = true;
+        s.has_key = true;
         s.begin_live(0.0);
         let mut tx = Tx::default();
         poll(&mut s, 30.0, &mut tx);
@@ -1831,7 +1520,6 @@ mod tests {
     fn reduced_motion_does_not_suppress_onboarding_sounds() {
         let simulate = |reduced: bool| -> Vec<(f64, crate::feedback::Tone, u8)> {
             let mut s = Onboard::new(Flow::FirstRun);
-            s.speech = Speech::AfterDownload;
             s.scripted_try = true;
             s.reduced.set(reduced);
             s.begin_live(0.0);

@@ -1,10 +1,11 @@
 //! The onboarding check (`scripts/check-onboarding.sh`, run before every
 //! stable release): every onboarding scene against its approved golden in
-//! both appearances, and a first run walked through the real onboarding in
-//! a clean data folder. Like every golden, these render on Linux only: the
-//! macOS and Windows scenes are the same window drawn from fixtures.
+//! both appearances, and a first run walked through the real onboarding
+//! pages. Like every golden, these render on Linux only: the macOS and
+//! Windows scenes are the same window drawn from fixtures.
 
-use super::super::onboarding_kit::live::Page;
+use super::super::api_key::{self, Check, Source};
+use super::super::onboarding_kit::live::{self, Page};
 use super::*;
 use crate::desktop::onboarding::Step;
 
@@ -12,19 +13,15 @@ use crate::desktop::onboarding::Step;
 /// Windows. An intentional change refreshes these goldens in the same PR
 /// (`HEX_UPDATE_GOLDENS=1`).
 pub(super) const SCENES: &[&str] = &[
-    // A fresh install: setting up Hex, the recommended model downloading.
+    // A fresh install: the key step, asking for an ElevenLabs API key.
     "onboarding",
     "mac-onboarding",
-    // The download stopped; Continue without a model, then Settings.
-    "onboarding-download-failed",
-    "onboarding-no-model",
-    // The model step: models on this computer; the recommended one among
-    // them; ours picked and downloading; Back to the list from the next page.
-    "onboarding-model-found",
-    "onboarding-model-found-recommended",
-    "onboarding-model-found-downloading",
-    "onboarding-model-found-back",
-    // The demo while the model downloads.
+    // A pasted key while ElevenLabs is asked about it, and one it refused.
+    "onboarding-key-checking",
+    "onboarding-key-refused",
+    // Skip for now, on to Hex is ready, which says dictation waits for a key.
+    "onboarding-no-key",
+    // The demo.
     "onboarding-demo",
     // Permissions (macOS): to do, refused, stale entry, waiting for a
     // restart; Windows' microphone privacy switch.
@@ -35,10 +32,6 @@ pub(super) const SCENES: &[&str] = &[
     "windows-onboarding-microphone",
     // GNOME and KDE on Wayland: the desktop's paste permission, explained.
     "onboarding-paste",
-    // Almost ready: the model still downloads, and a sketch from "Watch
-    // another one" while it does.
-    "onboarding-waiting",
-    "onboarding-sketch",
     // Your turn: the practice game, and the shortcut that didn't start.
     "onboarding-try",
     "mac-onboarding-try",
@@ -50,16 +43,33 @@ pub(super) const SCENES: &[&str] = &[
 
 /// The optional pages: the demo and the practice.
 const OPTIONAL: &[&str] = &[
-    "onboarding-model-found-back",
     "onboarding-demo",
     "onboarding-try",
     "mac-onboarding-try",
     "mac-onboarding-reopen",
 ];
 
+/// The scenes on the key step.
+const KEY_STEP: &[&str] = &[
+    "onboarding",
+    "mac-onboarding",
+    "onboarding-key-checking",
+    "onboarding-key-refused",
+];
+
+fn page(rt: &Runtime<Ui>) -> Option<Page> {
+    live::page(&rt.state)
+}
+
+/// Plays the first run on to `page`, as a fixture's clock never does alone.
+fn play_to(rt: &mut Runtime<Ui>, page: Page) {
+    rt.update(move |ui, _| live::fixture_resume(ui, page));
+    settle(rt);
+}
+
 /// Skip shows only on the optional pages, the demo and the practice, and
-/// passes over them to the next step setup still needs: permissions, then
-/// the model, else Hex is ready. It never closes onboarding.
+/// passes over them to the next step setup still needs: a permission, else
+/// Hex is ready. It never closes onboarding.
 #[test]
 fn onboarding_skip() {
     for scene in SCENES {
@@ -70,7 +80,6 @@ fn onboarding_skip() {
             "{scene}: Skip"
         );
     }
-    let page = |rt: &Runtime<Ui>| super::super::onboarding_kit::live::page(&rt.state);
     let skip = |rt: &mut Runtime<Ui>, scene: &str, next: Page| {
         tap(rt, "skip");
         settle(rt);
@@ -84,80 +93,118 @@ fn onboarding_skip() {
     };
 
     // macOS, permissions still to grant: the demo skips to them.
-    let mut rt = runtime("mac-onboarding", true, PANE_SIZE);
-    rt.update(|ui, _| super::super::onboarding_kit::live::fixture_resume(ui, Page::Demo));
-    settle(&mut rt);
+    let mut ui = Ui::with(AppSettings::default(), Service::Fixture(Vec::new()));
+    super::super::onboarding_kit::scenes::mac_first_run(
+        &mut ui,
+        crate::rune_ui::onboarding::MacStep::Setup,
+        Page::Demo,
+    );
+    let mut rt = runtime_for(ui, true, PANE_SIZE);
     assert_eq!(page(&rt), Some(Page::Demo));
     skip(&mut rt, "mac demo", Page::Permissions);
 
-    // Nothing to grant, the model still downloading: on to Almost ready.
-    let mut rt = runtime("onboarding-demo", true, PANE_SIZE);
-    skip(&mut rt, "onboarding-demo", Page::Waiting);
-
     // Nothing left to set up: the demo and the practice skip to Hex is ready.
-    let mut rt = runtime("onboarding-demo", true, PANE_SIZE);
-    rt.update(|ui, tx| {
-        ui.picker.installed = Some(vec![ui.settings.transcription.model]);
-        if let Some(view) = &mut ui.view {
-            view.transcription.preparing = None;
-        }
-        super::super::onboarding_kit::live::poll(ui, tx);
-    });
-    skip(&mut rt, "onboarding-demo, model ready", Page::Ready);
-    for scene in ["onboarding-try", "mac-onboarding-try"] {
+    for scene in ["onboarding-demo", "onboarding-try", "mac-onboarding-try"] {
         let mut rt = runtime(scene, true, PANE_SIZE);
         skip(&mut rt, scene, Page::Ready);
     }
 }
 
-/// Continue without a model (#894): only on the download step, only once
-/// the download failed or stalled. It finishes onboarding, and Settings ›
-/// General then says no model is installed, with Download and Add model
-/// file….
+/// The key step: only there is a key asked for. Continue checks the typed
+/// key and goes on only once ElevenLabs accepts it; a refused key stays on
+/// the step with why; and the key itself is never drawn.
 #[test]
-fn onboarding_continue_without_model() {
+fn onboarding_key_step() {
     for scene in SCENES {
         let rt = runtime(scene, true, PANE_SIZE);
-        assert_eq!(
-            rt.find("continue-without-model").is_some(),
-            *scene == "onboarding-download-failed",
-            "{scene}: Continue without a model"
-        );
+        for key in ["key-field", "skip-key"] {
+            assert_eq!(
+                rt.find(key).is_some(),
+                KEY_STEP.contains(scene),
+                "{scene}: {key}"
+            );
+        }
+        let shown = texts(&rt).join("\n");
+        assert!(!shown.contains("sk_"), "{scene} draws a key: {shown}");
     }
 
-    let mut rt = runtime("onboarding-download-failed", true, PANE_SIZE);
-    tap(&mut rt, "continue-without-model");
+    let mut rt = runtime("onboarding", true, PANE_SIZE);
+    assert_eq!(page(&rt), Some(Page::Key));
+    // Nothing typed: Continue has nothing to check.
+    tap(&mut rt, "continue");
+    assert_eq!(rt.state.api_key.check, Check::Idle);
+    play_to(&mut rt, Page::Demo);
+    assert_eq!(page(&rt), Some(Page::Key), "the step holds without a key");
+
+    rt.state
+        .api_key
+        .field
+        .replace_text("sk_refused_key_00000001");
+    settle(&mut rt);
+    tap(&mut rt, "continue");
+    assert!(rt.state.api_key.checking(), "ElevenLabs is asked");
+    assert!(texts(&rt).contains(&"Checking…".to_owned()));
+    let refused = "ElevenLabs refused the API key; check it in Settings";
+    rt.update(|ui, _| api_key::answer(ui, Err(refused.into())));
+    settle(&mut rt);
+    assert!(texts(&rt).contains(&refused.to_owned()), "{:?}", texts(&rt));
+    assert!(!rt.state.api_key.is_set(), "a refused key is not saved");
+    play_to(&mut rt, Page::Demo);
+    assert_eq!(page(&rt), Some(Page::Key), "and the step holds");
+
+    rt.state
+        .api_key
+        .field
+        .replace_text("sk_accepted_key_0000abcd");
+    settle(&mut rt);
+    tap(&mut rt, "continue");
+    rt.update(|ui, _| api_key::answer(ui, Ok(())));
+    settle(&mut rt);
+    assert_eq!(rt.state.api_key.source, Source::Saved("••••abcd".into()));
+    assert!(rt.state.api_key.field.text.is_empty());
+    play_to(&mut rt, Page::Demo);
+    assert_eq!(page(&rt), Some(Page::Demo), "an accepted key goes on");
+}
+
+/// Skip for now on the key step: onboarding goes on without a key, passes
+/// over the practice (which needs one), says on Hex is ready that dictation
+/// waits for a key, and Settings says so afterwards.
+#[test]
+fn onboarding_without_a_key() {
+    let note = "Dictation won't work until you add a key in Settings › General.";
+    let mut rt = runtime("onboarding", true, PANE_SIZE);
+    assert!(
+        texts(&rt).contains(&note.to_owned()),
+        "Skip says what it means"
+    );
+    tap(&mut rt, "skip-key");
+    settle(&mut rt);
+    assert_eq!(page(&rt), Some(Page::Demo), "on to the demo");
+    assert!(rt.state.tour.is_some(), "onboarding stays open");
+    play_to(&mut rt, Page::Ready);
+    assert_eq!(page(&rt), Some(Page::Ready), "no practice without a key");
+    assert!(texts(&rt).contains(&note.to_owned()), "{:?}", texts(&rt));
+    assert!(rt.find("try-again").is_none(), "nothing to try with");
+
+    tap(&mut rt, "start-using-hex");
     settle(&mut rt);
     assert!(rt.state.first_run.is_none(), "onboarding closed");
     assert!(rt.state.tour.is_none(), "and its tour");
-    assert!(
-        texts(&rt).contains(&"No speech model installed: The connection was reset.".to_owned()),
-        "{:?}",
-        texts(&rt)
-    );
-    assert!(rt.find("transcription-download").is_some(), "Download");
-    assert!(
-        rt.find("transcription-add-file").is_some(),
-        "Add model file…"
-    );
-    assert!(
-        texts(&rt).contains(&"Hex can't dictate until a speech model is installed".to_owned()),
-        "the status says so too"
-    );
+    let shown = texts(&rt);
+    for expected in [
+        "Not set. Dictation won't work until you add one",
+        "Hex can't dictate until an ElevenLabs API key is set",
+    ] {
+        assert!(
+            shown.contains(&expected.to_owned()),
+            "{expected}: {shown:?}"
+        );
+    }
 
-    // A download that gains nothing for a while offers it too.
-    let mut rt = runtime("onboarding-waiting", true, PANE_SIZE);
-    assert!(rt.find("continue-without-model").is_none());
-    rt.update(|ui, tx| {
-        if let Some(s) = ui.first_run.as_mut() {
-            s.now += 31.0;
-        }
-        super::super::onboarding_kit::live::poll(ui, tx);
-    });
-    settle(&mut rt);
-    assert!(rt.find("continue-without-model").is_some(), "stalled");
-    tap(&mut rt, "continue-without-model");
-    assert!(rt.state.first_run.is_none(), "onboarding closed");
+    // With a key, Hex is ready offers the practice again and says nothing.
+    let rt = runtime("onboarding-ready", true, PANE_SIZE);
+    assert!(!texts(&rt).contains(&note.to_owned()));
+    assert!(rt.find("try-again").is_some());
 }
 
 /// The mic note follows the shortcut: Hold says hold, Toggle says tap,
@@ -195,76 +242,6 @@ fn the_mic_note_follows_the_shortcut() {
     assert_eq!(note(false, true), None, "no note once the mic is released");
 }
 
-/// The language capsule on the download page: English systems have no
-/// other language, and a later setup replaces the earlier setup's label.
-/// A test's own preferred language keeps both cases independent of the
-/// host locale.
-#[test]
-fn the_language_capsule_switches_only_between_different_languages() {
-    let setup = |model: TranscriptionModelId, language: &str| {
-        let mut ui = portal_fixture();
-        ui.settings.transcription = TranscriptionSelection {
-            model,
-            language: language.into(),
-        };
-        ui.preferred_language = Some("en".into());
-        super::super::onboarding::fixture(&mut ui, Step::Setup, true);
-        super::super::onboarding_kit::live::fixture(&mut ui, Page::Download);
-        runtime_for(ui, false, PANE_SIZE)
-    };
-
-    // An English system has no other language to offer.
-    let mut rt = setup(TranscriptionModelId::ParakeetUnifiedEnglish, "en");
-    let before = sent(&rt).len();
-    tap(&mut rt, "language-capsule");
-    assert_eq!(sent(&rt).len(), before, "nothing downloads");
-
-    // Neither has another English model, such as a Cohere English pick.
-    let mut rt = setup(TranscriptionModelId::CohereTranscribe, "en");
-    let before = sent(&rt).len();
-    tap(&mut rt, "language-capsule");
-    assert_eq!(sent(&rt).len(), before, "English to English is no switch");
-
-    // A French setup switches to the recommended English model and back.
-    let mut rt = setup(TranscriptionModelId::ParakeetV3, "fr");
-    assert!(
-        matches!(
-            sent(&rt),
-            [Request::ChooseModel { model: TranscriptionModelId::ParakeetV3, language }] if language == "fr"
-        ),
-        "{:?}",
-        sent(&rt)
-    );
-    tap(&mut rt, "language-capsule");
-    assert!(matches!(
-        sent(&rt),
-        [
-            Request::ChooseModel { model: TranscriptionModelId::ParakeetV3, language: started },
-            Request::ChooseModel { model: TranscriptionModelId::ParakeetUnifiedEnglish, language },
-        ] if started == "fr" && language == "en"
-    ));
-    tap(&mut rt, "language-capsule");
-    assert!(
-        matches!(
-            sent(&rt).last(),
-            Some(Request::ChooseModel { model: TranscriptionModelId::ParakeetV3, language }) if language == "fr"
-        ),
-        "the toggle swaps back to the saved selection"
-    );
-
-    // Running setup again for Japanese replaces the earlier French label.
-    let rt = setup(
-        crate::transcription::models::recommended_selection("ja").model,
-        "ja",
-    );
-    let shown = texts(&rt);
-    assert!(shown.contains(&"Japanese".to_owned()), "{shown:?}");
-    assert!(
-        !shown.contains(&"French".to_owned()),
-        "the previous setup's label is gone: {shown:?}"
-    );
-}
-
 #[test]
 fn onboarding_goldens() {
     let _goldens = Goldens::collect();
@@ -275,99 +252,49 @@ fn onboarding_goldens() {
     }
 }
 
-/// A first run on Linux or Windows, in the clean data folder
-/// `HEX_APPLICATION_SUPPORT_DIR` names (no settings, no models, an empty
-/// Hugging Face cache): the real settings load, the real decision to open
-/// onboarding, the real download and verification of the model it picks,
-/// and every page to Hex is ready. Downloads the recommended model, so only
-/// scripts/check-onboarding.sh runs it. The window here is a fixture, not
-/// connected to a service: the test does the service's download itself,
-/// plays the story on its own clock, and nothing writes the completion
-/// marker.
+/// A first run on Linux or Windows, walked as a person would: the key
+/// step, a key ElevenLabs accepts, the demo, the practice game, and Hex is
+/// ready. The window is a fixture: nothing reaches ElevenLabs or the data
+/// folder, and the test answers the key's check itself.
 #[test]
-#[ignore = "downloads a speech model; run by scripts/check-onboarding.sh"]
 fn onboarding_walkthrough() {
-    let support = crate::app_paths::support_dir().unwrap();
-    assert!(
-        std::env::var_os("HEX_APPLICATION_SUPPORT_DIR").is_some(),
-        "set HEX_APPLICATION_SUPPORT_DIR to a clean folder"
-    );
-    assert!(
-        std::fs::read_dir(&support).map_or(true, |mut entries| entries.next().is_none()),
-        "{} must start empty",
-        support.display()
-    );
-    assert!(
-        crate::transcription::found_models::scan().is_empty(),
-        "the Hugging Face cache must be empty"
-    );
-
-    // A new install: default settings from an empty folder, nothing installed.
-    let settings = AppSettings::load().unwrap();
     let mut ui = portal_fixture();
     ui.platform.caps = platform::Capabilities::LINUX;
-    ui.settings = settings;
-    let installed = |ui: &Ui| {
-        let selection = &ui.settings.transcription;
-        crate::transcription::models::is_installed(
-            crate::transcription::models::definition(selection.model),
-            &selection.language,
-        )
-    };
-    assert!(!installed(&ui), "no model is installed yet");
-    ui.picker.installed = Some(Vec::new());
-    // As the window opens at launch.
-    ui.tour = Some(
-        super::super::onboarding::Tour::start(&ui.settings, &ui.platform)
-            .expect("a new install opens onboarding"),
-    );
-    super::super::onboarding_kit::live::open(&mut ui);
+    super::super::onboarding::fixture(&mut ui, Step::Welcome);
+    live::open(&mut ui);
     assert!(ui.first_run.is_some(), "the first run shows");
     let mut rt = runtime_for(ui, true, PANE_SIZE);
     let step = |rt: &Runtime<Ui>| rt.state.tour.as_ref().map(|tour| tour.flow.step());
+
+    // A new install opens on the key step, and asks the host for nothing.
+    assert_eq!(page(&rt), Some(Page::Key));
     let shown = texts(&rt);
-    assert!(shown.contains(&"Setting up Hex".to_owned()), "{shown:?}");
     assert!(
-        !shown.contains(&"Choose a speech model".to_owned()),
-        "nothing found, so no model step"
+        shown.contains(&"Connect ElevenLabs".to_owned()),
+        "{shown:?}"
     );
-
-    // Setting up Hex asks the service for the recommended model at once.
+    assert!(
+        shown.contains(&"Audio you dictate is sent to ElevenLabs for transcription".to_owned()),
+        "the page says where audio goes: {shown:?}"
+    );
     assert_eq!(step(&rt), Some(Step::Setup));
-    let (model, language) = match sent(&rt) {
-        [Request::ChooseModel { model, language }] => (*model, language.clone()),
-        other => panic!("setup should choose a model, sent {other:?}"),
-    };
-    assert_eq!(model, rt.state.settings.transcription.model);
+    assert!(sent(&rt).is_empty(), "{:?}", sent(&rt));
 
-    // The service's work, for real: download and verify into the clean folder.
-    let definition = crate::transcription::models::definition(model);
-    let downloaded = std::sync::atomic::AtomicU64::new(0);
-    let path = crate::transcription::models::download_with_progress(
-        definition,
-        &std::sync::atomic::AtomicBool::new(false),
-        &downloaded,
-    )
-    .unwrap_or_else(|error| panic!("downloading {} failed: {error:#}", definition.name));
-    assert!(
-        path.starts_with(&support),
-        "{} is outside the data folder",
-        path.display()
-    );
-    rt.state.settings.transcription = TranscriptionSelection { model, language };
-    assert!(installed(&rt.state), "{} is installed", definition.name);
-    assert!(
-        crate::transcription::models::is_verified(definition),
-        "{} is verified against its pin",
-        definition.name
-    );
-    rt.state.picker.installed = Some(vec![model]);
+    // A key is pasted, checked, and saved once ElevenLabs accepts it.
+    rt.state
+        .api_key
+        .field
+        .replace_text("sk_walkthrough_key_0001");
+    settle(&mut rt);
+    tap(&mut rt, "continue");
+    assert!(rt.state.api_key.checking());
+    rt.update(|ui, _| api_key::answer(ui, Ok(())));
+    settle(&mut rt);
+    assert!(rt.state.api_key.is_set());
 
-    // The story plays on: the demo, then the practice game ("With Hex")
-    // once the model is ready, then Hex is ready.
-    settle(&mut rt);
-    rt.update(|ui, _| super::super::onboarding_kit::live::fixture_resume(ui, Page::Try));
-    settle(&mut rt);
+    // The story plays on: the demo, then the practice game ("With Hex"),
+    // then Hex is ready.
+    play_to(&mut rt, Page::Try);
     assert_eq!(step(&rt), Some(Step::TryIt));
     assert!(texts(&rt).contains(&"With Hex".to_owned()));
     assert!(rt.find("skip").is_some(), "Skip shows on the practice too");
@@ -376,9 +303,4 @@ fn onboarding_walkthrough() {
     tap(&mut rt, "start-using-hex");
     assert!(rt.state.tour.is_none(), "Start using Hex closes onboarding");
     assert!(rt.state.first_run.is_none());
-    println!(
-        "onboarding walkthrough: Setting up Hex -> {} downloaded ({} bytes) -> Your turn -> Hex is ready",
-        definition.name,
-        downloaded.load(std::sync::atomic::Ordering::Relaxed)
-    );
 }

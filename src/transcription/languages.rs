@@ -48,8 +48,8 @@ pub const LANGUAGES: &[(&str, &str)] = &[
     ("fil", "Filipino"),
 ];
 
-/// Names for the other languages Whisper knows, which Settings lists only
-/// for a model that declares them (an import), after [`LANGUAGES`].
+/// Names for other language codes a selection may carry (set from the CLI),
+/// so History and Settings show a name instead of the code.
 const OTHER_LANGUAGES: &[(&str, &str)] = &[
     ("nn", "Norwegian Nynorsk"),
     ("ca", "Catalan"),
@@ -111,11 +111,6 @@ const OTHER_LANGUAGES: &[(&str, &str)] = &[
     ("jw", "Javanese"),
     ("su", "Sundanese"),
 ];
-
-/// Whether Settings lists `code` for every model that supports it.
-pub(crate) fn is_listed(code: &str) -> bool {
-    LANGUAGES.iter().any(|(candidate, _)| *candidate == code)
-}
 
 /// The language's English name, or its code when Hex has none.
 pub fn language_name(code: &str) -> &str {

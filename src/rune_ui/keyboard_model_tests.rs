@@ -65,8 +65,18 @@ fn keyboard_model_switching_is_a_labs_toggle_wherever_layouts_are_observable() {
     assert!(rt.find("lab-keyboard-model-switching").is_none());
 }
 
+/// The select item for `language`: Don't switch comes first.
+fn item(language: &str) -> usize {
+    crate::transcription::models::definition(TranscriptionModelId::ScribeV3)
+        .language_choices()
+        .iter()
+        .position(|code| *code == language)
+        .unwrap()
+        + 1
+}
+
 #[test]
-fn keyboard_model_switching_maps_enabled_sources_to_an_installed_model_and_language() {
+fn keyboard_switching_maps_enabled_sources_to_a_language() {
     use crate::app_settings::KeyboardModelChoice;
     let mut rt = runtime("mac-settings");
     rt.state.platform.input_sources = vec![
@@ -76,15 +86,15 @@ fn keyboard_model_switching_maps_enabled_sources_to_an_installed_model_and_langu
             languages: vec!["es".into()],
         },
     ];
-    rt.state.picker.installed = Some(vec![TranscriptionModelId::ParakeetV3]);
     rt.state.advanced = vec![Pane::General];
     rt.state.settings.keyboard_model_switching.enabled = true;
     rt.invalidate();
     rt.settle_all();
     rt.frame(0.0);
-    assert!(rt.find("input-source-language0").is_none());
-    tap(&mut rt, "input-source-model0-trigger");
-    tap(&mut rt, "input-source-model0-item1");
+    assert!(
+        rt.find("input-source-model0-trigger").is_none(),
+        "there is one model, so only a language to pick"
+    );
     let mapping = |rt: &Runtime<Ui>| {
         rt.state
             .settings
@@ -93,36 +103,41 @@ fn keyboard_model_switching_maps_enabled_sources_to_an_installed_model_and_langu
             .get("com.apple.keylayout.Spanish")
             .cloned()
     };
-    // A new mapping starts in the source's own language.
+    assert_eq!(mapping(&rt), None, "a source doesn't switch until mapped");
+    tap(&mut rt, "input-source-language0-trigger");
+    tap(
+        &mut rt,
+        &format!("input-source-language0-item{}", item("es")),
+    );
     assert_eq!(
         mapping(&rt),
         Some(KeyboardModelChoice {
-            model: TranscriptionModelId::ParakeetV3,
+            model: TranscriptionModelId::ScribeV3,
             language: "es".into(),
         })
     );
-    let german = crate::transcription::models::definition(TranscriptionModelId::ParakeetV3)
-        .language_choices()
-        .iter()
-        .position(|code| *code == "de")
-        .unwrap();
     tap(&mut rt, "input-source-language0-trigger");
-    tap(&mut rt, &format!("input-source-language0-item{german}"));
+    tap(
+        &mut rt,
+        &format!("input-source-language0-item{}", item("de")),
+    );
     assert_eq!(mapping(&rt).unwrap().language, "de");
-    tap(&mut rt, "input-source-model0-trigger");
-    tap(&mut rt, "input-source-model0-item0");
+    // Don't switch clears the mapping.
+    tap(&mut rt, "input-source-language0-trigger");
+    tap(&mut rt, "input-source-language0-item0");
     assert_eq!(mapping(&rt), None);
-    assert!(rt.find("input-source-language0").is_none());
 }
 
 #[test]
-fn a_one_language_model_shows_its_language_fixed() {
+fn every_source_has_a_language_select_whether_or_not_it_switches() {
     let rt = runtime("mac-input-source-models");
-    // ABC maps to Parakeet Unified English, which has only English.
-    assert!(rt.find("input-source-language0").is_some());
-    assert!(rt.find("input-source-language0-trigger").is_none());
-    // Russian maps to Parakeet v3, which offers a choice.
-    assert!(rt.find("input-source-language1-trigger").is_some());
-    // Spanish doesn't switch, so it has no language.
-    assert!(rt.find("input-source-language2").is_none());
+    // ABC and Russian are mapped; Spanish doesn't switch.
+    for index in 0..3 {
+        assert!(
+            rt.find(&format!("input-source-language{index}-trigger"))
+                .is_some(),
+            "source {index}"
+        );
+    }
+    assert_eq!(rt.state.settings.keyboard_model_switching.mappings.len(), 2);
 }

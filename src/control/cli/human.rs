@@ -4,7 +4,10 @@ use super::{
     CONTROL_VERSION, ControlReply, ControlResponse, EXIT_NO_SPEECH, EXIT_NOT_RUNNING, EXIT_REFUSED,
     Output, fail,
 };
-use crate::control::{ModelInfo, StatusReport, settings::SettingValue};
+use crate::control::{
+    ApiKeyReport, ApiKeySource, ApiKeyStatus, ModelInfo, StatusReport, language_label,
+    settings::SettingValue,
+};
 use crate::dictation::vocabulary::VocabularyEntry;
 
 /// Prints `reply` and returns its exit code.
@@ -26,6 +29,8 @@ pub(crate) fn print(reply: ControlReply, output: Output) -> u8 {
         ControlReply::Status(report) => print!("{}", human_status(&report)),
         ControlReply::Settings { settings } => print!("{}", human_settings(&settings)),
         ControlReply::Models { models } => print!("{}", human_models(&models)),
+        ControlReply::Model(model) => print!("{}", human_model(&model)),
+        ControlReply::ApiKey(status) => print!("{}", human_api_key(&status)),
         ControlReply::Vocabulary { entries } => print!("{}", human_vocabulary(&entries)),
         ControlReply::ScrawlCapture(report) => print!("{}", human_scrawl_capture(&report)),
         ControlReply::ScrawlCaptures { captures } => print!("{}", human_captures(&captures)),
@@ -208,6 +213,37 @@ pub(super) fn human_settings(settings: &[SettingValue]) -> String {
         .collect()
 }
 
+/// `••••abcd, saved`, or `••••abcd, from ELEVENLABS_API_KEY`: a key by its
+/// last four characters and where it comes from.
+pub(super) fn api_key_detail(key: &ApiKeyReport) -> String {
+    match key.source {
+        ApiKeySource::Saved => format!("{}, saved", key.redacted),
+        ApiKeySource::Environment => format!(
+            "{}, from {}",
+            key.redacted,
+            crate::transcription::scribe::key::ENVIRONMENT
+        ),
+    }
+}
+
+/// Whether a key is set, as `hex status`, `hex model`, and `hex key` say it.
+pub(super) fn api_key_text(key: Option<&ApiKeyReport>) -> String {
+    match key {
+        Some(key) => format!("set ({})", api_key_detail(key)),
+        None => "not set — run `hex key set`".into(),
+    }
+}
+
+/// The language Scribe is told to expect, as a person reads it.
+pub(super) fn human_language(code: &str) -> String {
+    if code == crate::transcription::models::AUTO_LANGUAGE {
+        "auto (Scribe detects it)".into()
+    } else {
+        language_label(code)
+    }
+}
+
+/// `* scribe_v3  Scribe v3  live: scribe_v3_live  language: German (de)  API key: set (…)`
 pub(super) fn human_models(models: &[ModelInfo]) -> String {
     let width = models.iter().map(|model| model.id.len()).max().unwrap_or(0);
     let name_width = models
@@ -218,30 +254,43 @@ pub(super) fn human_models(models: &[ModelInfo]) -> String {
     models
         .iter()
         .map(|model| {
-            let languages = if model.languages.len() > 6 {
-                format!("{} languages", model.languages.len())
-            } else {
-                model.languages.join(", ")
-            };
             format!(
-                "{} {:width$}  {:name_width$}  {:>8}  {:13}  {languages}{}\n",
+                "{} {:width$}  {:name_width$}  live: {}  language: {}  API key: {}\n",
                 if model.selected { "*" } else { " " },
                 model.id,
                 model.name,
-                model.size,
-                if model.installed {
-                    "installed"
-                } else {
-                    "not installed"
-                },
-                if model.source.is_empty() {
-                    String::new()
-                } else {
-                    format!("  ({})", model.source)
-                },
+                model.live,
+                human_language(&model.language),
+                api_key_text(model.api_key.as_ref()),
             )
         })
         .collect()
+}
+
+/// `hex model status`.
+pub(super) fn human_model(model: &ModelInfo) -> String {
+    format!(
+        "Model: {} ({}; live: {})\n\
+         Language: {}\n\
+         API key: {}\n\
+         API: {}\n\
+         Audio you dictate is sent to ElevenLabs for transcription.\n",
+        model.name,
+        model.id,
+        model.live,
+        human_language(&model.language),
+        api_key_text(model.api_key.as_ref()),
+        model.api_url,
+    )
+}
+
+/// `hex key status`.
+pub(super) fn human_api_key(status: &ApiKeyStatus) -> String {
+    let mut out = format!("API key: {}\n", api_key_text(status.api_key.as_ref()));
+    if let Some(file) = &status.key_file {
+        out.push_str(&format!("Key file: {}\n", file.display()));
+    }
+    out
 }
 
 pub(super) fn human_vocabulary(entries: &[VocabularyEntry]) -> String {
@@ -309,37 +358,27 @@ pub(super) fn human_status(report: &StatusReport) -> String {
     };
     let model = &report.model;
     let mut model_line = format!(
-        "{} ({}){}",
+        "{}, language: {}",
         model.name,
-        model.language,
-        if model.installed {
-            ""
-        } else {
-            ", not installed"
-        }
+        human_language(&model.language)
     );
-    if let Some(preparing) = &model.preparing {
-        model_line.push_str(&format!(
-            "; preparing {preparing} ({} MB)",
-            model.downloaded_bytes / 1_000_000
-        ));
-    }
     if let Some(error) = &model.error {
         model_line.push_str(&format!("; error: {error}"));
     }
+    let api_key = api_key_text(model.api_key.as_ref());
     let features = &report.features;
     let permissions = &report.permissions;
     let permission_line = if permissions.ready {
         "ready".to_string()
     } else {
         format!(
-            "microphone {}, accessibility {}, model {}",
+            "microphone {}, accessibility {}, API key {}",
             permissions.microphone,
             permissions.accessibility,
             if permissions.transcription_model {
-                "ready"
+                "set"
             } else {
-                "missing"
+                "not set"
             }
         )
     };
@@ -354,6 +393,7 @@ pub(super) fn human_status(report: &StatusReport) -> String {
          Capture      {capture}{pending}\n\
          Meeting      {meeting}\n\
          Model        {model_line}\n\
+         API key      {api_key}\n\
          Features     meetings {}, release mic while idle {}, history {}\n\
          Permissions  {permission_line}\n\
          Window       {window}\n\

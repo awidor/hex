@@ -437,11 +437,6 @@ pub fn apply(
         }
         "labs.standalone_special_keys" => candidate.repair_special_keys(),
         "labs.section_key_alone" => candidate.repair_section_key(),
-        "labs.parakeet_ultra" if !candidate.labs.parakeet_ultra => {
-            if let Some(why) = crate::labs::Feature::ParakeetUltra.off_refusal(settings) {
-                return Err(invalid(name, why));
-            }
-        }
         "history_retention" => effects.push(Effect::HistoryRetention(candidate.history_retention)),
         "show_dock_icon" => effects.push(Effect::DockIcon),
         "updates.channel" => effects.push(Effect::CheckForUpdates),
@@ -457,10 +452,10 @@ pub fn apply(
 /// Validates every `key: value` in `values` against `settings` and returns
 /// the settings to save, all or none (`hex settings apply`, the Home Manager
 /// module). Values are JSON: booleans, numbers, `null` for `none`, objects
-/// and arrays for json settings, text for the rest. `transcription.model`
-/// and `transcription.language` select a model, as `hex model use` would,
-/// without needing it installed. Keys that depend on each other (a
-/// double-tap-only start and its shortcut) apply in any order.
+/// and arrays for json settings, text for the rest. `transcription.language`
+/// sets the language Scribe is told to expect, as `hex model use` would, and
+/// `transcription.model` takes only `scribe_v3`. Keys that depend on each
+/// other (a double-tap-only start and its shortcut) apply in any order.
 pub fn apply_all(
     settings: &AppSettings,
     values: &serde_json::Map<String, Value>,
@@ -547,7 +542,7 @@ fn invalid(name: &str, why: &str) -> ControlError {
     )
 }
 
-/// A mode's speech choice must name a model and a language it supports.
+/// A mode's speech choice must name a language Scribe can be told.
 fn validate_mode_speech(
     name: &str,
     mode: &crate::app_settings::DictationMode,
@@ -602,10 +597,6 @@ fn parse(key: &Key, raw: &str, shortcuts: &ShortcutRules) -> Result<Value, Contr
             Ok(if name == "meetings.calendar.lead_minutes" {
                 let minutes: u8 = choice.parse().expect("lead choices are numbers");
                 debug_assert!(CALENDAR_LEAD_MINUTES.contains(&minutes));
-                Value::from(minutes)
-            } else if name == "labs.unload_idle_minutes" {
-                let minutes: u32 = choice.parse().expect("idle choices are numbers");
-                debug_assert!(crate::app_settings::UNLOAD_IDLE_MINUTES.contains(&minutes));
                 Value::from(minutes)
             } else {
                 Value::String((*choice).into())
@@ -893,25 +884,36 @@ mod tests {
         .unwrap()
         .settings;
         assert!(settings.labs.app_model_switching);
-        let modes = r#"[{"name":"Spanish","applications":["Notes"],"speech":{"model":"parakeet_v3","language":"es"}}]"#;
+        let modes = r#"[{"name":"Spanish","applications":["Notes"],"speech":{"model":"scribe_v3","language":"es"}}]"#;
         let change = apply(&settings, "dictation_processing.modes", modes, &rules()).unwrap();
         assert_eq!(
             change.settings.dictation_processing.modes[0].speech,
             Some(crate::app_settings::KeyboardModelChoice {
-                model: crate::transcription::models::TranscriptionModelId::ParakeetV3,
+                model: crate::transcription::models::TranscriptionModelId::ScribeV3,
                 language: "es".into(),
             })
         );
+        // A mode saved by an older Hex names a model this one no longer
+        // has; it keeps its language.
+        let older = r#"[{"name":"Japanese","speech":{"model":"parakeet_v3","language":"ja"}}]"#;
+        let change = apply(&settings, "dictation_processing.modes", older, &rules()).unwrap();
+        assert_eq!(
+            change.settings.dictation_processing.modes[0]
+                .speech
+                .as_ref()
+                .map(|speech| (speech.model.as_str(), speech.language.as_str())),
+            Some(("scribe_v3", "ja"))
+        );
         let invalid =
-            r#"[{"name":"Japanese","speech":{"model":"parakeet_unified_en","language":"ja"}}]"#;
+            r#"[{"name":"Japanese","speech":{"model":"scribe_v3","language":"japanese"}}]"#;
         assert!(
             apply(&settings, "dictation_processing.modes", invalid, &rules()).is_err(),
-            "a language the model lacks was accepted"
+            "a language Scribe can't be told was accepted"
         );
     }
 
     #[test]
-    fn keyboard_model_switching_settings_map_sources_to_a_model_and_its_language() {
+    fn keyboard_model_switching_settings_map_sources_to_a_language() {
         let settings = apply(
             &AppSettings::default(),
             "keyboard_model_switching.enabled",
@@ -924,7 +926,7 @@ mod tests {
         let change = apply(
             &settings,
             "keyboard_model_switching.mappings",
-            r#"{"com.apple.keylayout.Spanish":{"model":"parakeet_v3","language":"es"}}"#,
+            r#"{"com.apple.keylayout.Spanish":{"model":"scribe_v3","language":"es"}}"#,
             &rules(),
         )
         .unwrap();
@@ -935,15 +937,15 @@ mod tests {
                 .mappings
                 .get("com.apple.keylayout.Spanish"),
             Some(&crate::app_settings::KeyboardModelChoice {
-                model: crate::transcription::models::TranscriptionModelId::ParakeetV3,
+                model: crate::transcription::models::TranscriptionModelId::ScribeV3,
                 language: "es".into(),
             })
         );
         for invalid in [
-            r#"{"Spanish":"parakeet_v3"}"#,
-            r#"{"Spanish":{"model":"unknown-model","language":"es"}}"#,
-            r#"{"Japanese":{"model":"parakeet_unified_en","language":"ja"}}"#,
-            r#"{"ABC":{"model":"apple_speech","language":"en"}}"#,
+            r#"{"Spanish":"scribe_v3"}"#,
+            r#"{"Spanish":{"model":"scribe_v3"}}"#,
+            r#"{"Spanish":{"model":"scribe_v3","language":"spanish"}}"#,
+            r#"{"ABC":{"model":"scribe_v3","language":"en-US"}}"#,
         ] {
             assert!(
                 apply(
@@ -1024,12 +1026,19 @@ mod tests {
                 "{key}={value}"
             );
         }
-        assert_eq!(
-            apply(&settings, "transcription.model", "parakeet_v2", &rules())
-                .unwrap_err()
-                .code,
-            "read-only"
-        );
+        // The selection is set with `hex model use` or `settings apply`.
+        for (key, value) in [
+            ("transcription.model", "scribe_v3"),
+            ("transcription.language", "de"),
+        ] {
+            let error = apply(&settings, key, value, &rules()).unwrap_err();
+            assert_eq!(error.code, "read-only", "{key}");
+            assert!(
+                error.message.contains("hex model use scribe_v3"),
+                "{}",
+                error.message
+            );
+        }
         assert_eq!(
             apply(&settings, "bogus", "1", &rules()).unwrap_err().code,
             "unknown-setting"
@@ -1512,8 +1521,9 @@ mod tests {
             &values(
                 r#"{"double_tap_only": true, "double_tap_lock": true,
                     "dictation_hotkey": "option+space", "sound_effect_volume": 0.4,
-                    "microphone": null, "transcription.model": "parakeet_v3",
-                    "transcription.language": "de"}"#,
+                    "microphone": null, "transcription.model": "scribe_v3",
+                    "transcription.language": "de", "scribe.numbers_format": "words",
+                    "scribe.no_verbatim": true}"#,
             ),
             &rules(),
         )
@@ -1524,15 +1534,164 @@ mod tests {
             "option+space"
         );
         assert_eq!(change.settings.sound_effect_volume, 0.4);
-        assert_eq!(change.settings.transcription.model.as_str(), "parakeet_v3");
+        assert_eq!(change.settings.transcription.model.as_str(), "scribe_v3");
         assert_eq!(change.settings.transcription.language, "de");
+        assert_eq!(
+            change.settings.scribe.numbers_format,
+            crate::transcription::scribe::NumbersFormat::Words
+        );
+        assert!(change.settings.scribe.no_verbatim);
+        // The language alone is enough: there is one model.
+        let language = apply_all(
+            &settings,
+            &values(r#"{"transcription.language": "yue"}"#),
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(language.settings.transcription.language, "yue");
 
         for refused in [
             r#"{"sound_effects": false, "no_such_setting": 1}"#,
             r#"{"sound_effects": false, "sound_effect_volume": 7}"#,
             r#"{"transcription.model": "no_such_model"}"#,
+            r#"{"transcription.language": "cantonese"}"#,
+            r#"{"sound_effects": false, "scribe.final_text": "both"}"#,
         ] {
             assert!(apply_all(&settings, &values(refused), &rules()).is_err());
+        }
+        // A model Hex once ran on this computer is refused by name, with the
+        // id that works.
+        let error = apply_all(
+            &settings,
+            &values(r#"{"transcription.model": "parakeet_v3"}"#),
+            &rules(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "unknown-model");
+        assert!(error.message.contains("`scribe_v3`"), "{}", error.message);
+    }
+
+    #[test]
+    fn scribe_settings_are_a_switch_and_two_choices() {
+        use crate::transcription::scribe::{FinalText, NumbersFormat};
+        let settings = AppSettings::default();
+        let read = |settings: &AppSettings, key: &str| get(settings, key).unwrap().remove(0);
+        assert_eq!(
+            read(&settings, "scribe.no_verbatim").value,
+            Value::Bool(false)
+        );
+        assert_eq!(read(&settings, "scribe.numbers_format").value, "auto");
+        assert_eq!(read(&settings, "scribe.final_text").value, "batch");
+        assert_eq!(get(&settings, "scribe").unwrap().len(), 3);
+
+        let change = apply(&settings, "scribe.no_verbatim", "on", &rules()).unwrap();
+        assert!(change.settings.scribe.no_verbatim);
+        assert!(change.changed(&settings));
+        assert_eq!(
+            apply(&settings, "scribe.no_verbatim", "sometimes", &rules())
+                .unwrap_err()
+                .code,
+            "invalid-value"
+        );
+
+        for format in NumbersFormat::ALL {
+            let change = apply(
+                &settings,
+                "scribe.numbers_format",
+                format.as_str(),
+                &rules(),
+            )
+            .unwrap();
+            assert_eq!(change.settings.scribe.numbers_format, format);
+            assert_eq!(
+                read(&change.settings, "scribe.numbers_format").value,
+                format.as_str()
+            );
+        }
+        for text in FinalText::ALL {
+            let change = apply(&settings, "scribe.final_text", text.as_str(), &rules()).unwrap();
+            assert_eq!(change.settings.scribe.final_text, text);
+            assert_eq!(
+                read(&change.settings, "scribe.final_text").value,
+                text.as_str()
+            );
+        }
+        let change = apply(&settings, "scribe.final_text", "Live", &rules()).unwrap();
+        assert_eq!(change.settings.scribe.final_text, FinalText::Live);
+        for (key, value) in [
+            ("scribe.numbers_format", "roman"),
+            ("scribe.final_text", "both"),
+        ] {
+            let error = apply(&settings, key, value, &rules()).unwrap_err();
+            assert_eq!(error.code, "invalid-value", "{key}={value}");
+            assert!(
+                error.message.contains("expected one of"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    /// The registry offers every value the settings types have, so a new
+    /// one can't be left out of `hex settings`.
+    #[test]
+    fn scribe_choices_offer_every_value() {
+        use crate::transcription::scribe::{FinalText, NumbersFormat};
+        let choices = |name: &str| {
+            let key = keys().find(|key| key.key == name).unwrap();
+            let Kind::Choice(choices) = key.kind else {
+                panic!("{name} is a choice");
+            };
+            choices.to_vec()
+        };
+        assert_eq!(
+            choices("scribe.numbers_format"),
+            NumbersFormat::ALL.map(NumbersFormat::as_str)
+        );
+        assert_eq!(
+            choices("scribe.final_text"),
+            FinalText::ALL.map(FinalText::as_str)
+        );
+    }
+
+    /// Settings that only made sense for models on this computer are gone.
+    #[test]
+    fn settings_for_models_on_this_computer_are_gone() {
+        let settings = AppSettings::default();
+        for gone in [
+            "transcription_device",
+            "transcription_recents",
+            "labs.unload_idle",
+            "labs.model_in_place",
+            "labs.parakeet_ultra",
+        ] {
+            assert_eq!(
+                get(&settings, gone).unwrap_err().code,
+                "unknown-setting",
+                "{gone}"
+            );
+            assert_eq!(
+                apply(&settings, gone, "on", &rules()).unwrap_err().code,
+                "unknown-setting",
+                "{gone}"
+            );
+        }
+        for setting in list(&settings) {
+            let about = setting.about.to_lowercase();
+            for word in [
+                "gguf",
+                "download",
+                "on-device",
+                "offline",
+                "local transcription",
+            ] {
+                assert!(
+                    !about.contains(word),
+                    "`{}` still says `{word}`: {}",
+                    setting.key,
+                    setting.about
+                );
+            }
         }
     }
 }

@@ -23,7 +23,7 @@ use super::controls::{
 };
 use super::lists::{LIST_COLUMN_PL, list_row, remove_button, source_list};
 use super::models::{self, Target};
-use super::{Menu, Ui, speech_model};
+use super::{Menu, Ui, speech_language};
 use crate::app_settings::{AppSettings, DictationMode};
 use crate::application_catalog::InstalledApplication;
 use crate::desktop::file_dialog::{Choice, Dialog, Filter, Pending, Target as DialogTarget};
@@ -853,8 +853,8 @@ fn basics(
     card(p, "basics-card", rows)
 }
 
-/// The selected mode's speech model and language, while Labs › Switch model
-/// with app is on; None leaves the Modes pane exactly as it was.
+/// The selected mode's language, while Labs › Switch model with app is on;
+/// None leaves the Modes pane exactly as it was.
 fn speech_row(
     ui: &Ui,
     p: Paint,
@@ -862,7 +862,7 @@ fn speech_row(
     current: &DictationMode,
     layer: &mut Vec<El>,
 ) -> Option<El> {
-    if !speech_model::enabled(ui) {
+    if !speech_language::enabled(ui) {
         return None;
     }
     let suffix = match selection {
@@ -870,24 +870,18 @@ fn speech_row(
         Selection::Custom(index) => index.to_string(),
     };
     let key = format!("mode-speech-{suffix}");
-    let model_key = format!("mode-speech-model-{suffix}");
-    let language_key = format!("mode-speech-language-{suffix}");
-    Some(speech_model::setting(
+    let select_key = format!("mode-speech-language-{suffix}");
+    Some(speech_language::setting(
         ui,
         p,
-        speech_model::SpeechRow {
+        speech_language::LanguageRow {
             key: &key,
-            model_key: &model_key,
-            language_key: &language_key,
-            title: tr("Speech model"),
+            select_key: &select_key,
+            title: tr("Language"),
             description: None,
             choice: current.speech.clone(),
-            model_menu: Menu::ModeSpeechModel(selection),
-            language_menu: Menu::ModeSpeechLanguage(selection),
+            menu: Menu::ModeSpeechLanguage(selection),
         },
-        // A new choice starts on the model's last-used language, or the
-        // saved one when that model has no recent choice.
-        |_, fallback| fallback.to_owned(),
         move |ui, choice| {
             update_mode(ui, |mode| mode.speech = choice);
         },

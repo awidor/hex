@@ -52,6 +52,33 @@ line_icon!(
     ]
 );
 line_icon!(
+    KEY,
+    "hex-row-key",
+    [
+        "M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z",
+        "M16.5 7.5h.01",
+    ]
+);
+line_icon!(
+    CHECKS,
+    "hex-row-checks",
+    ["M18 6 7 17l-5-5", "m22 10-7.5 7.5L13 16"]
+);
+line_icon!(
+    ERASER,
+    "hex-row-eraser",
+    [
+        "m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21",
+        "M22 21H7",
+        "m5 11 9 9",
+    ]
+);
+line_icon!(
+    HASH,
+    "hex-row-hash",
+    ["M4 9h16", "M4 15h16", "M10 3 8 21", "M16 3l-2 18"]
+);
+line_icon!(
     LANGUAGES,
     "hex-row-languages",
     [

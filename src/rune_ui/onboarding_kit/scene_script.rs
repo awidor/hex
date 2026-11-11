@@ -237,8 +237,6 @@ pub(crate) struct Script<'a> {
     pub(crate) people: Vec<Person<'a>>,
     /// The red status pill under the header.
     pub(crate) pill: Option<&'a str>,
-    /// The line under `"Without Hex"`.
-    pub(crate) lead: &'a str,
     pub(crate) ops: Vec<Op<'a>>,
     pub(crate) with: Triumph<'a>,
     take: OnceLock<&'static Take>,
@@ -426,7 +424,6 @@ struct Parser<'a> {
     boss: Option<Person<'a>>,
     sides: Vec<Person<'a>>,
     pill: Option<&'a str>,
-    lead: Option<&'a str>,
     ops: Vec<Op<'a>>,
     hex: Option<&'a str>,
     cheers: Vec<Cheer<'a>>,
@@ -435,21 +432,10 @@ struct Parser<'a> {
     /// What's in the field, to check deletes, sends and autocorrect.
     draft: String,
     labels: Vec<&'a str>,
-    /// A sketch: `"Without Hex"` alone, which ends at `end`.
-    sketch: bool,
 }
 
 /// Parses a scene file, or reports every mistake in it.
 pub(crate) fn parse(src: &str) -> Result<Script<'_>, ParseErrors> {
-    parse_as(src, false)
-}
-
-/// Parses a sketch: a scene with no `with`, which ends at `end`.
-pub(crate) fn parse_sketch(src: &str) -> Result<Script<'_>, ParseErrors> {
-    parse_as(src, true)
-}
-
-fn parse_as(src: &str, sketch: bool) -> Result<Script<'_>, ParseErrors> {
     let mut p = Parser {
         errors: Vec::new(),
         line: 0,
@@ -459,7 +445,6 @@ fn parse_as(src: &str, sketch: bool) -> Result<Script<'_>, ParseErrors> {
         boss: None,
         sides: Vec::new(),
         pill: None,
-        lead: None,
         ops: Vec::new(),
         hex: None,
         cheers: Vec::new(),
@@ -467,7 +452,6 @@ fn parse_as(src: &str, sketch: bool) -> Result<Script<'_>, ParseErrors> {
         typed: None,
         draft: String::new(),
         labels: Vec::new(),
-        sketch,
     };
     for (i, raw) in src.lines().enumerate() {
         p.line = i + 1;
@@ -760,10 +744,10 @@ impl<'a> Parser<'a> {
                 needs("its words, such as `Jay is presenting`")?;
                 self.pill = Some(rest);
             }
+            // Older scenes carry a line no page shows any more.
             "lead" => {
                 self.setting(word)?;
                 needs("the line under the title")?;
-                self.lead = Some(rest);
             }
             "start" => {
                 if self.part >= Part::Without {
@@ -1009,9 +993,6 @@ impl<'a> Parser<'a> {
                 self.ops.push(Op::End { ending, text });
             }
             "with" => {
-                if self.sketch {
-                    return Err("a sketch ends at `end`; it has no `with`".into());
-                }
                 if self.part != Part::Ended {
                     return Err("`with` comes after `end`".into());
                 }
@@ -1138,19 +1119,17 @@ impl<'a> Parser<'a> {
         if self.part < Part::Ended {
             missing("`end`");
         }
-        if !self.sketch {
-            if self.part < Part::With {
-                missing("`with`");
-            }
-            if self.hex.is_none() {
-                missing("`hex` line");
-            }
-            if self.score.is_none() {
-                missing("`score`");
-            }
-            if self.typed.is_none() {
-                missing("`typed` score");
-            }
+        if self.part < Part::With {
+            missing("`with`");
+        }
+        if self.hex.is_none() {
+            missing("`hex` line");
+        }
+        if self.score.is_none() {
+            missing("`score`");
+        }
+        if self.typed.is_none() {
+            missing("`typed` score");
         }
         if !self.errors.is_empty() {
             return Err(ParseErrors(self.errors));
@@ -1162,7 +1141,6 @@ impl<'a> Parser<'a> {
             group: self.group,
             people,
             pill: self.pill,
-            lead: self.lead.unwrap_or("One quick reply by hand."),
             ops: self.ops,
             with: Triumph {
                 hex: self.hex.unwrap_or_default(),

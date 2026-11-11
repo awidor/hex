@@ -379,7 +379,7 @@ fn runs_hex(shim: &Path, home: &Path) -> bool {
         .stdout
         .take()
         .is_some_and(|mut stdout| std::io::Read::read_to_string(&mut stdout, &mut output).is_ok())
-        && output.contains("Local, observable voice")
+        && output.contains("Observable voice dictation")
 }
 
 /// Whether an entry that starts `program` should start `launcher` instead:
@@ -405,7 +405,7 @@ fn entry(executable: &Path) -> String {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=Hex\n\
-         Comment=Local voice dictation\n\
+         Comment=Voice dictation\n\
          Exec={} start\n\
          Icon={}\n\
          Terminal=false\n\

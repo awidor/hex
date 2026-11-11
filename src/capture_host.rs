@@ -67,7 +67,6 @@ use crate::control::{
 #[cfg(target_os = "macos")]
 use crate::dictation::audio::DictationAudio;
 use crate::transcription::engine::TranscriptionEngine;
-use crate::transcription::models::{ModelRuntime, TranscriptionModelId};
 
 // `hex annotate`'s folder commands; Windows has no control transport for
 // them yet.
@@ -651,14 +650,6 @@ fn hex_engine_config() -> EngineConfig {
 /// transcriber; replaced when a listener starts captures.
 static DICTATION_ENGINE: Mutex<Option<Weak<TranscriptionEngine>>> = Mutex::new(None);
 
-/// Points captures at the listener's new engine after a model change.
-#[cfg(not(target_os = "macos"))]
-pub fn use_engine(engine: &Arc<TranscriptionEngine>) {
-    *DICTATION_ENGINE
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = Some(Arc::downgrade(engine));
-}
-
 /// The process's one capture engine (it keeps process-global state), made
 /// the first time captures turn on.
 fn shared_engine(
@@ -692,7 +683,7 @@ struct ChosenTranscriber;
 impl Transcriber for ChosenTranscriber {
     fn transcribe(&self, audio: &RecordedAudio) -> anyhow::Result<Option<TranscriptData>> {
         match crate::app_settings::capture_settings().transcriber {
-            crate::app_settings::CaptureTranscriber::Parakeet => HexTranscriber {
+            crate::app_settings::CaptureTranscriber::Scribe => HexTranscriber {
                 engine: DICTATION_ENGINE
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
@@ -703,7 +694,7 @@ impl Transcriber for ChosenTranscriber {
             crate::app_settings::CaptureTranscriber::Apple => {
                 AppleTranscriber::default().transcribe(audio)
             }
-            // Apple's SpeechAnalyzer is macOS's; elsewhere it is Hex's model.
+            // Apple's SpeechAnalyzer is macOS's; elsewhere it is Scribe.
             #[cfg(not(target_os = "macos"))]
             crate::app_settings::CaptureTranscriber::Apple => HexTranscriber {
                 engine: DICTATION_ENGINE
@@ -716,8 +707,8 @@ impl Transcriber for ChosenTranscriber {
     }
 }
 
-/// Word-timed transcription on the dictation engine's loaded model. It holds
-/// the engine weakly, so a capture still writing never keeps it alive.
+/// Word-timed transcription through the dictation engine. It holds the
+/// engine weakly, so a capture still writing never keeps it alive.
 struct HexTranscriber {
     engine: Option<Weak<TranscriptionEngine>>,
 }
@@ -732,7 +723,7 @@ impl Transcriber for HexTranscriber {
         let samples = if audio.sample_rate == SAMPLE_RATE {
             audio.samples.clone()
         } else {
-            crate::dictation::try_resample_for_parakeet(&audio.samples, audio.sample_rate)
+            crate::dictation::try_resample_to_16k(&audio.samples, audio.sample_rate)
                 .map_err(|error| anyhow::anyhow!(error))?
         };
         let (_, selection) = crate::app_settings::transcription_selection();
@@ -742,7 +733,7 @@ impl Transcriber for HexTranscriber {
             source: "hex".into(),
             model: Some(selection.model.as_str().into()),
             text,
-            words: corrected_words(words, word_lag(selection.model)),
+            words: word_timings(words),
             ..TranscriptData::default()
         }))
     }
@@ -762,7 +753,7 @@ fn transcribe_words(
     selection: &crate::transcription::models::TranscriptionSelection,
     samples: Vec<f32>,
 ) -> Result<(String, Vec<TimedWord>)> {
-    let transcript = crate::parakeet::transcribe_with_words(engine, selection, samples)?;
+    let transcript = crate::macos_dictation::transcribe_with_words(engine, selection, samples)?;
     let words = transcript
         .words
         .into_iter()
@@ -777,7 +768,7 @@ fn transcribe_words(
 
 /// The clip's text and words, as one foreground request on the Linux or
 /// Windows listener's engine: after the dictation already sent, never inside
-/// a live stream. Its model is whatever the listener has loaded.
+/// a live stream. Its language is the listener's.
 #[cfg(not(target_os = "macos"))]
 fn transcribe_words(
     engine: &Weak<TranscriptionEngine>,
@@ -815,70 +806,16 @@ fn transcribe_words(
     Ok((text, words))
 }
 
-/// How late a model's word times run, in ms: the median against Apple's
-/// SpeechAnalyzer on 36 real captures (fitted on half, checked on the
-/// other half; no drift, and the 30 s chunk seams cost nothing). Starts run
-/// later after a pause.
-#[derive(Debug, PartialEq)]
-struct WordLag {
-    start: i64,
-    /// For a word whose gap since the previous word's end is at least
-    /// `pause`, and for the first word.
-    start_after_pause: i64,
-    pause: i64,
-    end: i64,
-}
-
-/// Each measured model with the pinned file it was measured on. A model or
-/// file without an entry keeps its raw times: changing the pin drops the
-/// correction until it is measured again (a test fails to say so).
-const WORD_LAGS: &[(TranscriptionModelId, &str, WordLag)] = &[(
-    TranscriptionModelId::ParakeetUnifiedEnglish,
-    // parakeet-unified-en-0.6b-Q8_0.gguf, measured 2026-10-25.
-    "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
-    WordLag {
-        start: 280,
-        start_after_pause: 520,
-        pause: 250,
-        end: 195,
-    },
-)];
-
-fn word_lag(model: TranscriptionModelId) -> Option<&'static WordLag> {
-    let ModelRuntime::Gguf(artifact) = crate::transcription::models::definition(model).runtime
-    else {
-        return None;
-    };
-    WORD_LAGS
-        .iter()
-        .find(|(id, sha256, _)| *id == model && *sha256 == artifact.sha256)
-        .map(|(_, _, lag)| lag)
-}
-
-/// The model's words in ms from the clip's start, moved earlier by `lag`.
-/// Pauses are judged on the raw times. Times stay at 0 or later, each word
-/// ends no earlier than it starts, and starts and ends never go backwards.
-/// Neighbours may overlap a little, as Apple's times do: starts move further
-/// than ends.
-fn corrected_words(words: Vec<TimedWord>, lag: Option<&WordLag>) -> Vec<WordTiming> {
-    let mut previous_end: Option<i64> = None;
+/// The model's words in ms from the clip's start, as a capture stores them.
+/// Times stay at 0 or later, each word ends no earlier than it starts, and
+/// starts and ends never go backwards.
+fn word_timings(words: Vec<TimedWord>) -> Vec<WordTiming> {
     let (mut floor_t0, mut floor_t1) = (0, 0);
     words
         .into_iter()
         .map(|word| {
-            let (mut t0, mut t1) = (word.start_ms, word.end_ms);
-            if let Some(lag) = lag {
-                let paused = previous_end.is_none_or(|end| t0 - end >= lag.pause);
-                previous_end = Some(t1);
-                t0 -= if paused {
-                    lag.start_after_pause
-                } else {
-                    lag.start
-                };
-                t1 -= lag.end;
-            }
-            let t0 = t0.max(floor_t0);
-            let t1 = t1.max(t0).max(floor_t1);
+            let t0 = word.start_ms.max(floor_t0);
+            let t1 = word.end_ms.max(t0).max(floor_t1);
             (floor_t0, floor_t1) = (t0, t1);
             WordTiming {
                 t0: t0 as u64,
@@ -5461,48 +5398,18 @@ mod tests {
     }
 
     #[test]
-    fn word_times_move_earlier_by_the_measured_lag() {
-        let lag = word_lag(TranscriptionModelId::ParakeetUnifiedEnglish);
-        let corrected = corrected_words(
-            words(&[
-                // The first word counts as after a pause.
-                ("one", 600, 900),
-                ("two", 900, 1_200),
-                // 400 ms since "two" ended: a pause.
-                ("three", 1_600, 1_900),
-                // 200 ms: not a pause.
-                ("four", 2_100, 2_150),
-            ]),
-            lag,
-        );
-        assert_eq!(
-            times(&corrected),
-            [(80, 705), (620, 1_005), (1_080, 1_705), (1_820, 1_955)]
-        );
-        assert_eq!(corrected[2].text, "three");
+    fn word_times_are_kept_and_never_go_backwards() {
+        let kept = word_timings(words(&[("one", 600, 900), ("two", 900, 1_200)]));
+        assert_eq!(times(&kept), [(600, 900), (900, 1_200)]);
+        assert_eq!(kept[1].text, "two");
 
-        // Times stay at 0 or later and never go backwards.
-        let clamped = corrected_words(
-            words(&[("a", 100, 150), ("b", 1_000, 1_300), ("c", 900, 950)]),
-            lag,
-        );
-        assert_eq!(times(&clamped), [(0, 0), (480, 1_105), (620, 1_105)]);
-    }
-
-    #[test]
-    fn only_a_measured_model_and_file_is_corrected() {
-        for (model, _, lag) in WORD_LAGS {
-            assert_eq!(
-                word_lag(*model),
-                Some(lag),
-                "{} has a new pinned file: measure its word lag again \
-                 (docs/plans/capture-in-hex.md) before keeping the correction",
-                model.as_str()
-            );
-        }
-        assert_eq!(word_lag(TranscriptionModelId::ParakeetV3), None);
-        assert_eq!(word_lag(TranscriptionModelId::AppleSpeech), None);
-        let raw = corrected_words(words(&[("one", 600, 900), ("two", 900, 1_200)]), None);
-        assert_eq!(times(&raw), [(600, 900), (900, 1_200)]);
+        // A negative start, an end before its start, and a word that starts
+        // before the one ahead of it are all pulled into order.
+        let clamped = word_timings(words(&[
+            ("a", -50, 150),
+            ("b", 1_000, 900),
+            ("c", 800, 950),
+        ]));
+        assert_eq!(times(&clamped), [(0, 150), (1_000, 1_000), (1_000, 1_000)]);
     }
 }

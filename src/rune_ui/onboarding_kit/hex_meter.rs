@@ -215,24 +215,16 @@ fn rounded_hex(centre: Point, radius: f32, corner: f32) -> Vec<Point> {
 
 /// The Hex logo for `"Hex is ready"`, built outside in `age` seconds after
 /// the page appears: the outline, the middle line, then the filled centre,
-/// each springing in from just beyond its place. `handed`: the outline
-/// arrives from the download pill already drawn. Reduced Motion shows it
+/// each springing in from just beyond its place. Reduced Motion shows it
 /// built.
-pub(crate) fn hex_logo(
-    p: Paint,
-    key: &str,
-    size: f32,
-    age: f64,
-    reduced: bool,
-    handed: bool,
-) -> El {
+pub(crate) fn hex_logo(p: Paint, key: &str, size: f32, age: f64, reduced: bool) -> El {
     let pad = 12.0;
     let total = size + 2.0 * pad;
     let half = size * 0.5;
     let centre = [total * 0.5, total * 0.5];
     let line = LINE * half;
     let stage = |i: usize| -> (f32, f32) {
-        if reduced || (i == 0 && handed) {
+        if reduced {
             return (1.0, 1.0);
         }
         let t = age - BUILD_AT[i];

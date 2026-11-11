@@ -1,6 +1,6 @@
 //! The runtime thread: it applies the window's and the menu bar's requests,
-//! prepares and commits the transcription model, follows the keyboard layout
-//! switcher, and publishes what the window and the menu bar show.
+//! saves the transcription language, follows the keyboard layout and app
+//! switchers, and publishes what the window and the menu bar show.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
@@ -13,10 +13,12 @@ use crate::desktop::events::EventReader;
 use crate::desktop::host::{
     DesktopListenerSnapshot, DesktopShortcuts, DesktopTranscriptionSnapshot,
 };
-use crate::transcription::models::{ModelPreparationStage, TranscriptionSelection};
-use crate::transcription::preparation::TranscriptionPreparation;
+use crate::transcription::models::TranscriptionSelection;
 
 use super::{Published, RUNTIME_TICK, Request, Shared, UPDATER, lock, update_status};
+
+/// The listener's status while no ElevenLabs API key is set.
+const API_KEY_REQUIRED: &str = "API key required";
 
 pub(super) fn run_runtime(
     settings: AppSettings,
@@ -44,9 +46,8 @@ pub(super) fn run_runtime(
                 .then(|| crate::transcription::app_model_switching::startup_choice(&settings))
                 .flatten(),
         ),
-        automatic_preparation: false,
         settings,
-        preparation: TranscriptionPreparation::default(),
+        transcription_error: None,
         recognition_start,
         listener_failure,
         event_reader,
@@ -84,24 +85,44 @@ pub(super) fn run_runtime(
             }
         }
     }
-    runtime.preparation.cancel();
 }
 
-/// Two selections that load the same thing.
-pub(super) fn same_model_and_language(
-    left: &TranscriptionSelection,
-    right: &TranscriptionSelection,
-) -> bool {
-    left.model == right.model && left.language == right.language
+/// Saves `selection` on top of the current `settings.json`, so a change made
+/// outside the runtime survives, and returns the settings as saved. The
+/// listener's dictation worker follows the saved selection
+/// (`recognition::listen`).
+#[cfg(not(test))]
+fn save_selection(
+    _current: &AppSettings,
+    selection: TranscriptionSelection,
+) -> Result<AppSettings, String> {
+    let mut settings = AppSettings::load().map_err(|error| format!("{error:#}"))?;
+    if settings.transcription != selection {
+        settings
+            .save_transcription(selection)
+            .map_err(|error| format!("{error:#}"))?;
+    }
+    Ok(settings)
+}
+
+/// Unit tests never read or write this computer's settings.
+#[cfg(test)]
+fn save_selection(
+    current: &AppSettings,
+    selection: TranscriptionSelection,
+) -> Result<AppSettings, String> {
+    let mut settings = current.clone();
+    settings.transcription = selection;
+    Ok(settings)
 }
 
 pub(super) struct Runtime {
     pub(super) settings: AppSettings,
-    pub(super) preparation: TranscriptionPreparation,
+    /// Why the last chosen selection could not be saved, until one is.
+    pub(super) transcription_error: Option<String>,
     pub(super) keyboard_switcher: crate::transcription::keyboard_model_switching::Switcher,
     /// Labs › Switch model with app: the foreground application's mode choice.
     pub(super) app_switcher: crate::transcription::app_model_switching::Switcher,
-    pub(super) automatic_preparation: bool,
     /// Starts the listener once setup is ready; `None` once started.
     pub(super) recognition_start: Option<SyncSender<()>>,
     /// Why the listener stopped, once it has.
@@ -122,33 +143,11 @@ impl Runtime {
         match request {
             Request::ChooseModel { model, language } => {
                 self.manual_choice();
-                let selection = TranscriptionSelection { model, language };
-                self.preparation.start(selection, false);
-            }
-            Request::SelectInstalledModel(model) => {
-                self.reload_settings();
-                self.manual_choice();
-                self.preparation
-                    .start(self.settings.transcription_for_model(model), true);
-            }
-            Request::UseInstalledSelection(selection) => {
-                self.manual_choice();
-                // `hex model use` replies "already in use" on the same test.
-                if !same_model_and_language(&selection, &self.settings.transcription) {
-                    self.preparation.start(selection, true);
-                }
+                self.apply_transcription(TranscriptionSelection { model, language });
             }
             Request::InputSourceChanged(source) => {
-                if self
-                    .keyboard_switcher
-                    .source_changed(source, Instant::now())
-                {
-                    self.supersede_automatic();
-                }
-            }
-            Request::CancelModel => {
-                self.manual_choice();
-                self.preparation.cancel();
+                self.keyboard_switcher
+                    .source_changed(source, Instant::now());
             }
             Request::ReloadSettings => self.reload_settings(),
             Request::Desktop(_)
@@ -161,43 +160,42 @@ impl Runtime {
     fn reload_settings(&mut self) {
         match AppSettings::load() {
             Ok(settings) => {
-                if self
-                    .keyboard_switcher
-                    .configure(settings.keyboard_model_switching.clone(), Instant::now())
-                {
-                    self.supersede_automatic();
-                }
-                if self
-                    .app_switcher
-                    .configure(settings.labs.app_model_switching)
-                {
-                    self.supersede_automatic();
-                }
+                self.keyboard_switcher
+                    .configure(settings.keyboard_model_switching.clone(), Instant::now());
+                self.app_switcher
+                    .configure(settings.labs.app_model_switching);
                 self.settings = settings;
             }
             Err(error) => tracing::warn!(%error, "could not reload settings"),
         }
     }
 
+    /// A choice made by hand cancels a keyboard or app switch still waiting
+    /// for its debounce, so it cannot later undo the choice.
     fn manual_choice(&mut self) {
         self.keyboard_switcher.manual_choice();
         self.app_switcher.manual_choice();
-        if self.automatic_preparation {
-            self.preparation.cancel();
-            self.automatic_preparation = false;
+    }
+
+    /// Saves `selection`, which the listener uses from its next dictation.
+    /// There is nothing to download or load.
+    fn apply_transcription(&mut self, selection: TranscriptionSelection) {
+        let saved = crate::transcription::models::validate(&selection)
+            .map_err(|error| format!("{error:#}"))
+            .and_then(|_| save_selection(&self.settings, selection));
+        match saved {
+            Ok(settings) => {
+                self.settings = settings;
+                self.transcription_error = None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not select the transcription language");
+                self.transcription_error = Some(error);
+            }
         }
     }
 
-    fn supersede_automatic(&mut self) {
-        // A source being cycled through must not cancel a manual operation.
-        // Manual work is superseded only when the debounced choice is due.
-        if self.automatic_preparation {
-            self.preparation.cancel();
-            self.automatic_preparation = false;
-        }
-    }
-
-    /// Commits a prepared model and starts a listener that waited for setup.
+    /// Follows the switchers and starts a listener that waited for setup.
     fn tick(&mut self) {
         self.tick_at(Instant::now());
     }
@@ -206,17 +204,11 @@ impl Runtime {
     fn switch_with_keyboard(&mut self, now: Instant) {
         if let Some(choice) = self.keyboard_switcher.take_due(now) {
             let selection = TranscriptionSelection {
+                model: choice.model,
                 language: choice.language,
-                ..self.settings.transcription_for_model(choice.model)
             };
-            if !same_model_and_language(&selection, &self.settings.transcription) {
-                self.preparation.start(selection, true);
-                self.automatic_preparation = true;
-            } else {
-                // The debounced choice keeps the current model, but must
-                // still prevent an older manual preparation replacing it.
-                self.preparation.cancel();
-                self.automatic_preparation = false;
+            if selection != self.settings.transcription {
+                self.apply_transcription(selection);
             }
         }
     }
@@ -233,15 +225,13 @@ impl Runtime {
         if !self.settings.labs.app_model_switching {
             return;
         }
-        if self.app_switcher.observe(
+        self.app_switcher.observe(
             observation,
             |application| {
                 crate::transcription::app_model_switching::mode_choice(&self.settings, application)
             },
             now,
-        ) {
-            self.supersede_automatic();
-        }
+        );
         if crate::transcription::engine::dictation_busy() {
             return;
         }
@@ -251,12 +241,10 @@ impl Runtime {
         else {
             return;
         };
-        let selection = TranscriptionSelection {
+        self.apply_transcription(TranscriptionSelection {
+            model: choice.model,
             language: choice.language,
-            ..self.settings.transcription_for_model(choice.model)
-        };
-        self.preparation.start(selection, true);
-        self.automatic_preparation = true;
+        });
     }
 
     /// Reads the listener's newest events, bounded by `EventReader`'s
@@ -282,25 +270,9 @@ impl Runtime {
             ),
             now,
         );
-        if let Some(result) = self.preparation.poll() {
-            self.automatic_preparation = false;
-            let result = result.and_then(|selection| {
-                crate::transcription::models::validate(&selection).map_err(|e| e.to_string())?;
-                let mut settings = AppSettings::load().map_err(|e| format!("{e:#}"))?;
-                settings
-                    .save_transcription(selection)
-                    .map_err(|e| format!("{e:#}"))?;
-                self.settings = settings;
-                Ok(())
-            });
-            match result {
-                Ok(()) => self.preparation.set_error(None),
-                Err(error) => {
-                    tracing::warn!(%error, "could not select transcription model");
-                    self.preparation.set_error(Some(error));
-                }
-            }
-        }
+        // Setup is the permissions and an ElevenLabs API key, which every
+        // transcription needs; the listener starts by itself once both are
+        // there.
         if self.recognition_start.is_some()
             && crate::desktop::onboarding::status(&self.settings.transcription).ready()
             && let Some(start) = self.recognition_start.take()
@@ -310,7 +282,6 @@ impl Runtime {
     }
 
     fn publish(&self) -> Published {
-        let preparation = self.preparation.status();
         let failure = lock(&self.listener_failure).clone();
         let running = self.recognition_start.is_none() && failure.is_none();
         Published {
@@ -321,6 +292,8 @@ impl Runtime {
                     "Stopped"
                 } else if running {
                     "Enabled"
+                } else if !crate::transcription::models::is_ready() {
+                    API_KEY_REQUIRED
                 } else {
                     "Waiting for setup"
                 }
@@ -334,18 +307,12 @@ impl Runtime {
                 shortcuts_configurable: false,
             },
             transcription: DesktopTranscriptionSnapshot {
-                downloaded_bytes: preparation.downloaded_bytes,
-                error: preparation.error.clone(),
-                preparation_stage: preparation
-                    .model
-                    .map(|_| ModelPreparationStage::Downloading),
+                error: self.transcription_error.clone(),
                 selection: self.settings.transcription.clone(),
-                preparing: preparation.model,
             },
             update_status: update_status(),
             update_notes: UPDATER.get().and_then(crate::updater::Updater::notes),
             settings: self.settings.clone(),
-            preparation,
         }
     }
 }

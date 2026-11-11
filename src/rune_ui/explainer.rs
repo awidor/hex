@@ -146,10 +146,9 @@ impl Explainer {
 }
 
 /// Opens the modal over General, alone: it ends a shortcut recording and
-/// closes the model picker and any menu.
+/// closes the other sheets and any menu.
 pub(super) fn open(ui: &mut Ui) {
     super::settings::cancel_capture(ui);
-    super::picker::close(ui);
     super::sound_sets::close(ui);
     super::vocabulary::close(ui);
     ui.open = None;

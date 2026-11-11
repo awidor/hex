@@ -2,13 +2,13 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use color_eyre::eyre::{Result, WrapErr, bail, eyre};
+use color_eyre::eyre::{Result, WrapErr, bail};
 use serde::Serialize;
 
 use crate::desktop::events::{EventLog, VoiceEvent, now_ms};
@@ -16,6 +16,7 @@ use crate::desktop::events::{EventLog, VoiceEvent, now_ms};
 mod dictation;
 mod discovery;
 mod http;
+mod key;
 mod meeting_events;
 pub(crate) mod processing;
 mod streams;
@@ -27,8 +28,9 @@ mod transcriptions;
 pub use discovery::call_developer;
 use discovery::*;
 pub use discovery::{call_control, running_pid};
-pub(crate) use discovery::{error_code, post_wav};
+pub(crate) use discovery::{error_code, error_message, post_wav};
 use http::*;
+pub use key::KeyGate;
 pub use processing::Processing;
 pub use timestamps::Timestamps;
 use transcriptions::transcribe_audio;
@@ -58,8 +60,6 @@ const MAX_CONTROL_BYTES: usize = 64 * 1024;
 const MAX_DICTATION_SOURCE_BYTES: usize = 128;
 
 type HealthProvider = Arc<dyn Fn() -> HealthResponse + Send + Sync>;
-type ModelPreparer =
-    Box<dyn FnOnce(Arc<AtomicBool>, Arc<AtomicU64>, Arc<AtomicU8>) -> Result<()> + Send + 'static>;
 
 pub struct LocalApi {
     shutdown: Arc<AtomicBool>,
@@ -93,7 +93,6 @@ struct HttpContext {
     health: HealthProvider,
     events: EventLog,
     auth_limiter: AuthObservationLimiter,
-    model_preparing: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     transcription: crate::transcription::service::TranscriptionServiceHandle,
     developer_control: Option<SyncSender<crate::control::developer_control::DeveloperCall>>,
@@ -104,6 +103,7 @@ struct HttpContext {
     meeting_events: meeting_events::Source,
     processing: processing::Processing,
     timestamps: timestamps::Timestamps,
+    key: KeyGate,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -123,6 +123,9 @@ struct CapabilitiesResponse {
     dictation_partials: bool,
     /// `/streams` (`docs/streams.md`).
     streams: bool,
+    /// An ElevenLabs API key is set, so audio can be transcribed. Without
+    /// one, `/transcriptions` and `/streams` answer `409 api-key-missing`.
+    api_key_set: bool,
     /// `process=global` on `/transcriptions` and `/streams/{id}/finish`
     /// (Labs › Process API transcripts).
     output_processing: bool,
@@ -150,6 +153,9 @@ pub struct LocalApiOptions {
     /// Where `/streams` finds its engine; the running app's shared engine
     /// when unset.
     pub(crate) stream_engine: Option<crate::transcription::stream::EngineSource>,
+    /// Whether an ElevenLabs API key is set; this process's own key unless
+    /// a test says otherwise.
+    pub(crate) key: KeyGate,
 }
 
 impl LocalApi {
@@ -269,7 +275,6 @@ impl LocalApi {
             health,
             events: worker_events.clone(),
             auth_limiter: AuthObservationLimiter::default(),
-            model_preparing: Arc::new(AtomicBool::new(false)),
             shutdown: worker_shutdown,
             transcription,
             developer_control: options.developer_control,
@@ -282,6 +287,7 @@ impl LocalApi {
             meeting_events,
             processing: options.processing,
             timestamps: options.timestamps,
+            key: options.key,
         };
         let (ready, readiness) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
@@ -576,16 +582,6 @@ fn http_worker(pending: Arc<Mutex<Receiver<TcpStream>>>, context: Arc<HttpContex
                     tracing::debug!(%error, "local API client disconnected");
                 }
             }
-            RequestAction::Prepare { model, selection } => {
-                stream_model_prepare(
-                    &mut stream,
-                    model,
-                    selection,
-                    context.model_preparing.clone(),
-                    &context.shutdown,
-                    context.transcription.clone(),
-                );
-            }
             RequestAction::Transcribe {
                 selection,
                 content_length,
@@ -675,12 +671,7 @@ fn handle_request(request: HttpRequest, context: &HttpContext) -> RequestAction 
         return RequestAction::Respond(HttpResponse::empty(401));
     }
     if request.method == "POST" && path == "/transcriptions" {
-        return transcription_action(
-            request,
-            &context.transcription,
-            &context.processing,
-            &context.timestamps,
-        );
+        return transcription_action(request, context);
     }
     if request.method == "POST" && path == "/dev/control" {
         return developer_control_action(request, context.developer_control.is_some());
@@ -744,6 +735,7 @@ fn handle_request(request: HttpRequest, context: &HttpContext) -> RequestAction 
                 service_capture: context.dictations.available(),
                 dictation_partials: context.dictations.partials_available(),
                 streams: true,
+                api_key_set: context.key.is_set(),
                 output_processing: context.processing.available(),
                 developer_control: context.developer_control.is_some(),
                 control: context.control.is_some(),
@@ -758,46 +750,17 @@ fn handle_request(request: HttpRequest, context: &HttpContext) -> RequestAction 
             },
             None => HttpResponse::code(503, "vitals-unavailable"),
         },
-        ("GET", "/models") => match model_infos(&request.path) {
-            Ok(models) => HttpResponse::json(200, &models),
-            Err(code) => HttpResponse::code(400, code),
-        },
-        ("POST", path) => {
-            let Some(id) = model_prepare_path(path) else {
-                return RequestAction::Respond(HttpResponse::code(404, "not_found"));
-            };
-            let Ok(id) = id.parse::<crate::transcription::models::TranscriptionModelId>() else {
-                return RequestAction::Respond(HttpResponse::code(404, "unknown-model"));
-            };
-            let model = crate::transcription::models::definition(id);
-            if !model.available() {
-                return RequestAction::Respond(HttpResponse::code(404, "unknown-model"));
-            }
-            let Ok(selection) = installation_selection(model, &request.path) else {
-                return RequestAction::Respond(HttpResponse::code(400, "unsupported-model"));
-            };
-            if context
-                .model_preparing
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
-                return RequestAction::Respond(HttpResponse::code(409, "prepare-busy"));
-            }
-            return RequestAction::Prepare { model, selection };
-        }
         _ => HttpResponse::code(404, "not_found"),
     };
     RequestAction::Respond(response)
 }
 
-fn transcription_action(
-    request: HttpRequest,
-    transcription: &crate::transcription::service::TranscriptionServiceHandle,
-    processing: &processing::Processing,
-    timestamps: &timestamps::Timestamps,
-) -> RequestAction {
+/// Everything `POST /transcriptions` decides from its headers and query,
+/// before any audio is read: the lab gates, the declared WAV, the selection,
+/// and that there is an API key to send the audio to ElevenLabs with.
+fn transcription_action(request: HttpRequest, context: &HttpContext) -> RequestAction {
     let guard = match processing::wanted(&request.path) {
-        Ok(wanted) => match processing::gate(wanted, processing) {
+        Ok(wanted) => match processing::gate(wanted, &context.processing) {
             Ok(guard) => guard,
             Err(response) => return RequestAction::Respond(response),
         },
@@ -807,7 +770,7 @@ fn transcription_action(
         Ok(requested) => requested,
         Err(code) => return RequestAction::Respond(HttpResponse::code(400, code)),
     };
-    if let Err(response) = timestamps::gate(requested, timestamps) {
+    if let Err(response) = timestamps::gate(requested, &context.timestamps) {
         return RequestAction::Respond(response);
     }
     if !request.has_content_type("audio/wav") {
@@ -821,23 +784,14 @@ fn transcription_action(
     }
     let selection = match transcription_selection(&request.path) {
         Ok(selection) => selection,
-        Err(code) => {
-            return RequestAction::Respond(HttpResponse::code(400, code));
-        }
+        Err(response) => return RequestAction::Respond(response),
     };
-    let model = crate::transcription::models::definition(selection.model);
-    let prepared = match model.runtime {
-        crate::transcription::models::ModelRuntime::Gguf(_) => {
-            crate::transcription::models::is_verified(model)
-        }
-        crate::transcription::models::ModelRuntime::AppleSpeech => {
-            crate::transcription::models::is_installed(model, &selection.language)
-        }
-    };
-    if !prepared {
-        return RequestAction::Respond(HttpResponse::code(409, "model-not-ready"));
+    // Nothing is prepared ahead of a request: a key is all it needs, and
+    // without one the upload would only fail at ElevenLabs.
+    if let Err(response) = context.key.gate() {
+        return RequestAction::Respond(response);
     }
-    let Some(admission) = transcription.admit_audio() else {
+    let Some(admission) = context.transcription.admit_audio() else {
         return RequestAction::Respond(HttpResponse::code(429, "queue-full"));
     };
     RequestAction::Transcribe {
@@ -1008,35 +962,43 @@ fn control(
     }
 }
 
+/// The selection a request's query asks for: Scribe, in `language` (Auto
+/// when left out). `model` is optional; when given it must be `scribe_v3`.
 fn transcription_selection(
     path: &str,
-) -> std::result::Result<crate::transcription::models::TranscriptionSelection, &'static str> {
-    let query = selection_query(path)?;
-    let model = query.model.ok_or("unknown-model")?;
-    validate_selection(model, query.into_language())
+) -> std::result::Result<crate::transcription::models::TranscriptionSelection, HttpResponse> {
+    use crate::transcription::models::{TranscriptionModelId, TranscriptionSelection, validate};
+    let query = selection_query(path).map_err(|code| HttpResponse::code(400, code))?;
+    let model = match query.model.as_deref() {
+        None => TranscriptionModelId::default(),
+        Some(model) => model.parse().map_err(|_| unknown_model(model))?,
+    };
+    let selection = TranscriptionSelection {
+        model,
+        language: query
+            .language
+            .unwrap_or_else(|| TranscriptionSelection::default().language),
+    };
+    validate(&selection)
+        .map_err(|error| HttpResponse::refusal(400, "unsupported-language", &error.to_string()))?;
+    Ok(selection)
 }
 
-fn validate_selection(
-    model: crate::transcription::models::TranscriptionModelId,
-    language: String,
-) -> std::result::Result<crate::transcription::models::TranscriptionSelection, &'static str> {
-    let selection = crate::transcription::models::TranscriptionSelection { model, language };
-    crate::transcription::models::validate(&selection).map_err(|_| "unsupported-model")?;
-    Ok(selection)
+/// `400 unknown-model` for a `model` that is not the one Hex has. Models
+/// Hex once ran on this computer (`parakeet_v3`, …) are answered the same.
+fn unknown_model(model: &str) -> HttpResponse {
+    let only = crate::transcription::models::TranscriptionModelId::default();
+    HttpResponse::refusal(
+        400,
+        "unknown-model",
+        &format!("unknown model `{model}`; the only model is `{only}`"),
+    )
 }
 
 #[derive(Default)]
 struct SelectionQuery {
-    model: Option<crate::transcription::models::TranscriptionModelId>,
+    model: Option<String>,
     language: Option<String>,
-}
-
-impl SelectionQuery {
-    fn into_language(self) -> String {
-        self.language.unwrap_or_else(|| {
-            crate::transcription::models::TranscriptionSelection::default().language
-        })
-    }
 }
 
 fn selection_query(path: &str) -> std::result::Result<SelectionQuery, &'static str> {
@@ -1046,14 +1008,15 @@ fn selection_query(path: &str) -> std::result::Result<SelectionQuery, &'static s
         .unwrap_or_default();
     let mut selection = SelectionQuery::default();
     for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        match name.as_ref() {
-            "model" if selection.model.is_none() => selection.model = value.parse().ok(),
-            "language" if selection.language.is_none() => {
-                selection.language = Some(value.into_owned());
-            }
-            "model" | "language" => return Err("invalid-request"),
-            _ => {}
+        let slot = match name.as_ref() {
+            "model" => &mut selection.model,
+            "language" => &mut selection.language,
+            _ => continue,
+        };
+        if slot.is_some() {
+            return Err("invalid-request");
         }
+        *slot = Some(value.into_owned());
     }
     Ok(selection)
 }
@@ -1074,232 +1037,6 @@ fn client_aborted(stream: &TcpStream) -> bool {
         }
         Err(_) => true,
     }
-}
-
-fn model_prepare_path(path: &str) -> Option<&str> {
-    let id = path.strip_prefix("/models/")?.strip_suffix("/prepare")?;
-    (!id.is_empty() && !id.contains('/')).then_some(id)
-}
-
-fn model_infos(path: &str) -> std::result::Result<Vec<ModelInfo>, &'static str> {
-    let language = selection_query(path)?.into_language();
-    if !crate::transcription::models::is_known_language(&language) {
-        return Err("unsupported-language");
-    }
-    Ok(crate::transcription::models::all_models()
-        .into_iter()
-        .filter(|model| model.available())
-        .map(|model| {
-            let managed = matches!(
-                model.runtime,
-                crate::transcription::models::ModelRuntime::AppleSpeech
-            );
-            let installed = crate::transcription::models::is_installed(model, &language);
-            ModelInfo {
-                id: model.id.as_str(),
-                name: model.name,
-                installed,
-                verified: managed && installed || crate::transcription::models::is_verified(model),
-                managed,
-                download_bytes: model.download_bytes(),
-                languages: model.presentation_languages(),
-                supports_language_detection: model.supports_language_detection,
-                source: crate::control::model_source(model, &language),
-            }
-        })
-        .collect())
-}
-
-fn installation_selection(
-    model: &crate::transcription::models::ModelDefinition,
-    path: &str,
-) -> std::result::Result<crate::transcription::models::TranscriptionSelection, &'static str> {
-    let query = selection_query(path)?;
-    validate_selection(model.id, query.into_language())
-}
-
-fn stream_model_prepare(
-    stream: &mut TcpStream,
-    model: &'static crate::transcription::models::ModelDefinition,
-    selection: crate::transcription::models::TranscriptionSelection,
-    preparing: Arc<AtomicBool>,
-    shutdown: &AtomicBool,
-    transcription: crate::transcription::service::TranscriptionServiceHandle,
-) {
-    let preparer: ModelPreparer = Box::new(move |canceled, downloaded, stage| {
-        if matches!(
-            model.runtime,
-            crate::transcription::models::ModelRuntime::Gguf(_)
-        ) {
-            crate::transcription::models::download_with_stage_progress(
-                model,
-                &canceled,
-                &downloaded,
-                &stage,
-            )?;
-        }
-        if canceled.load(Ordering::Acquire) {
-            bail!("model preparation canceled");
-        }
-        crate::transcription::models::ModelPreparationStage::Loading.store(&stage);
-        transcription
-            .prepare(selection, canceled)
-            .map_err(|error| eyre!("model preparation failed: {error:?}"))
-    });
-    stream_model_prepare_with(stream, model, preparing, shutdown, preparer);
-}
-
-fn stream_model_prepare_with(
-    stream: &mut TcpStream,
-    model: &'static crate::transcription::models::ModelDefinition,
-    preparing: Arc<AtomicBool>,
-    shutdown: &AtomicBool,
-    preparer: ModelPreparer,
-) {
-    if let Err(error) = write_sse_headers(stream) {
-        preparing.store(false, Ordering::Release);
-        tracing::debug!(%error, "model preparation client disconnected before streaming");
-        return;
-    }
-    let canceled = Arc::new(AtomicBool::new(false));
-    let downloaded = Arc::new(AtomicU64::new(0));
-    let initial_stage = if matches!(
-        model.runtime,
-        crate::transcription::models::ModelRuntime::AppleSpeech
-    ) {
-        crate::transcription::models::ModelPreparationStage::Loading as u8
-    } else {
-        crate::transcription::models::ModelPreparationStage::Downloading as u8
-    };
-    let stage = Arc::new(AtomicU8::new(initial_stage));
-    let (result_sender, result_receiver) = mpsc::sync_channel(1);
-    let guard = PrepareGuard(preparing);
-    let worker = thread::spawn({
-        let canceled = canceled.clone();
-        let downloaded = downloaded.clone();
-        let stage = stage.clone();
-        move || {
-            let _guard = guard;
-            let result = preparer(canceled, downloaded, stage);
-            let _ = result_sender.send(result);
-        }
-    });
-
-    let mut last_stage = None;
-    let mut last_downloaded = u64::MAX;
-    let mut last_heartbeat = Instant::now();
-    let total_bytes = model.download_bytes().unwrap_or(0);
-    let mut connected = true;
-    let mut finished = None;
-    let result = loop {
-        if shutdown.load(Ordering::Acquire) {
-            canceled.store(true, Ordering::Release);
-            connected = false;
-            break None;
-        }
-        let current_stage = crate::transcription::models::ModelPreparationStage::load(&stage);
-        let current_downloaded = downloaded.load(Ordering::Relaxed);
-        let progress = match current_stage {
-            crate::transcription::models::ModelPreparationStage::Downloading
-                if last_stage != Some(current_stage) || last_downloaded != current_downloaded =>
-            {
-                Some(serde_json::json!({
-                    "type": "downloading",
-                    "downloadedBytes": current_downloaded,
-                    "totalBytes": total_bytes,
-                }))
-            }
-            crate::transcription::models::ModelPreparationStage::Verifying
-                if last_stage != Some(current_stage) =>
-            {
-                Some(serde_json::json!({ "type": "verifying" }))
-            }
-            crate::transcription::models::ModelPreparationStage::Loading
-                if last_stage != Some(current_stage) =>
-            {
-                Some(serde_json::json!({ "type": "loading" }))
-            }
-            _ => None,
-        };
-        if let Some(progress) = progress
-            && let Err(error) = write_sse(stream, &progress)
-        {
-            tracing::debug!(%error, "model preparation client disconnected");
-            canceled.store(true, Ordering::Release);
-            connected = false;
-            break None;
-        }
-        last_stage = Some(current_stage);
-        last_downloaded = current_downloaded;
-        // The last stage has been reported, so a finished result ends here.
-        if let Some(result) = finished.take() {
-            break Some(result);
-        }
-        if last_heartbeat.elapsed() >= Duration::from_secs(5) {
-            if stream.write_all(b": keep-alive\n\n").is_err() || stream.flush().is_err() {
-                canceled.store(true, Ordering::Release);
-                connected = false;
-                break None;
-            }
-            last_heartbeat = Instant::now();
-        }
-        match result_receiver.recv_timeout(Duration::from_millis(100)) {
-            Ok(result) => finished = Some(result),
-            Err(RecvTimeoutError::Disconnected) => {
-                finished = Some(Err(eyre!("model preparer stopped unexpectedly")));
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-        }
-    };
-    if worker.join().is_err() {
-        tracing::error!(model = model.id.as_str(), "model preparer panicked");
-        if connected {
-            let _ = write_sse(
-                stream,
-                &model_prepare_error("internal", "Model preparation stopped unexpectedly."),
-            );
-        }
-        return;
-    }
-    let Some(result) = result else {
-        return;
-    };
-    match result {
-        Ok(()) => {
-            let _ = write_sse(stream, &serde_json::json!({ "type": "ok" }));
-        }
-        Err(error) if canceled.load(Ordering::Acquire) => {
-            tracing::debug!(%error, model = model.id.as_str(), "model preparation canceled");
-            let _ = write_sse(
-                stream,
-                &model_prepare_error("cancelled", "Model preparation was cancelled."),
-            );
-        }
-        Err(error) => {
-            let failed_stage = crate::transcription::models::ModelPreparationStage::load(&stage);
-            let code = match failed_stage {
-                crate::transcription::models::ModelPreparationStage::Downloading => {
-                    "download-failed"
-                }
-                crate::transcription::models::ModelPreparationStage::Verifying => {
-                    "verification-failed"
-                }
-                crate::transcription::models::ModelPreparationStage::Loading => "load-failed",
-            };
-            tracing::error!(%error, model = model.id.as_str(), code, "model preparation failed");
-            let _ = write_sse(
-                stream,
-                &model_prepare_error(code, "The model could not be prepared."),
-            );
-        }
-    }
-}
-
-fn model_prepare_error(code: &str, message: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "error",
-        "error": { "code": code, "message": message },
-    })
 }
 
 impl AuthObservationLimiter {
@@ -1323,10 +1060,6 @@ impl AuthObservationLimiter {
 
 enum RequestAction {
     Respond(HttpResponse),
-    Prepare {
-        model: &'static crate::transcription::models::ModelDefinition,
-        selection: crate::transcription::models::TranscriptionSelection,
-    },
     Transcribe {
         selection: crate::transcription::models::TranscriptionSelection,
         content_length: usize,
@@ -1366,30 +1099,6 @@ enum DictationAction {
     Partials,
     Audio,
     Heartbeat,
-}
-
-struct PrepareGuard(Arc<AtomicBool>);
-
-impl Drop for PrepareGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelInfo {
-    id: &'static str,
-    name: &'static str,
-    installed: bool,
-    verified: bool,
-    managed: bool,
-    download_bytes: Option<u64>,
-    languages: Vec<&'static str>,
-    supports_language_detection: bool,
-    /// `found: owner/name@abcdef1` (another app's download, used where it
-    /// is), `imported`, `hex`, or `download`.
-    source: String,
 }
 
 fn current_health() -> HealthResponse {
@@ -1458,52 +1167,24 @@ mod tests {
         // procwatch reads a process's footprint only on macOS.
         #[cfg(not(target_os = "macos"))]
         assert!(vitals.starts_with("HTTP/1.1 503"));
-        let models = request(document.port, Some(&document.token), "/models");
-        let models: Vec<serde_json::Value> = serde_json::from_str(response_body(&models)).unwrap();
-        assert_eq!(
-            models.len(),
-            crate::transcription::models::MODELS
-                .iter()
-                .filter(|model| model.available())
-                .count()
-        );
-        assert_eq!(models[0]["id"], "parakeet_unified_en");
-        assert!(models[0]["downloadBytes"].is_number());
-        assert_eq!(models[0]["supportsLanguageDetection"], false);
-        let whisper = models
-            .iter()
-            .find(|model| model["id"] == "whisper_large_v3_turbo")
-            .unwrap();
-        assert_eq!(whisper["supportsLanguageDetection"], true);
-        assert!(
-            whisper["languages"]
-                .as_array()
-                .unwrap()
-                .contains(&"auto".into())
-        );
-        assert!(models.iter().all(|model| model["id"] != "apple_speech"));
-        let unknown_model = request_with_method(
-            document.port,
-            Some(&document.token),
-            "POST",
-            "/models/unknown/prepare",
-        );
-        assert!(unknown_model.starts_with("HTTP/1.1 404"));
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(response_body(&unknown_model)).unwrap()["code"],
-            "unknown-model"
-        );
-        let disabled_model = request_with_method(
-            document.port,
-            Some(&document.token),
-            "POST",
-            "/models/apple_speech/prepare?language=en",
-        );
-        assert!(disabled_model.starts_with("HTTP/1.1 404"));
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(response_body(&disabled_model)).unwrap()["code"],
-            "unknown-model"
-        );
+        // Unit tests have no API key, and say so.
+        assert_eq!(capabilities["apiKeySet"], false);
+        // There is nothing to list, download, or prepare: the model routes
+        // are gone.
+        for (method, path) in [
+            ("GET", "/models"),
+            ("GET", "/models?language=en"),
+            ("POST", "/models/scribe_v3/prepare"),
+            ("POST", "/models/parakeet_v3/prepare?language=en"),
+        ] {
+            let gone = request_with_method(document.port, Some(&document.token), method, path);
+            assert!(gone.starts_with("HTTP/1.1 404"), "{method} {path}: {gone}");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(response_body(&gone)).unwrap()["code"],
+                "not_found",
+                "{method} {path}"
+            );
+        }
 
         api.shutdown();
         assert!(!discovery_path.exists());
@@ -1593,7 +1274,7 @@ mod tests {
             post_to(
                 port,
                 &client_token,
-                r#"{"version":4,"command":"meeting-record","title":"Standup"}"#,
+                r#"{"version":5,"command":"meeting-record","title":"Standup"}"#,
             )
         });
         let call = controls.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1615,9 +1296,9 @@ mod tests {
             ControlReply::done("Started recording")
         );
 
-        let unauthorized = post("hex_wrong", r#"{"version":4,"command":"status"}"#);
+        let unauthorized = post("hex_wrong", r#"{"version":5,"command":"status"}"#);
         assert!(unauthorized.starts_with("HTTP/1.1 401"));
-        let unknown = post(&token, r#"{"version":4,"command":"explode"}"#);
+        let unknown = post(&token, r#"{"version":5,"command":"explode"}"#);
         assert!(unknown.starts_with("HTTP/1.1 400"));
         // Another protocol version is answered without reaching the app.
         for body in [
@@ -1871,23 +1552,61 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    #[test]
-    fn model_preparation_rejects_disabled_apple_speech() {
-        let apple = crate::transcription::models::definition(
-            crate::transcription::models::TranscriptionModelId::AppleSpeech,
-        );
-        assert!(installation_selection(apple, "/models/apple_speech/prepare?language=de").is_err());
+    fn refusal(response: HttpResponse) -> (u16, serde_json::Value) {
+        (
+            response.status,
+            serde_json::from_slice(&response.body).unwrap(),
+        )
     }
 
     #[test]
-    fn model_selection_accepts_auto_only_for_detection_models() {
-        assert!(
-            transcription_selection("/transcriptions?model=whisper_large_v3_turbo&language=auto")
-                .is_ok()
-        );
-        assert!(
-            transcription_selection("/transcriptions?model=parakeet_v2&language=auto").is_err()
-        );
+    fn the_model_parameter_is_optional_and_only_scribe() {
+        use crate::transcription::models::{AUTO_LANGUAGE, TranscriptionModelId};
+        for (path, language) in [
+            ("/transcriptions", AUTO_LANGUAGE),
+            ("/transcriptions?timestamps=word", AUTO_LANGUAGE),
+            ("/transcriptions?model=scribe_v3", AUTO_LANGUAGE),
+            ("/transcriptions?language=auto", AUTO_LANGUAGE),
+            ("/transcriptions?language=de", "de"),
+            ("/transcriptions?model=scribe_v3&language=yue", "yue"),
+        ] {
+            let selection = transcription_selection(path)
+                .unwrap_or_else(|response| panic!("{path}: {:?}", refusal(response)));
+            assert_eq!(selection.model, TranscriptionModelId::ScribeV3, "{path}");
+            assert_eq!(selection.language, language, "{path}");
+        }
+        // A model Hex once ran on this computer is unknown, and the answer
+        // names the one that works.
+        for model in ["parakeet_v3", "whisper_large_v3_turbo", "apple_speech", ""] {
+            let path = format!("/transcriptions?model={model}&language=en");
+            let (status, body) = refusal(transcription_selection(&path).unwrap_err());
+            assert_eq!(status, 400, "{model:?}");
+            assert_eq!(body["code"], "unknown-model", "{model:?}");
+            assert!(
+                body["message"].as_str().unwrap().contains("`scribe_v3`"),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_language_is_auto_or_a_code_scribe_can_be_told() {
+        for language in ["english", "EN", "en-US", ""] {
+            let path = format!("/transcriptions?model=scribe_v3&language={language}");
+            let (status, body) = refusal(transcription_selection(&path).unwrap_err());
+            assert_eq!(status, 400, "{language:?}");
+            assert_eq!(body["code"], "unsupported-language", "{language:?}");
+            assert!(body["message"].as_str().unwrap().contains("auto"), "{body}");
+        }
+        for repeated in [
+            "/transcriptions?model=scribe_v3&model=scribe_v3",
+            "/transcriptions?model=nope&model=scribe_v3",
+            "/transcriptions?language=en&language=de",
+        ] {
+            let (status, body) = refusal(transcription_selection(repeated).unwrap_err());
+            assert_eq!(status, 400, "{repeated}");
+            assert_eq!(body, serde_json::json!({ "code": "invalid-request" }));
+        }
     }
 
     #[test]
@@ -2030,7 +1749,7 @@ mod tests {
             let mut stream = TcpStream::connect(address).unwrap();
             stream
                 .write_all(
-                    b"POST /transcriptions?model=parakeet_v2 HTTP/1.1\r\nContent-Type: audio/wav\r\nContent-Length: 3\r\n\r\nabc",
+                    b"POST /transcriptions?model=scribe_v3 HTTP/1.1\r\nContent-Type: audio/wav\r\nContent-Length: 3\r\n\r\nabc",
                 )
                 .unwrap();
         });
@@ -2064,65 +1783,23 @@ mod tests {
         drop(second_client);
     }
 
-    #[test]
-    fn transcription_route_requires_wav_and_a_safe_declared_length() {
-        let (_service, transcription) =
-            crate::transcription::service::TranscriptionService::start().unwrap();
-        let action = transcription_action(
-            HttpRequest {
-                method: "POST".into(),
-                path: "/transcriptions?model=parakeet_v2".into(),
-                authorization: None,
-                dictation_token: None,
-                stream_token: None,
-                content_type: Some("audio/webm".into()),
-                content_length: Some(10),
-                body_prefix: Vec::new(),
-            },
-            &transcription,
-            &Processing::default(),
-            &Timestamps::default(),
-        );
-        let RequestAction::Respond(response) = action else {
-            panic!("unsupported audio must be rejected before upload");
-        };
-        assert_eq!(response.status, 415);
-
-        let action = transcription_action(
-            HttpRequest {
-                method: "POST".into(),
-                path: "/transcriptions?model=parakeet_v2".into(),
-                authorization: None,
-                dictation_token: None,
-                stream_token: None,
-                content_type: Some("audio/wav".into()),
-                content_length: Some(MAX_AUDIO_BYTES + 1),
-                body_prefix: Vec::new(),
-            },
-            &transcription,
-            &Processing::default(),
-            &Timestamps::default(),
-        );
-        let RequestAction::Respond(response) = action else {
-            panic!("unsafe body size must be rejected before upload");
-        };
-        assert_eq!(response.status, 413);
-    }
-
-    #[test]
-    fn concurrent_model_preparation_is_rejected_before_streaming() {
-        let directory = temp_directory();
+    /// A context for route decisions, with or without an API key, and the
+    /// service its transcription handle belongs to.
+    fn context(
+        directory: &Path,
+        key: KeyGate,
+    ) -> (
+        crate::transcription::service::TranscriptionService,
+        HttpContext,
+    ) {
         let events = EventLog::create(&directory.join("events.ndjson")).unwrap();
-        let preparing = Arc::new(AtomicBool::new(true));
-        let health: HealthProvider = Arc::new(test_health);
-        let (_service, transcription) =
+        let (service, transcription) =
             crate::transcription::service::TranscriptionService::start().unwrap();
         let context = HttpContext {
             token: "test-token".into(),
-            health,
+            health: Arc::new(test_health),
             events,
             auth_limiter: AuthObservationLimiter::default(),
-            model_preparing: preparing,
             shutdown: Arc::new(AtomicBool::new(false)),
             transcription,
             developer_control: None,
@@ -2133,112 +1810,100 @@ mod tests {
             meeting_events: meeting_events::Source::default(),
             processing: Processing::default(),
             timestamps: Timestamps::default(),
+            key,
         };
-        let action = handle_request(
-            HttpRequest {
-                method: "POST".into(),
-                path: "/models/parakeet_v2/prepare".into(),
-                authorization: Some("Bearer test-token".into()),
-                dictation_token: None,
-                stream_token: None,
-                content_type: None,
-                content_length: None,
-                body_prefix: Vec::new(),
-            },
+        (service, context)
+    }
+
+    fn upload(path: &str, content_type: &str, content_length: usize) -> HttpRequest {
+        HttpRequest {
+            method: "POST".into(),
+            path: path.into(),
+            authorization: Some("Bearer test-token".into()),
+            dictation_token: None,
+            stream_token: None,
+            content_type: Some(content_type.into()),
+            content_length: Some(content_length),
+            body_prefix: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn transcription_route_requires_wav_and_a_safe_declared_length() {
+        let directory = temp_directory();
+        let (_service, context) = context(&directory, KeyGate::gated(|| true));
+        let action = transcription_action(upload("/transcriptions", "audio/webm", 10), &context);
+        let RequestAction::Respond(response) = action else {
+            panic!("unsupported audio must be rejected before upload");
+        };
+        assert_eq!(response.status, 415);
+
+        let action = transcription_action(
+            upload("/transcriptions", "audio/wav", MAX_AUDIO_BYTES + 1),
             &context,
         );
         let RequestAction::Respond(response) = action else {
-            panic!("busy preparation must return a buffered conflict");
+            panic!("unsafe body size must be rejected before upload");
         };
-        assert_eq!(response.status, 409);
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&response.body).unwrap()["code"],
-            "prepare-busy"
-        );
+        assert_eq!(response.status, 413);
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn model_prepare_stream_orders_progress_and_terminal_success() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let client = thread::spawn(move || {
-            let mut stream = TcpStream::connect(address).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            let mut response = String::new();
-            stream.read_to_string(&mut response).unwrap();
-            response
-        });
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
-        let preparing = Arc::new(AtomicBool::new(true));
-        // Each stage outlasts several 100 ms progress polls, so a busy machine
-        // can't skip one.
-        let preparer: ModelPreparer = Box::new(|_, downloaded, stage| {
-            downloaded.store(123, Ordering::Relaxed);
-            thread::sleep(Duration::from_millis(400));
-            crate::transcription::models::ModelPreparationStage::Verifying.store(&stage);
-            thread::sleep(Duration::from_millis(400));
-            crate::transcription::models::ModelPreparationStage::Loading.store(&stage);
-            thread::sleep(Duration::from_millis(400));
-            Ok(())
-        });
-        stream_model_prepare_with(
-            &mut stream,
-            crate::transcription::models::definition(
-                crate::transcription::models::TranscriptionModelId::ParakeetV2,
-            ),
-            preparing.clone(),
-            &AtomicBool::new(false),
-            preparer,
+    fn a_transcription_without_an_api_key_is_refused_before_the_upload() {
+        let directory = temp_directory();
+        let (_service, without_key) = context(&directory, KeyGate::gated(|| false));
+        for path in [
+            "/transcriptions",
+            "/transcriptions?model=scribe_v3&language=de",
+        ] {
+            let action = handle_request(upload(path, "audio/wav", 1024), &without_key);
+            let RequestAction::Respond(response) = action else {
+                panic!("{path}: a request without a key must not read its audio");
+            };
+            let (status, body) = refusal(response);
+            assert_eq!(status, 409, "{path}");
+            assert_eq!(body["code"], "api-key-missing", "{path}");
+            assert!(
+                body["message"].as_str().unwrap().contains("hex key set"),
+                "{body}"
+            );
+        }
+        // What the request itself got wrong is answered first: a key would
+        // not make it valid.
+        let action = handle_request(
+            upload("/transcriptions?model=parakeet_v3", "audio/wav", 1024),
+            &without_key,
         );
-        drop(stream);
-        let response = client.join().unwrap();
-        assert!(response.starts_with("HTTP/1.1 200 OK"));
-        let downloading = response.find("\"type\":\"downloading\"").unwrap();
-        let verifying = response.find("\"type\":\"verifying\"").unwrap();
-        let loading = response.find("\"type\":\"loading\"").unwrap();
-        let ok = response.find("\"type\":\"ok\"").unwrap();
-        assert!(downloading < verifying && verifying < loading && loading < ok);
-        assert!(!preparing.load(Ordering::Acquire));
+        let RequestAction::Respond(response) = action else {
+            panic!("an unknown model must be refused");
+        };
+        assert_eq!(refusal(response).1["code"], "unknown-model");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn a_prepare_that_finishes_at_once_still_reports_its_last_stage() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let client = thread::spawn(move || {
-            let mut stream = TcpStream::connect(address).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            let mut response = String::new();
-            stream.read_to_string(&mut response).unwrap();
-            response
-        });
-        let (mut stream, _) = listener.accept().unwrap();
-        let preparer: ModelPreparer = Box::new(|_, _, stage| {
-            crate::transcription::models::ModelPreparationStage::Loading.store(&stage);
-            Ok(())
-        });
-        stream_model_prepare_with(
-            &mut stream,
-            crate::transcription::models::definition(
-                crate::transcription::models::TranscriptionModelId::ParakeetV2,
-            ),
-            Arc::new(AtomicBool::new(true)),
-            &AtomicBool::new(false),
-            preparer,
-        );
-        drop(stream);
-        let response = client.join().unwrap();
-        let loading = response.find("\"type\":\"loading\"").unwrap();
-        let ok = response.find("\"type\":\"ok\"").unwrap();
-        assert!(loading < ok);
+    fn a_transcription_with_a_key_is_admitted_with_or_without_a_model() {
+        let directory = temp_directory();
+        let (_service, with_key) = context(&directory, KeyGate::gated(|| true));
+        for (path, language) in [
+            ("/transcriptions", "auto"),
+            ("/transcriptions?model=scribe_v3&language=pl", "pl"),
+        ] {
+            let action = handle_request(upload(path, "audio/wav", 1024), &with_key);
+            let RequestAction::Transcribe {
+                selection,
+                content_length,
+                ..
+            } = action
+            else {
+                panic!("{path}: a keyed request must be admitted");
+            };
+            assert_eq!(selection.model.as_str(), "scribe_v3", "{path}");
+            assert_eq!(selection.language, language, "{path}");
+            assert_eq!(content_length, 1024);
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

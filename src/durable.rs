@@ -80,6 +80,29 @@ fn staging_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Streams `path` through SHA-256 and returns the lowercase hex digest.
+pub(crate) fn sha256_hex(path: &Path) -> io::Result<String> {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+
+    let mut file = fs::File::open(path)?;
+    let mut digest = sha2::Sha256::new();
+    // Heap-allocated: a 1 MB array overflows Windows' 1 MB main-thread stack.
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,47 +7,64 @@ use super::live::Page;
 /// The tour state a Linux first-run scene starts from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::rune_ui) enum FirstRun {
-    /// Nothing installed; the recommended model just started downloading.
+    /// A new install: no API key yet.
     Fresh,
-    /// The download is a third of the way.
-    Downloading,
-    /// The download stopped.
-    Failed,
-    /// The model is installed.
+    /// A key was pasted and ElevenLabs is being asked whether it works.
+    Checking,
+    /// ElevenLabs refused the pasted key.
+    Refused,
+    /// The person went on without a key.
+    Skipped,
+    /// An API key is set.
     Ready,
-    /// The model is installed, and the desktop asks before Hex's first
-    /// paste (GNOME and KDE on Wayland).
+    /// An API key is set, and the desktop asks before Hex's first paste
+    /// (GNOME and KDE on Wayland).
     PasteAccess,
 }
 
 pub(in crate::rune_ui) fn first_run(ui: &mut Ui, state: FirstRun, page: Page) {
+    use super::super::api_key;
     *ui = super::super::portal_fixture();
-    onboarding::fixture(ui, crate::desktop::onboarding::Step::Setup, true);
-    match state {
-        FirstRun::Fresh => onboarding::set_downloaded(ui, 8),
-        FirstRun::Downloading => onboarding::set_downloaded(ui, 31),
-        FirstRun::Failed => {
-            if let Some(view) = &mut ui.view {
-                view.transcription.preparing = None;
-                view.transcription.error = Some("The connection was reset.".into());
-            }
-        }
-        FirstRun::Ready | FirstRun::PasteAccess => {
-            ui.picker.installed = Some(vec![ui.settings.transcription.model]);
-            if let Some(view) = &mut ui.view {
-                view.transcription.preparing = None;
-            }
-        }
+    onboarding::fixture(ui, crate::desktop::onboarding::Step::Setup);
+    if matches!(state, FirstRun::Ready | FirstRun::PasteAccess) {
+        ui.api_key.source = api_key::Source::fixture();
     }
     if state == FirstRun::PasteAccess {
         ui.platform.paste = Some(super::super::paste_access::PasteAccess::Ask);
     }
     onboarding::poll(ui);
-    super::live::fixture(ui, page);
+    // Without a key the run holds on the key step, where the states below
+    // happen.
+    let key_set = ui.api_key.is_set();
+    super::live::fixture(ui, if key_set { page } else { Page::Key });
+    match state {
+        FirstRun::Checking | FirstRun::Refused => {
+            ui.api_key
+                .field
+                .replace_text("sk_fixture_key_that_is_typed");
+            super::live::continue_key(ui);
+            if state == FirstRun::Refused {
+                api_key::answer(
+                    ui,
+                    Err("ElevenLabs refused the API key; check it in Settings".into()),
+                );
+            }
+        }
+        FirstRun::Skipped => super::live::skip_key(ui),
+        FirstRun::Fresh | FirstRun::Ready | FirstRun::PasteAccess => return,
+    }
+    onboarding::poll(ui);
+    super::live::fixture_resume(ui, page);
 }
 
+/// A macOS first run at `step`, played to `page`. The key step comes first,
+/// so every page past it has a key.
 pub(in crate::rune_ui) fn mac_first_run(ui: &mut Ui, step: onboarding::MacStep, page: Page) {
     *ui = super::super::mac_fixture();
     onboarding::mac_fixture(ui, step);
+    if page != Page::Key {
+        ui.api_key.source = super::super::api_key::Source::fixture();
+        onboarding::poll(ui);
+    }
     super::live::fixture(ui, page);
 }

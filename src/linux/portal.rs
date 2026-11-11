@@ -759,7 +759,7 @@ fn moved_entry(old: &str) -> String {
 /// `NoDisplay`, not `Hidden`: the portal refuses an app whose entry is Hidden.
 fn desktop_entry(executable: &str, hidden: bool) -> String {
     format!(
-        "[Desktop Entry]\nType=Application\nName=Hex\nComment=Local voice dictation\nExec={}\nIcon={APP_ID}\nTerminal=false\nCategories=Utility;Accessibility;\nStartupWMClass={APP_ID}\n{}{MANAGED_MARK}\n",
+        "[Desktop Entry]\nType=Application\nName=Hex\nComment=Voice dictation\nExec={}\nIcon={APP_ID}\nTerminal=false\nCategories=Utility;Accessibility;\nStartupWMClass={APP_ID}\n{}{MANAGED_MARK}\n",
         exec_argument(executable),
         if hidden { "NoDisplay=true\n" } else { "" }
     )

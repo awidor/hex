@@ -150,16 +150,18 @@ impl CaptureSettings {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureTranscriber {
-    /// The dictation model Hex already has loaded, with word times.
+    /// Scribe, as dictation uses it, with word times. Settings saved by
+    /// upstream Hex name it `parakeet`.
     #[default]
-    Parakeet,
+    #[serde(alias = "parakeet")]
+    Scribe,
     /// Apple's speech recognizer, as Scrawl uses by default.
     Apple,
 }
 
 #[cfg(hex_capture)]
 impl CaptureTranscriber {
-    pub const ALL: [Self; 2] = [Self::Parakeet, Self::Apple];
+    pub const ALL: [Self; 2] = [Self::Scribe, Self::Apple];
 }
 
 /// The saved capture settings (`cfg(hex_capture)` builds).

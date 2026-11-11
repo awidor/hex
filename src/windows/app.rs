@@ -27,11 +27,13 @@ use crate::desktop::host::{
 };
 use crate::desktop::i18n::tr_fill;
 use crate::history::History;
-use crate::transcription::models::{ModelPreparationStage, TranscriptionModelId};
-use crate::transcription::preparation::TranscriptionPreparation;
+use crate::transcription::models::TranscriptionSelection;
 use crate::windows::rune::{Published, Request};
 
 type ListenerResult = std::result::Result<(), String>;
+
+/// The listener's status while no ElevenLabs API key is set.
+const API_KEY_REQUIRED: &str = "API key required";
 
 struct RunningListener {
     stop: Arc<AtomicBool>,
@@ -39,7 +41,6 @@ struct RunningListener {
     worker: JoinHandle<()>,
     /// Saved settings the listener applies in place.
     updates: mpsc::Sender<Box<AppSettings>>,
-    swap_failures: Receiver<crate::transcription::local_transcriber::SwapFailed>,
     /// The tray's and `hex` commands, handled as the shortcut would be.
     commands: mpsc::Sender<crate::windows::dictation::ListenerCommand>,
 }
@@ -51,8 +52,8 @@ impl RunningListener {
     }
 }
 
-/// The Windows runtime: owns the listener, model preparation, OpenCode
-/// catalog, personal transformations, and self-updater.
+/// The Windows runtime: owns the listener, the transcription language,
+/// OpenCode catalog, personal transformations, and self-updater.
 pub(crate) struct WindowsDesktopHost {
     event_path: PathBuf,
     event_reader: EventReader,
@@ -77,15 +78,13 @@ pub(crate) struct WindowsDesktopHost {
     transformations: Arc<crate::personal_commands::TransformationClient>,
     personal_commands: Option<crate::personal_commands::PersonalCommands>,
     personal_commands_checked_at: Instant,
-    preparation: TranscriptionPreparation,
+    /// Why the last chosen language could not be applied.
+    transcription_error: Option<String>,
     keyboard_switcher: crate::transcription::keyboard_model_switching::Switcher,
     /// Labs › Switch model with app: the foreground app's mode choice.
     app_switcher: crate::transcription::app_model_switching::Switcher,
     /// Present only while keyboard model switching is on.
     input_sources: Option<crate::keyboard_input_sources::Watcher>,
-    /// The preparation running is a keyboard switch, which a manual choice
-    /// or a later source change supersedes.
-    automatic_preparation: bool,
     updater: crate::updater::Updater,
     /// The newest foreground window of another app, where the tray's Paste
     /// last dictation goes once its menu has taken the foreground.
@@ -207,7 +206,7 @@ impl WindowsDesktopHost {
         activity.refresh(&mut event_reader);
         let last_completed_at = last_completed_at(event_reader.events().iter());
         let started_at = crate::desktop::events::now_ms();
-        // Known before the first poll, so launching keeps the saved model
+        // Known before the first poll, so launching keeps the saved language
         // instead of applying the current layout's mapping.
         let keyboard_switcher = crate::transcription::keyboard_model_switching::Switcher::new(
             settings.keyboard_model_switching.clone(),
@@ -217,7 +216,7 @@ impl WindowsDesktopHost {
                 .then(crate::keyboard_input_sources::current)
                 .flatten(),
         );
-        // Known before the first poll, so launching keeps the saved model
+        // Known before the first poll, so launching keeps the saved language
         // instead of applying the frontmost app's mode choice.
         let app_switcher = crate::transcription::app_model_switching::Switcher::new(
             settings.labs.app_model_switching,
@@ -248,16 +247,14 @@ impl WindowsDesktopHost {
             transformations: processing.transformations,
             personal_commands: None,
             personal_commands_checked_at: Instant::now(),
-            preparation: TranscriptionPreparation::default(),
+            transcription_error: None,
             keyboard_switcher,
             app_switcher,
             input_sources: None,
-            automatic_preparation: false,
             updater: crate::updater::Updater::start(),
             foreground: ForeignWindow::default(),
             dictations,
         };
-        crate::transcription::models::delete_set_aside();
         host.refresh_personal_commands_host();
         // The microphone stays cold until first-run setup finishes.
         if host.settings.enable_on_launch {
@@ -282,10 +279,12 @@ impl WindowsDesktopHost {
                 }
                 self.remember_listening(self.listen_when_ready);
             }
-            Request::ChooseModel { model, language } => self.choose_model(model, language),
-            Request::CancelModel => {
-                self.manual_choice();
-                self.preparation.cancel();
+            // A failure shows in the window (`transcription_error`).
+            Request::ChooseModel { model, language } => {
+                let _ = self.choose_model(TranscriptionSelection { model, language });
+            }
+            Request::ApplyModel { selection, reply } => {
+                let _ = reply.send(self.choose_model(selection));
             }
             Request::PasteLast => {
                 if let Some(listener) = &self.listener {
@@ -337,10 +336,42 @@ impl WindowsDesktopHost {
         false
     }
 
-    fn choose_model(&mut self, model: TranscriptionModelId, language: String) {
+    fn choose_model(
+        &mut self,
+        selection: TranscriptionSelection,
+    ) -> std::result::Result<(), String> {
         self.manual_choice();
-        let selection = crate::transcription::models::TranscriptionSelection { model, language };
-        self.preparation.start(selection, false);
+        self.apply_transcription(selection)
+    }
+
+    /// Saves `selection` and hands it to the running listener, which uses it
+    /// from the next dictation. There is nothing to download or load. Why it
+    /// could not be applied is returned and kept for the window.
+    fn apply_transcription(
+        &mut self,
+        selection: TranscriptionSelection,
+    ) -> std::result::Result<(), String> {
+        let saved = crate::transcription::models::validate(&selection)
+            .map_err(|error| format!("{error:#}"))
+            .and_then(|_| {
+                let mut candidate = self.settings.clone();
+                candidate.transcription = selection;
+                candidate.save().map_err(|error| {
+                    format!("Could not save transcription selection: {error:#}")
+                })?;
+                Ok(candidate)
+            });
+        match saved {
+            Ok(candidate) => {
+                self.transcription_error = None;
+                self.apply_settings(&candidate);
+                Ok(())
+            }
+            Err(error) => {
+                self.transcription_error = Some(error.clone());
+                Err(error)
+            }
+        }
     }
 
     /// A layout change not yet polled counts as before this choice, so it
@@ -356,23 +387,10 @@ impl WindowsDesktopHost {
         }
         self.keyboard_switcher.manual_choice();
         self.app_switcher.manual_choice();
-        if self.automatic_preparation {
-            self.preparation.cancel();
-            self.automatic_preparation = false;
-        }
     }
 
-    /// A layout being cycled through cancels only automatic work; a manual
-    /// operation is superseded once the debounced choice is due.
-    fn supersede_automatic(&mut self) {
-        if self.automatic_preparation {
-            self.preparation.cancel();
-            self.automatic_preparation = false;
-        }
-    }
-
-    /// Follows the foreground layout while switching is on, and starts the
-    /// installed-only preparation of a mapping once it is due.
+    /// Follows the foreground layout while switching is on, and applies a
+    /// mapping's language once it is due.
     fn switch_with_keyboard(&mut self) {
         let enabled = self.settings.keyboard_model_switching.enabled;
         if enabled != self.input_sources.is_some() {
@@ -382,45 +400,36 @@ impl WindowsDesktopHost {
             .input_sources
             .as_mut()
             .and_then(|watcher| watcher.poll())
-            && self
-                .keyboard_switcher
-                .source_changed(source, Instant::now())
         {
-            self.supersede_automatic();
+            self.keyboard_switcher
+                .source_changed(source, Instant::now());
         }
         let Some(choice) = self.keyboard_switcher.take_due(Instant::now()) else {
             return;
         };
-        let selection = crate::transcription::models::TranscriptionSelection {
+        let selection = TranscriptionSelection {
+            model: choice.model,
             language: choice.language,
-            ..self.settings.transcription_for_model(choice.model)
         };
-        if selection.model != self.settings.transcription.model
-            || selection.language != self.settings.transcription.language
-        {
-            self.preparation.start(selection, true);
-            self.automatic_preparation = true;
-        } else {
-            // The current model stays, but an older manual preparation must
-            // not replace it.
-            self.preparation.cancel();
-            self.automatic_preparation = false;
+        if selection != self.settings.transcription {
+            // A failure shows in the window (`transcription_error`).
+            let _ = self.apply_transcription(selection);
         }
     }
 
-    /// Follows the foreground app while switching is on, and starts the
-    /// installed-only preparation of a mode's speech choice once it is due.
-    /// Hex's own window and a moment with no window in front name no mode,
-    /// so they leave the last match and any switch it scheduled alone. The
-    /// host cannot see a listener recording, so a due switch is held only
-    /// while the shared engine's dictation streams or finishes run.
+    /// Follows the foreground app while switching is on, and applies a
+    /// mode's speech choice once it is due. Hex's own window and a moment
+    /// with no window in front name no mode, so they leave the last match
+    /// and any switch it scheduled alone. The host cannot see a listener
+    /// recording, so a due switch is held only while the shared engine's
+    /// dictation streams or finishes run.
     fn switch_with_app(&mut self) {
         if !self.settings.labs.app_model_switching {
             return;
         }
         let application = foreground_other_process_stem();
         let now = Instant::now();
-        if self.app_switcher.observe(
+        self.app_switcher.observe(
             crate::transcription::app_model_switching::Observation::frontmost(
                 application.as_deref(),
             ),
@@ -428,9 +437,7 @@ impl WindowsDesktopHost {
                 crate::transcription::app_model_switching::mode_choice(&self.settings, application)
             },
             now,
-        ) {
-            self.supersede_automatic();
-        }
+        );
         if crate::transcription::engine::dictation_busy() {
             return;
         }
@@ -440,18 +447,11 @@ impl WindowsDesktopHost {
         else {
             return;
         };
-        let selection = crate::transcription::models::TranscriptionSelection {
+        // A failure shows in the window (`transcription_error`).
+        let _ = self.apply_transcription(TranscriptionSelection {
+            model: choice.model,
             language: choice.language,
-            ..self.settings.transcription_for_model(choice.model)
-        };
-        self.preparation.start(selection, true);
-        self.automatic_preparation = true;
-    }
-
-    fn model_ready(&self) -> bool {
-        let model = crate::transcription::models::definition(self.settings.transcription.model);
-        crate::transcription::models::is_installed(model, &self.settings.transcription.language)
-            && crate::transcription::models::is_verified(model)
+        });
     }
 
     pub(crate) fn start(&mut self) {
@@ -459,20 +459,20 @@ impl WindowsDesktopHost {
         if self.is_running() {
             return;
         }
-        if !self.model_ready() {
-            self.status = "Model required".into();
+        // Every transcription needs the key; until one is set the window and
+        // the tray say so, and `refresh` starts listening once it is.
+        if !crate::transcription::models::is_ready() {
+            self.status = API_KEY_REQUIRED.into();
             return;
         }
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let (result_sender, result_receiver) = mpsc::channel();
         let (updates, update_receiver) = mpsc::channel();
-        let (swap_failure_sender, swap_failures) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
         let event_path = self.event_path.clone();
-        let selection = self.runtime_selection();
+        let selection = self.settings.transcription.clone();
         let config = crate::windows::dictation::WindowsDictationConfig {
-            swap_failures: Some(swap_failure_sender),
             commands: Some(command_receiver),
             dictations: self.dictations.clone(),
             history: self.history.clone(),
@@ -504,7 +504,6 @@ impl WindowsDesktopHost {
                     result: result_receiver,
                     worker,
                     updates,
-                    swap_failures,
                     commands,
                 });
                 self.session_before_start = self.activity.session_started_at;
@@ -553,19 +552,11 @@ impl WindowsDesktopHost {
     /// listener reads changes in place; anything the listener captured at
     /// start restarts a running listener.
     fn apply_settings(&mut self, settings: &AppSettings) {
-        if self
-            .keyboard_switcher
-            .configure(settings.keyboard_model_switching.clone(), Instant::now())
-        {
-            self.supersede_automatic();
-        }
+        self.keyboard_switcher
+            .configure(settings.keyboard_model_switching.clone(), Instant::now());
         let previous = std::mem::replace(&mut self.settings, settings.clone());
-        if self
-            .app_switcher
-            .configure(settings.labs.app_model_switching)
-        {
-            self.supersede_automatic();
-        }
+        self.app_switcher
+            .configure(settings.labs.app_model_switching);
         let current = settings;
         crate::feedback::set_enabled(current.sound_effects);
         crate::feedback::set_volume(current.sound_effect_volume.clamp(0.0, 1.0));
@@ -593,39 +584,14 @@ impl WindowsDesktopHost {
         if modes_changed {
             self.refresh_personal_commands_host();
         }
-        let model_changed = previous.transcription.model != current.transcription.model
-            || previous.transcription.language != current.transcription.language;
         // A running listener applies them in place, so listening never stops
         // for a settings change.
         if let Some(listener) = &self.listener {
             let _ = listener.updates.send(Box::new(current.clone()));
-        } else if model_changed && self.listen_when_ready {
-            // A listener waiting for a model starts once one is chosen.
+        } else if previous.transcription != current.transcription && self.listen_when_ready {
+            // A listener that could not start tries again with the new choice.
             self.start();
         }
-    }
-
-    /// The saved selection, or the default model while it names an import
-    /// that can't run.
-    fn runtime_selection(&self) -> crate::transcription::models::TranscriptionSelection {
-        crate::transcription::custom_models::runnable(&self.settings.transcription)
-    }
-
-    /// The listener could not load a newly chosen model and still runs the
-    /// previous one. Settings go back to it, so they never name a model that
-    /// is not running and the picker never offers to delete the one in use.
-    fn keep_running_model(&mut self, failed: crate::transcription::local_transcriber::SwapFailed) {
-        // A choice made after the failed one stands.
-        if self.runtime_selection() != failed.wanted {
-            return;
-        }
-        let mut candidate = self.settings.clone();
-        candidate.remember_transcription(failed.kept);
-        match candidate.save() {
-            Ok(()) => self.apply_settings(&candidate),
-            Err(error) => tracing::warn!(%error, "could not restore the running model setting"),
-        }
-        self.preparation.set_error(Some(failed.error));
     }
 
     /// Hosts the personal transformations workspace while any mode uses a
@@ -664,27 +630,13 @@ impl WindowsDesktopHost {
     pub(crate) fn refresh(&mut self) {
         self.switch_with_keyboard();
         self.switch_with_app();
-        if let Some(result) = self.preparation.poll() {
-            self.automatic_preparation = false;
-            let result = result.and_then(|selection| {
-                crate::transcription::models::validate(&selection).map_err(|e| e.to_string())?;
-                let mut candidate = self.settings.clone();
-                candidate.remember_transcription(selection);
-                candidate.save().map_err(|e| format!("{e:#}"))?;
-                self.apply_settings(&candidate);
-                Ok(())
-            });
-            if let Err(error) = result {
-                self.preparation.set_error(Some(error));
-            }
-        }
-        let swap_failures = self
-            .listener
-            .as_ref()
-            .map(|listener| listener.swap_failures.try_iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for failed in swap_failures {
-            self.keep_running_model(failed);
+        // Listening was asked for before an API key was set.
+        if self.listen_when_ready
+            && self.status == API_KEY_REQUIRED
+            && !self.is_running()
+            && crate::transcription::models::is_ready()
+        {
+            self.start();
         }
         if self.listen_after_setup && crate::desktop::onboarding::completion_recorded() {
             self.listen_after_setup = false;
@@ -742,8 +694,7 @@ impl WindowsDesktopHost {
     }
 
     /// Where `hex` dictation commands go: the running listener, once its
-    /// session started (a listener still loading its model would replay
-    /// them late).
+    /// session started (a listener still starting would replay them late).
     pub(crate) fn listener_commands(
         &self,
     ) -> Option<mpsc::Sender<crate::windows::dictation::ListenerCommand>> {
@@ -754,7 +705,6 @@ impl WindowsDesktopHost {
     }
 
     pub(crate) fn publish(&self) -> Published {
-        let preparation = self.preparation.status();
         Published {
             activity: self.activity.state,
             listener: DesktopListenerSnapshot {
@@ -771,13 +721,8 @@ impl WindowsDesktopHost {
             },
             operation_error: self.error.clone(),
             transcription: DesktopTranscriptionSnapshot {
-                downloaded_bytes: preparation.downloaded_bytes,
-                error: preparation.error,
-                preparation_stage: preparation
-                    .model
-                    .map(|_| ModelPreparationStage::Downloading),
+                error: self.transcription_error.clone(),
                 selection: self.settings.transcription.clone(),
-                preparing: preparation.model,
             },
             update_status: self.updater.status(),
             update_notes: self.updater.notes(),

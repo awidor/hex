@@ -8,9 +8,10 @@
 //!   frame (16 ms) while the HUD animates, otherwise every 250 ms, and
 //!   whatever sends it work (HUD events, menu actions, control calls,
 //!   meeting events, input-source changes) wakes it at once ([`wake_pump`]).
-//! - The runtime thread owns model preparation, starts the listener once
-//!   setup is ready, and publishes the listener, model, update, and settings
-//!   state the window shows ([`RuntimeHandle`]).
+//! - The runtime thread saves the transcription language, starts the listener
+//!   once setup is ready (the permissions are granted and an ElevenLabs API
+//!   key is set), and publishes the listener, transcription, update, and
+//!   settings state the window shows ([`RuntimeHandle`]).
 //! - The listener (`recognition::listen`), the meeting controller, and the
 //!   local API keep their own threads.
 //!
@@ -83,7 +84,7 @@ const RUNTIME_TICK: Duration = Duration::from_millis(250);
 /// Seconds a window opened at launch has to draw its first frame before the
 /// status item, HUD, and menu are set up anyway.
 const LAUNCH_SETUP_DEADLINE: f64 = 1.0;
-const MODEL_MENU_REFRESH: Duration = Duration::from_secs(1);
+const PASTE_LAST_MENU_REFRESH: Duration = Duration::from_secs(1);
 const MEETING_MENU_REFRESH: Duration = Duration::from_millis(500);
 /// 'aevt' / 'rapp': the Apple event LaunchServices sends when the app is
 /// opened again while it runs (Dock, Finder, `open`).
@@ -98,7 +99,6 @@ pub(crate) struct Published {
     pub(crate) update_status: DesktopUpdateStatus,
     pub(crate) update_notes: Option<crate::desktop::host::UpdateNotes>,
     pub(crate) settings: AppSettings,
-    preparation: crate::transcription::preparation::PreparationStatus,
 }
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -149,11 +149,7 @@ impl RuntimeHandle {
     pub(crate) fn send(&self, request: Request) -> Result<()> {
         if matches!(
             &request,
-            Request::ChooseModel { .. }
-                | Request::SelectInstalledModel(_)
-                | Request::UseInstalledSelection(_)
-                | Request::CancelModel
-                | Request::ReloadSettings
+            Request::ChooseModel { .. } | Request::ReloadSettings
         ) && let Some(mtm) = MainThreadMarker::new()
             && let Some(source) = crate::keyboard_input_sources::take_change(mtm)
         {
@@ -300,7 +296,7 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool
     // Opens no audio output device until a tone actually plays.
     let _ = crate::feedback::preload();
     // Known before the observer's first report, so launching keeps the saved
-    // model instead of applying the current source's mapping.
+    // language instead of applying the current source's mapping.
     let initial_input_source = settings
         .keyboard_model_switching
         .enabled
@@ -540,7 +536,7 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool
         meeting_waiters: Vec::new(),
         meeting_state: MeetingMenuState::Idle,
         meeting_menu_at: Instant::now(),
-        model_menu_at: Instant::now(),
+        paste_last_menu_at: Instant::now(),
         show_dock_icon: settings.show_dock_icon,
     };
     // Quit ends the loop and finishes below; AppKit's own terminate (the quit
@@ -554,8 +550,8 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool
         }
         drop(requests);
         local_api.shutdown();
-        // The listener owns the transcription engine; joining it frees the
-        // model after its last use.
+        // The listener owns the transcription engine; joining it ends the
+        // engine after its last use.
         for (name, worker) in [
             ("recognition", recognition),
             ("meeting controller", controller),
@@ -632,7 +628,7 @@ struct Pump {
     meeting_waiters: Vec<control::MeetingWaiter>,
     meeting_state: MeetingMenuState,
     meeting_menu_at: Instant,
-    model_menu_at: Instant,
+    paste_last_menu_at: Instant,
     show_dock_icon: bool,
 }
 
@@ -795,7 +791,6 @@ fn bring_forward(window: &rune::AppHandle<Ui>) {
 impl Pump {
     fn tick(&mut self, indicator: &mut DictationIndicatorUi) {
         if self.shutdown.load(Ordering::Relaxed) {
-            self.runtime_cancel();
             self.window.quit();
             return;
         }
@@ -845,15 +840,11 @@ impl Pump {
             return;
         }
         let now = Instant::now();
-        if now >= self.model_menu_at {
+        if now >= self.paste_last_menu_at {
             if let Some(published) = self.runtime.published() {
-                crate::macos_rune::status_item::update_transcription(
-                    &published.settings,
-                    &published.preparation,
-                );
                 crate::macos_rune::status_item::update_paste_last(&published.settings);
             }
-            self.model_menu_at = now + MODEL_MENU_REFRESH;
+            self.paste_last_menu_at = now + PASTE_LAST_MENU_REFRESH;
         }
         if now >= self.meeting_menu_at {
             crate::macos_rune::status_item::update_meeting(
@@ -866,22 +857,9 @@ impl Pump {
         }
     }
 
-    fn runtime_cancel(&self) {
-        let _ = self.runtime.send(Request::CancelModel);
-    }
-
     fn status_action(&mut self, action: StatusItemAction) {
         match action {
             StatusItemAction::OpenSettings => show(&self.window, Destination::Settings),
-            StatusItemAction::OpenModels => show(&self.window, Destination::Models),
-            StatusItemAction::SelectModel(model) => {
-                let _ = self.runtime.send(Request::SelectInstalledModel(model));
-                self.model_menu_at = Instant::now();
-            }
-            StatusItemAction::CancelModelPreparation => {
-                let _ = self.runtime.send(Request::CancelModel);
-                self.model_menu_at = Instant::now();
-            }
             StatusItemAction::PasteLast => {
                 let _ = self
                     .runtime
@@ -962,10 +940,7 @@ impl Pump {
                 crate::suppression::secure_input::refresh();
                 crate::macos_rune::status_item::update_pause();
             }
-            StatusItemAction::Quit => {
-                self.runtime_cancel();
-                self.window.quit();
-            }
+            StatusItemAction::Quit => self.window.quit(),
         }
     }
 

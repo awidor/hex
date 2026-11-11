@@ -180,7 +180,7 @@ fn repair_receipt(root: &Path) -> std::result::Result<(), Ineligible> {
 /// The `windows-*` target is the signed executable our installers copy
 /// unchanged, so this build is the file whose SHA-256 it has.
 pub fn running_sha256() -> Option<String> {
-    crate::transcription::models::sha256_hex(&std::env::current_exe().ok()?, None).ok()
+    crate::durable::sha256_hex(&std::env::current_exe().ok()?).ok()
 }
 
 pub fn updates_disabled_by_policy() -> bool {

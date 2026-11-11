@@ -14,7 +14,7 @@ pub(crate) fn deprioritize_background_thread() {
 
 #[cfg(target_os = "macos")]
 mod os {
-    pub(super) use crate::parakeet::{
+    pub(super) use crate::macos_dictation::{
         at_background_priority, deprioritize_background_thread as lower_for_good,
     };
 }

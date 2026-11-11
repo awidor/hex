@@ -21,7 +21,7 @@ use super::icons::{
 use super::list_detail::SEARCH_ICON;
 use super::sidebar::{NAV_ROW_GAP, NAV_ROW_HEIGHT, VOICE_FILTER_ICON};
 use super::{Pane, Ui};
-use crate::desktop::i18n::{tr, tr_fill};
+use crate::desktop::i18n::tr;
 use crate::labs::{Feature, Group};
 
 pub(super) static LABS_ICON: Icon = Icon {
@@ -284,8 +284,8 @@ struct Row {
     title: &'static str,
     about: &'static str,
     on: bool,
-    /// Can't be switched: on while an installed Hex Microphone driver or
-    /// the dictation model needs it, off under an organization's lock.
+    /// Can't be switched: on while an installed Hex Microphone driver needs
+    /// it, off under an organization's lock.
     locked: bool,
     group: Group,
 }
@@ -482,22 +482,22 @@ fn rows(ui: &Ui) -> Vec<Row> {
         Feature::VocabularyBiasing,
         Some(&BOOK),
         tr("Vocabulary biasing"),
-        tr("Bias Parakeet transcription toward your vocabulary; rewriting and search use it either way"),
+        tr("Send your vocabulary to ElevenLabs as keyterms, which it bills extra; rewriting and search use the vocabulary either way"),
     ));
     if caps.keyboard_model_switching {
         rows.push(row(
             Feature::KeyboardModelSwitching,
             Some(&KEYBOARD),
-            tr("Switch model with keyboard language"),
-            tr("Changing input source selects its mapped model and language; manual choices still work"),
+            tr("Switch language with keyboard layout"),
+            tr("Changing input source selects its mapped transcription language; manual choices still work"),
         ));
     }
     if caps.app_model_switching {
         rows.push(row(
             Feature::AppModelSwitching,
             Some(&KEYBOARD),
-            tr("Switch model with app"),
-            tr("Each mode can pick a speech model; Hex switches to it when you change apps"),
+            tr("Switch language with app"),
+            tr("Each mode can pick a transcription language; Hex switches to it when you change apps"),
         ));
     }
     // macOS's and Windows' pasters can leave a dictation on the clipboard.
@@ -687,21 +687,15 @@ fn rows(ui: &Ui) -> Vec<Row> {
             tr("Show Annotate's recording capsule and ink over your screen, through XWayland. Works only while XWayland is already running; Esc can't stop drawing there, so use the capsule's pen button or let go of a held Annotate key"),
         ));
     }
-    // Linux's and Windows' engines transcribe a whole clip on the CPU.
+    // Linux's and Windows' dictation trims a clip before it is sent.
     if caps.os != super::platform::Os::Macos {
         rows.push(row(
             Feature::SkipPauses,
             Some(&TIMER),
             tr("Skip long pauses"),
-            tr("Shorten long pauses before a whole dictation goes to the model, so slow computers paste sooner"),
+            tr("Shorten long pauses before a whole dictation is uploaded, so it is billed and answered for less audio"),
         ));
     }
-    rows.push(row(
-        Feature::UnloadIdle,
-        Some(&TIMER),
-        tr("Unload model when idle"),
-        tr("Frees the speech model's memory after a while unused; the next dictation reloads it"),
-    ));
     rows.push(row(
         Feature::RestoreShortcutDefault,
         Some(&KEYBOARD),
@@ -736,7 +730,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
         Feature::KeepRecordings,
         None,
         tr("Keep recordings"),
-        tr("Keep the audio of dictations saved to History, so you can transcribe them again with another model"),
+        tr("Keep the audio of dictations saved to History, so you can transcribe them again"),
     ));
     rows.push(row(
         Feature::OutputFixes,
@@ -745,40 +739,10 @@ fn rows(ui: &Ui) -> Vec<Row> {
         tr("Offer Vocabulary and Fix this beside Output's Try result, to correct a wrong result"),
     ));
     rows.push(row(
-        Feature::PickerSortFilter,
-        None,
-        tr("Sort and filter models"),
-        tr("Sort the Local transcription picker by size or name and show only models for the saved language"),
-    ));
-    rows.push(row(
-        Feature::BenchmarkDetails,
-        None,
-        tr("Benchmark details"),
-        tr("Show each model's raw error rate, benchmark, and source in the Local transcription picker"),
-    ));
-    rows.push(row(
-        Feature::PickerActiveFirst,
-        None,
-        tr("Model in use first"),
-        tr("The speech model picker lists the model you're using first"),
-    ));
-    rows.push(row(
-        Feature::ModelInPlace,
-        None,
-        tr("Use model files where they are"),
-        tr("Add a speech model file without copying it, so several accounts can share one file"),
-    ));
-    rows.push(row(
-        Feature::PickerDownloaded,
-        None,
-        tr("Downloaded models only"),
-        tr("Show only downloaded speech models in the picker, with the space they take"),
-    ));
-    rows.push(row(
         Feature::TranscribeFiles,
         None,
         tr("Transcribe files"),
-        tr("Adds hex transcribe <file> to turn a WAV recording into text with your dictation model."),
+        tr("Adds hex transcribe <file> to turn a WAV recording into text in your dictation language."),
     ));
     rows.push(row(
         Feature::ApiProcessing,
@@ -798,23 +762,6 @@ fn rows(ui: &Ui) -> Vec<Row> {
         tr("Only on speakers"),
         tr("Apply \"While dictating\" only when sound plays through speakers. Headphones are left alone."),
     ));
-    let ultra_locked = Feature::ParakeetUltra.managed().is_none()
-        && Feature::ParakeetUltra.off_refusal(&ui.settings).is_some();
-    let ultra = row(Feature::ParakeetUltra, None, tr("Parakeet Ultra"), "");
-    // A managed row already says so.
-    rows.push(if ultra.locked {
-        ultra
-    } else {
-        Row {
-            locked: ultra_locked,
-            about: if ultra_locked {
-                tr("On while it is the dictation model. Choose another model to turn it off.")
-            } else {
-                tr("Offer Parakeet Ultra, Moondream's post-trained Parakeet v3, in the Local transcription picker")
-            },
-            ..ultra
-        }
-    });
     if caps.share_shortcut {
         rows.push(row(
             Feature::ShareShortcut,
@@ -893,7 +840,6 @@ fn row_key(lab: Lab) -> &'static str {
         Feature::MouseShortcuts => "lab-mouse-shortcuts",
         Feature::PauseBrowser => "lab-pause-browser",
         Feature::ShareShortcut => "lab-share-shortcut",
-        Feature::UnloadIdle => "lab-unload-idle",
         Feature::RestoreShortcutDefault => "lab-restore-shortcut-default",
         Feature::KeepOnClipboard => "lab-keep-on-clipboard",
         Feature::CopyOnly => "lab-copy-only",
@@ -906,21 +852,15 @@ fn row_key(lab: Lab) -> &'static str {
         Feature::TerminalPasteShortcut => "lab-terminal-paste-shortcut",
         Feature::SmartSpacing => "lab-smart-spacing",
         Feature::SpokenSymbols => "lab-spoken-symbols",
-        Feature::PickerSortFilter => "lab-picker-sort-filter",
         Feature::SidedChords => "lab-sided-modifier-chords",
         Feature::TapOrHold => "lab-tap-or-hold",
         Feature::DoubleTapModifiers => "lab-double-tap-modifiers",
-        Feature::BenchmarkDetails => "lab-benchmark-details",
-        Feature::ParakeetUltra => "lab-parakeet-ultra",
         Feature::StandaloneSpecialKeys => "lab-special-keys",
         Feature::HistoryStats => "lab-history-stats",
         Feature::RecentDictations => "lab-recent-dictations",
         Feature::SkipPauses => "lab-skip-pauses",
         Feature::StopWhenCallEnds => "lab-stop-when-call-ends",
         Feature::OutputFixes => "lab-output-fixes",
-        Feature::PickerActiveFirst => "lab-picker-active-first",
-        Feature::ModelInPlace => "lab-model-in-place",
-        Feature::PickerDownloaded => "lab-picker-downloaded",
         Feature::SectionKeyAlone => "lab-section-key",
         Feature::KeepRecordings => "lab-keep-recordings",
         Feature::SettingsSearch => "lab-settings-search",
@@ -972,10 +912,6 @@ fn flip(ui: &mut Ui, lab: Lab) {
         return;
     }
     let on = !feature.on(&ui.settings);
-    // Parakeet Ultra stays on while it dictates; its card says why.
-    if !on && feature.off_refusal(&ui.settings).is_some() {
-        return;
-    }
     if !on {
         group::keep_open(ui, feature.group());
     }
@@ -994,27 +930,13 @@ fn flip(ui: &mut Ui, lab: Lab) {
     }
 }
 
-/// A lab's own settings, on its card while it's on: how long the model sits
-/// unused before it unloads, or the screenshot shortcut and folder.
+/// A lab's own settings, on its card while it's on: the Caps Lock light,
+/// the window's theme, or the screenshot shortcut and folder.
 fn extras(ui: &Ui, p: Paint, entry: &Row) -> Option<El> {
     if !entry.on {
         return None;
     }
     match entry.lab {
-        Lab::Feature(Feature::UnloadIdle) => Some(
-            row()
-                .key("unload-after")
-                .gap(8.0)
-                .center_y()
-                .flex_wrap()
-                .child(
-                    text(tr("Unload after"))
-                        .key("label")
-                        .font(controls::DESCRIPTION)
-                        .color(p.muted()),
-                )
-                .child(unload_after(ui, p)),
-        ),
         Lab::Feature(Feature::CapsLockDictation) => Some(
             row()
                 .key("caps-lock-light-row")
@@ -1084,23 +1006,5 @@ fn appearance_theme(ui: &Ui, p: Paint) -> El {
     controls::segmented(p, "appearance-theme", &labels, selected, |ui, index| {
         let theme = AppearanceTheme::ALL[index];
         ui.update(|settings| settings.labs.appearance_theme = theme);
-    })
-}
-
-/// How long the model sits unused before it unloads.
-fn unload_after(ui: &Ui, p: Paint) -> El {
-    use crate::app_settings::UNLOAD_IDLE_MINUTES;
-    let labels: Vec<String> = UNLOAD_IDLE_MINUTES
-        .iter()
-        .map(|minutes| tr_fill("{} min", &minutes.to_string()))
-        .collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let selected = UNLOAD_IDLE_MINUTES
-        .iter()
-        .position(|minutes| *minutes == ui.settings.labs.unload_idle_minutes)
-        .unwrap_or(1);
-    controls::segmented(p, "unload-idle-minutes", &labels, selected, |ui, index| {
-        let minutes = UNLOAD_IDLE_MINUTES[index];
-        ui.update(|settings| settings.labs.unload_idle_minutes = minutes);
     })
 }

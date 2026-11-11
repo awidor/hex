@@ -1,7 +1,7 @@
 //! The playground (Labs › Playground): Rune's playground in Hex's window,
 //! opened from its sidebar item or ⇧⌘D (Ctrl+Shift+D off macOS). It swaps
 //! the window for a folded list of
-//! prototypes (the onboarding options, live meeting notes, and on macOS
+//! prototypes (the first run and its comedy, live meeting notes, and on macOS
 //! the HUD and the capture capsule), then every fixture
 //! scene in [`SCENES`] under a readable name, by pane. Each opens on a fresh
 //! fixture state; the real window's state keeps running underneath,
@@ -67,12 +67,8 @@ const PATHS: &[(&str, &str)] = &[
         "Window/General/Vocabulary · empty",
     ),
     (
-        "vocabulary-unused",
-        "Window/General/Vocabulary · not used by the model",
-    ),
-    (
         "vocabulary-budget",
-        "Window/General/Vocabulary · more terms than the model reads",
+        "Window/General/Vocabulary · terms ElevenLabs doesn't take",
     ),
     ("shortcut-row", "Window/General/Shortcut/Left Option"),
     ("shortcut-row-right", "Window/General/Shortcut/Right Option"),
@@ -106,35 +102,25 @@ const PATHS: &[(&str, &str)] = &[
     ),
     ("mac-local-build", "Window/General/Updates/Local build"),
     ("mac-test-build", "Window/General/Updates/Test build"),
-    ("picker", "Window/Transcription model/Picker"),
     (
-        "picker-downloading",
-        "Window/Transcription model/Downloading",
+        "transcription-no-key",
+        "Window/General/Transcription/No API key",
     ),
     (
-        "picker-parakeet-ultra",
-        "Window/Transcription model/Parakeet Ultra details (Labs)",
+        "transcription-key-environment",
+        "Window/General/Transcription/Key from the environment",
     ),
     (
-        "picker-custom-models",
-        "Window/Transcription model/Add your own model",
+        "transcription-key-works",
+        "Window/General/Transcription/Key works",
     ),
     (
-        "picker-found",
-        "Window/Transcription model/Found on this computer",
+        "transcription-key-refused",
+        "Window/General/Transcription/Key refused",
     ),
     (
-        "picker-japanese",
-        "Window/Transcription model/Japanese saved",
-    ),
-    (
-        "picker-japanese-all",
-        "Window/Transcription model/Japanese, every model",
-    ),
-    ("language-menu", "Window/Transcription model/Language menu"),
-    (
-        "language-fallback",
-        "Window/Transcription model/Language fallback",
+        "language-menu",
+        "Window/General/Transcription/Language menu",
     ),
     ("shortcut-mode", "Window/Shortcut mode/Modifier"),
     ("shortcut-mode-key", "Window/Shortcut mode/Key"),
@@ -229,7 +215,7 @@ const PATHS: &[(&str, &str)] = &[
     ("mac-labs-settings", "Window/General/Labs settings"),
     ("mac-production", "Window/General/Production build"),
     ("mac-activity", "Window/Activity/Activity"),
-    ("mac-onboarding", "Window/Onboarding/Setting up Hex"),
+    ("mac-onboarding", "Window/Onboarding/API key"),
     (
         "mac-onboarding-permissions",
         "Window/Onboarding/Permissions",
@@ -245,11 +231,6 @@ const PATHS: &[(&str, &str)] = &[
     (
         "mac-onboarding-restart",
         "Window/Onboarding/Permissions · restart",
-    ),
-    ("mac-onboarding-waiting", "Window/Onboarding/Almost ready"),
-    (
-        "mac-onboarding-sketch",
-        "Window/Onboarding/Almost ready · watch another one",
     ),
     ("mac-onboarding-try", "Window/Onboarding/Your turn"),
     (
@@ -274,38 +255,18 @@ const PATHS: &[(&str, &str)] = &[
     ),
     ("onboarding", "Linux & Windows/Onboarding"),
     (
-        "onboarding-download-failed",
-        "Linux & Windows/Onboarding · download failed",
+        "onboarding-key-checking",
+        "Linux & Windows/Onboarding · checking the key",
     ),
     (
-        "onboarding-no-model",
-        "Linux & Windows/Onboarding · continued without a model",
+        "onboarding-key-refused",
+        "Linux & Windows/Onboarding · key refused",
     ),
     (
-        "onboarding-model-found",
-        "Linux & Windows/Onboarding · models on this computer",
-    ),
-    (
-        "onboarding-model-found-downloading",
-        "Linux & Windows/Onboarding · recommended model downloading",
-    ),
-    (
-        "onboarding-model-found-recommended",
-        "Linux & Windows/Onboarding · recommended model on this computer",
-    ),
-    (
-        "onboarding-model-found-back",
-        "Linux & Windows/Onboarding · back to the models",
+        "onboarding-no-key",
+        "Linux & Windows/Onboarding · ready without a key",
     ),
     ("onboarding-demo", "Linux & Windows/Onboarding · demo"),
-    (
-        "onboarding-waiting",
-        "Linux & Windows/Onboarding · almost ready",
-    ),
-    (
-        "onboarding-sketch",
-        "Linux & Windows/Onboarding · watch another one",
-    ),
     (
         "onboarding-paste",
         "Linux & Windows/Onboarding · paste permission",
@@ -667,14 +628,8 @@ mod tests {
                 "hud-recording-your-voice",
                 "prototypes-hud-recording-your-voice",
             ),
-            (
-                "Onboarding/Option · Pill",
-                "Prototypes/Onboarding/Option · Pill",
-            ),
-            (
-                "onboarding-option-pill",
-                "prototypes-onboarding-option-pill",
-            ),
+            ("Onboarding/First run", "Prototypes/Onboarding/First run"),
+            ("onboarding-first-run", "prototypes-onboarding-first-run"),
             ("capture-capsule-notch", "prototypes-capture-capsule-notch"),
         ] {
             assert_eq!(alias(old).as_deref(), Some(new), "{old}");
@@ -683,7 +638,7 @@ mod tests {
             "Prototypes/HUD/Processing",
             "prototypes-hud-processing",
             "Processing",
-            "Option · Pill",
+            "First run",
             "Window/General/Settings",
         ] {
             assert_eq!(alias(current), None, "{current}");

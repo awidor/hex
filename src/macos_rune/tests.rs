@@ -1,4 +1,4 @@
-//! Runtime request/scheduling regressions; no native model loading or settings writes.
+//! Runtime request/scheduling regressions; no settings writes.
 
 use super::runtime::Runtime;
 use super::*;
@@ -7,9 +7,6 @@ use crate::app_settings::{DictationMode, KeyboardModelChoice, KeyboardModelSwitc
 // runtime's own imports no longer name the model IDs and selections these
 // tests build.
 use crate::transcription::models::{TranscriptionModelId, TranscriptionSelection};
-use crate::transcription::preparation::TranscriptionPreparation;
-
-const WAIT: Duration = Duration::from_secs(3);
 
 /// The pump ticks every frame only while the HUD animates; otherwise it
 /// idles and senders wake it (#1378).
@@ -71,32 +68,14 @@ fn login_item_launch_starts_without_the_window() {
     }
 }
 
-/// Hold each preparation until released, observing its exact request and cancellation.
+/// A runtime whose chosen selection changes in memory only (`save_selection`
+/// writes nothing in tests).
 struct Fixture {
     runtime: Runtime,
-    started: Receiver<(TranscriptionSelection, bool)>,
-    release: Sender<()>,
-    finished: Receiver<bool>,
 }
 
 impl Fixture {
     fn new(settings: AppSettings) -> Self {
-        let (start, started) = mpsc::channel();
-        let (release, releases) = mpsc::channel();
-        let releases = Mutex::new(releases);
-        let (finish, finished) = mpsc::channel();
-        let preparation = TranscriptionPreparation::with_prepare(Arc::new(
-            move |selection, installed_only, cancelled, _| {
-                start.send((selection.clone(), installed_only)).unwrap();
-                releases
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(WAIT)
-                    .map_err(|error| error.to_string())?;
-                let _ = finish.send(cancelled.load(Ordering::Acquire));
-                Ok(())
-            },
-        ));
         Self {
             runtime: Runtime {
                 keyboard_switcher: crate::transcription::keyboard_model_switching::Switcher::new(
@@ -108,8 +87,7 @@ impl Fixture {
                     None,
                 ),
                 settings,
-                preparation,
-                automatic_preparation: false,
+                transcription_error: None,
                 recognition_start: None,
                 listener_failure: Default::default(),
                 event_reader: crate::desktop::events::EventReader::open(""),
@@ -117,9 +95,6 @@ impl Fixture {
                 last_completed_at: None,
                 started_at: 0,
             },
-            started,
-            release,
-            finished,
         }
     }
 
@@ -147,155 +122,110 @@ impl Fixture {
         );
     }
 
-    fn started(&self) -> (TranscriptionSelection, bool) {
-        self.started
-            .recv_timeout(WAIT)
-            .expect("preparation did not start")
-    }
-
-    fn release(&self) {
-        self.release.send(()).unwrap();
-    }
-
-    fn start_manual(&mut self) {
+    /// A choice made by hand, as the window's language menu sends it.
+    fn choose(&mut self, language: &str) {
         self.runtime.handle(Request::ChooseModel {
-            model: TranscriptionModelId::WhisperLargeV3Turbo,
-            language: "en".into(),
+            model: TranscriptionModelId::ScribeV3,
+            language: language.into(),
         });
-        let (selection, installed_only) = self.started();
-        assert_eq!(selection.model, TranscriptionModelId::WhisperLargeV3Turbo);
-        assert!(!installed_only);
     }
 
-    fn assert_manual_pending(&self) {
-        assert_eq!(
-            self.runtime.preparation.status().model,
-            Some(TranscriptionModelId::WhisperLargeV3Turbo)
-        );
-    }
-
-    fn complete_manual(&mut self) {
-        self.release();
-        let deadline = Instant::now() + WAIT;
-        loop {
-            if let Some(result) = self.runtime.preparation.poll() {
-                assert_eq!(
-                    result.unwrap().model,
-                    TranscriptionModelId::WhisperLargeV3Turbo
-                );
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "manual preparation was cancelled"
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    fn next_after_cancellation(&mut self) -> (TranscriptionSelection, bool) {
-        let deadline = Instant::now() + WAIT;
-        loop {
-            assert!(
-                self.runtime.preparation.poll().is_none(),
-                "obsolete choice escaped cancellation"
-            );
-            if let Ok(choice) = self.started.try_recv() {
-                return choice;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "replacement preparation did not start"
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
+    /// The language the runtime transcribes in now.
+    fn language(&self) -> &str {
+        &self.runtime.settings.transcription.language
     }
 }
 
-/// "Spanish" mapped to `model` in the language it would get from the picker.
-fn mapped_settings(model: TranscriptionModelId) -> AppSettings {
-    let settings = AppSettings::default();
-    let language = settings.transcription_for_model(model).language;
-    mapped_settings_in(model, &language)
+fn selection(language: &str) -> TranscriptionSelection {
+    TranscriptionSelection {
+        model: TranscriptionModelId::ScribeV3,
+        language: language.into(),
+    }
 }
 
-fn mapped_settings_in(model: TranscriptionModelId, language: &str) -> AppSettings {
+fn choice(language: &str) -> KeyboardModelChoice {
+    KeyboardModelChoice {
+        model: TranscriptionModelId::ScribeV3,
+        language: language.into(),
+    }
+}
+
+/// Settings that transcribe in English, whatever this computer's interface
+/// language makes the default.
+fn english_settings() -> AppSettings {
     AppSettings {
-        keyboard_model_switching: KeyboardModelSwitching {
-            enabled: true,
-            mappings: [(
-                "Spanish".into(),
-                KeyboardModelChoice {
-                    model,
-                    language: language.into(),
-                },
-            )]
-            .into(),
-        },
+        transcription: selection("en"),
         ..Default::default()
     }
 }
 
+/// English in use, with the "Spanish" input source mapped to `language`.
+fn mapped_settings(language: &str) -> AppSettings {
+    AppSettings {
+        keyboard_model_switching: KeyboardModelSwitching {
+            enabled: true,
+            mappings: [("Spanish".into(), choice(language))].into(),
+        },
+        ..english_settings()
+    }
+}
+
 #[test]
-fn a_mapping_to_the_current_model_in_another_language_switches_the_language() {
-    let mut settings = mapped_settings_in(TranscriptionModelId::ParakeetV3, "es");
-    settings.transcription = TranscriptionSelection {
-        model: TranscriptionModelId::ParakeetV3,
-        language: "en".into(),
-    };
-    let mut fixture = Fixture::new(settings);
+fn a_mapping_in_another_language_switches_the_language_once_it_is_due() {
+    let mut fixture = Fixture::new(mapped_settings("es"));
+    fixture.source("Spanish");
+    assert_eq!(
+        fixture.language(),
+        "en",
+        "the switch started before its debounce"
+    );
+    fixture.due();
+    assert_eq!(fixture.language(), "es");
+    assert_eq!(fixture.runtime.transcription_error, None);
+}
+
+#[test]
+fn a_mapping_to_the_language_in_use_changes_nothing() {
+    let mut fixture = Fixture::new(mapped_settings("en"));
+    let before = fixture.runtime.settings.clone();
     fixture.source("Spanish");
     fixture.due();
-    let (selection, installed_only) = fixture.started();
-    assert_eq!(
-        (selection.model, selection.language.as_str(), installed_only),
-        (TranscriptionModelId::ParakeetV3, "es", true)
-    );
-    fixture.release();
+    assert!(fixture.runtime.settings == before);
 }
 
 #[test]
 fn a_modes_speech_choice_switches_when_its_app_comes_to_the_front() {
-    let mut settings = AppSettings::default();
+    let mut settings = english_settings();
     settings.labs.app_model_switching = true;
     settings.dictation_processing.modes = vec![DictationMode {
         name: "Spanish".into(),
         applications: vec!["Notes".into()],
-        speech: Some(KeyboardModelChoice {
-            model: TranscriptionModelId::ParakeetV3,
-            language: "es".into(),
-        }),
+        speech: Some(choice("es")),
         ..DictationMode::default()
     }];
     let mut fixture = Fixture::new(settings);
     fixture.app(Some("Notes"), false);
-    assert!(
-        fixture.started.try_recv().is_err(),
+    assert_eq!(
+        fixture.language(),
+        "en",
         "the switch started before its debounce"
     );
     fixture.app(Some("Notes"), true);
-    let (selection, installed_only) = fixture.started();
-    assert_eq!(
-        (selection.model, selection.language.as_str(), installed_only),
-        (TranscriptionModelId::ParakeetV3, "es", true)
-    );
-    fixture.release();
+    assert_eq!(fixture.language(), "es");
 }
 
 #[test]
 fn hexs_own_window_applies_nothing_and_an_edit_waits_for_another_app() {
-    let mut settings = AppSettings::default();
+    let mut settings = english_settings();
     settings.labs.app_model_switching = true;
-    settings.dictation_processing.default_mode.speech = Some(KeyboardModelChoice {
-        model: TranscriptionModelId::ParakeetV3,
-        language: "es".into(),
-    });
+    settings.dictation_processing.default_mode.speech = Some(choice("es"));
     let mut fixture = Fixture::new(settings);
     // Hex's own window names no mode, even though Global matches every app.
     fixture.app(None, true);
-    assert!(
-        fixture.started.try_recv().is_err(),
-        "Hex's own window switched the model"
+    assert_eq!(
+        fixture.language(),
+        "en",
+        "Hex's own window switched the language"
     );
     // Editing Global while Hex is in front changes nothing yet.
     fixture
@@ -303,64 +233,32 @@ fn hexs_own_window_applies_nothing_and_an_edit_waits_for_another_app() {
         .settings
         .dictation_processing
         .default_mode
-        .speech = Some(KeyboardModelChoice {
-        model: TranscriptionModelId::WhisperLargeV3Turbo,
-        language: "fr".into(),
-    });
+        .speech = Some(choice("fr"));
     fixture.app(None, true);
-    assert!(fixture.started.try_recv().is_err());
+    assert_eq!(fixture.language(), "en");
     // The next app in front applies the edited choice after its debounce.
     fixture.app(Some("Finder"), false);
-    assert!(
-        fixture.started.try_recv().is_err(),
+    assert_eq!(
+        fixture.language(),
+        "en",
         "the switch started before its debounce"
     );
     fixture.app(Some("Finder"), true);
-    let (selection, installed_only) = fixture.started();
-    assert_eq!(
-        (selection.model, selection.language.as_str(), installed_only),
-        (TranscriptionModelId::WhisperLargeV3Turbo, "fr", true)
-    );
-    fixture.release();
+    assert_eq!(fixture.language(), "fr");
 }
 
 #[test]
-fn hex_model_use_with_the_current_model_and_language_loads_nothing() {
-    let mut fixture = Fixture::new(AppSettings::default());
-    let same = fixture.runtime.settings.transcription.clone();
-    fixture.runtime.handle(Request::UseInstalledSelection(same));
-    assert_eq!(fixture.runtime.preparation.status().model, None);
-}
-
-#[test]
-fn input_source_choices_use_installed_only_preparation_and_manual_choices_supersede_them() {
-    let settings = mapped_settings(TranscriptionModelId::ParakeetV3);
-    let expected = settings.transcription_for_model(TranscriptionModelId::ParakeetV3);
-    let mut fixture = Fixture::new(settings);
-    fixture.source("ABC");
+fn a_choice_made_by_hand_applies_at_once_and_cancels_a_debounced_keyboard_switch() {
+    let mut fixture = Fixture::new(mapped_settings("es"));
     fixture.source("Spanish");
+    fixture.choose("de");
+    assert_eq!(fixture.language(), "de");
     fixture.due();
-    assert_eq!(fixture.started(), (expected, true));
-    let manual = TranscriptionSelection {
-        model: TranscriptionModelId::WhisperLargeV3Turbo,
-        language: "de".into(),
-    };
-    fixture
-        .runtime
-        .handle(Request::UseInstalledSelection(manual.clone()));
-    fixture.release();
-    assert_eq!(fixture.next_after_cancellation(), (manual, true));
-    fixture.release();
-}
-
-#[test]
-fn choosing_the_current_model_cancels_a_debounced_automatic_choice_without_loading() {
-    let mut fixture = Fixture::new(mapped_settings(TranscriptionModelId::ParakeetV3));
-    fixture.source("Spanish");
-    fixture.runtime.handle(Request::UseInstalledSelection(
-        fixture.runtime.settings.transcription.clone(),
-    ));
-    assert_eq!(fixture.runtime.preparation.status().model, None);
+    assert_eq!(
+        fixture.language(),
+        "de",
+        "the keyboard switch undid a newer choice"
+    );
     assert_eq!(
         fixture
             .runtime
@@ -371,65 +269,34 @@ fn choosing_the_current_model_cancels_a_debounced_automatic_choice_without_loadi
 }
 
 #[test]
-fn choosing_the_current_model_keeps_manual_preparation_when_switching_is_disabled() {
-    let settings = AppSettings::default();
-    assert!(!settings.keyboard_model_switching.enabled);
-    let mut fixture = Fixture::new(settings);
-    fixture.start_manual();
-    fixture.runtime.handle(Request::UseInstalledSelection(
-        fixture.runtime.settings.transcription.clone(),
-    ));
-    fixture.assert_manual_pending();
-    fixture.complete_manual();
+fn choosing_the_language_in_use_still_cancels_a_debounced_keyboard_switch() {
+    let mut fixture = Fixture::new(mapped_settings("es"));
+    fixture.source("Spanish");
+    fixture.choose("en");
+    fixture.due();
+    assert_eq!(fixture.language(), "en");
 }
 
 #[test]
-fn cycling_through_a_mapped_source_keeps_manual_preparation_until_a_switch_is_due() {
-    let mut fixture = Fixture::new(mapped_settings(TranscriptionModelId::ParakeetV3));
-    fixture.start_manual();
+fn cycling_through_a_mapped_source_switches_nothing() {
+    let mut fixture = Fixture::new(mapped_settings("es"));
     fixture.source("Spanish");
-    fixture.assert_manual_pending();
     fixture.source("ABC");
     fixture.due();
-    fixture.assert_manual_pending();
-    fixture.complete_manual();
-    assert!(
-        fixture.started.try_recv().is_err(),
-        "pass-through source must not prepare a model"
+    assert_eq!(
+        fixture.language(),
+        "en",
+        "a pass-through source must not change the language"
     );
 }
 
 #[test]
-fn a_due_source_choice_supersedes_manual_preparation_even_for_the_current_model() {
-    for mapped in [
-        TranscriptionModelId::ParakeetV3,
-        TranscriptionModelId::ParakeetUnifiedEnglish,
-    ] {
-        let mut settings = mapped_settings(mapped);
-        settings.transcription = TranscriptionSelection {
-            model: TranscriptionModelId::ParakeetUnifiedEnglish,
-            language: "en".into(),
-        };
-        let mut fixture = Fixture::new(settings);
-        fixture.start_manual();
-        fixture.source("Spanish");
-        fixture.assert_manual_pending();
-        fixture.due();
-        let already_current = mapped == fixture.runtime.settings.transcription.model;
-        assert_eq!(
-            fixture.runtime.preparation.status().model,
-            (!already_current).then_some(mapped)
-        );
-        fixture.release();
-        assert!(
-            fixture.finished.recv_timeout(WAIT).unwrap(),
-            "obsolete manual preparation wasn't cancelled"
-        );
-        if !already_current {
-            let (selection, installed_only) = fixture.next_after_cancellation();
-            assert_eq!(selection.model, mapped);
-            assert!(installed_only);
-            fixture.release();
-        }
-    }
+fn a_language_scribe_cannot_be_told_is_refused_until_a_later_choice() {
+    let mut fixture = Fixture::new(english_settings());
+    fixture.choose("english");
+    assert_eq!(fixture.language(), "en");
+    assert!(fixture.runtime.transcription_error.is_some());
+    fixture.choose("de");
+    assert_eq!(fixture.language(), "de");
+    assert_eq!(fixture.runtime.transcription_error, None);
 }

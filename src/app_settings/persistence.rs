@@ -170,12 +170,10 @@ impl AppSettings {
         settings.clear_record_shortcut_sharing_capture();
         settings.migrate_legacy_replacements();
         settings.normalize_mode_application_names();
-        settings.migrate_disabled_transcription_model();
         for hints in &hints {
             crate::dictation::vocabulary::fold_hints(&mut settings.vocabulary, hints);
         }
         settings.apply_one_time_migrations();
-        settings.normalize_transcription_recents();
         settings
             .keyboard_model_switching
             .mappings
@@ -193,7 +191,6 @@ impl AppSettings {
                 mode.speech = None;
             }
         }
-        // A saved import that can't run stays saved (`validate_saved`).
         if let Err(error) = crate::transcription::models::validate_saved(&settings.transcription) {
             warn("transcription", &error.to_string());
             settings.transcription = Self::default().transcription;

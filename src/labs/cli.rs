@@ -73,9 +73,6 @@ pub fn run(command: Option<&LabsCommand>) -> Result<()> {
             "voice-filter stays on while the Hex Microphone driver is installed; uninstall the driver in its pane to turn it off"
         ));
     }
-    if !on && let Some(why) = feature.off_refusal(&settings) {
-        return Err(eyre!(why));
-    }
     let state = if on { "on" } else { "off" };
     // A running Hex saves and applies it at once, as its Labs row would.
     if let Some(reply) = crate::control::cli::set_in_running_hex(
@@ -103,16 +100,10 @@ pub fn run(command: Option<&LabsCommand>) -> Result<()> {
 
 /// The feature `name` names, if this OS has it and `reaches` admits it.
 /// Features that left Labs: `hex labs` still knows their names.
-const GRADUATED: [(&str, &str); 2] = [
-    (
-        "custom-models",
-        "custom-models graduated: adding a model file and models found on this computer are always on now",
-    ),
-    (
-        "meeting-platform-icons",
-        "meeting-platform-icons graduated: the Meetings list always shows each recording's call app icon now",
-    ),
-];
+const GRADUATED: [(&str, &str); 1] = [(
+    "meeting-platform-icons",
+    "meeting-platform-icons graduated: the Meetings list always shows each recording's call app icon now",
+)];
 
 pub(super) fn resolve(name: &str, reaches: impl Fn(Feature) -> bool + Copy) -> Result<Feature> {
     if let Some((_, note)) = GRADUATED.iter().find(|(graduated, _)| *graduated == name) {

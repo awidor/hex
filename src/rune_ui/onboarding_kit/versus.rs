@@ -32,9 +32,8 @@ use super::flows::continue_button;
 use super::hud_stage::voice_or_idle_slot;
 use super::inbox::{self, MATCHED};
 use super::keyboard::{self, keyboard_lit};
-use super::landing::{LEAD, UI_SPRING, keys, language_pick, ready, title_font};
+use super::landing::{LEAD, UI_SPRING, keys, ready, title_font};
 use super::mic_line::mic_line;
-use super::pill::{after_flight, pill, slot};
 use super::scene_script::{Script, fill};
 use super::stories::{Flow, Onboard, Step};
 use super::triumph::{self, HexBeats, Said};
@@ -154,10 +153,6 @@ fn thread_time(s: &Onboard) -> Option<f64> {
     })
 }
 
-fn scene_over(s: &Onboard) -> bool {
-    scene_time(s).is_some_and(|t| t >= s.scene.duration())
-}
-
 /// `"Without Hex"` is waiting for the Launch Room's row.
 pub(crate) fn waiting_to_start(s: &Onboard) -> bool {
     s.step == Step::Parked && s.typing_from.is_none()
@@ -262,7 +257,7 @@ pub(super) fn skippable(s: &Onboard) -> bool {
     // first run's celebration on the way to the microphone.
     let playing = matches!(s.step, Step::Parked | Step::YourTurn | Step::Hearing) && !hex_sent(s)
         || s.flow == Flow::FirstRun && s.step == Step::Heard;
-    playing && (s.had_model && s.granted || s.now - from >= SKIP_AFTER)
+    playing && (s.had_key && s.granted || s.now - from >= SKIP_AFTER)
 }
 
 /// The camera is pushed in on the draft (autocorrect's slow motion), the
@@ -287,13 +282,10 @@ pub(super) fn sent_count(s: &Onboard) -> usize {
 pub(super) fn view(p: Paint, s: &Onboard) -> Vec<El> {
     if s.step == Step::Ready {
         return vec![
-            top_bar()
-                .justify_center()
-                .child(pill(p, download(s), s.closed)),
+            top_bar(),
             middle().pb(TOP_BAR).child(ready(
                 p,
                 &s.caps,
-                None,
                 s.ready_age(),
                 s.reduced.get(),
                 s.motion,
@@ -302,19 +294,8 @@ pub(super) fn view(p: Paint, s: &Onboard) -> Vec<El> {
         ];
     }
     let parked = s.step >= Step::Parked;
-    let top = top_bar().justify_end().child(if parked {
-        pill(p, download(s), s.closed)
-    } else {
-        slot()
-    });
+    let top = top_bar();
     let act = match s.step {
-        Step::Pick => language_pick(p, Onboard::pick),
-        Step::Started => pill(p, download(s), s.closed),
-        Step::Heard if !s.downloaded() => text(tr("Finishing the download…"))
-            .key("finishing")
-            .font(p.k.ty.small)
-            .color(p.faint())
-            .transition(Transition::opacity()),
         Step::Done => continue_button(p, s),
         _ if skippable(s) => super::flows::skip_button(p, s),
         _ => el().key("none"),
@@ -332,11 +313,7 @@ pub(super) fn view(p: Paint, s: &Onboard) -> Vec<El> {
                     .gap(10.0)
                     .items_center()
                     .child(row().key("action").h(ACTION_H).center().child(act))
-                    .child(mic_line(
-                        p,
-                        s.can_hear() && s.step >= Step::YourTurn,
-                        s.listening_peak(),
-                    )),
+                    .child(mic_line(p, s.step >= Step::YourTurn, s.listening_peak())),
             ),
     ]
 }
@@ -347,10 +324,6 @@ fn top_bar() -> El {
 
 fn middle() -> El {
     col().key("middle").grow(1.0).shrink().w_full().center()
-}
-
-fn download(s: &Onboard) -> super::fixture::Download {
-    s.download.expect("the download starts at the pick")
 }
 
 pub(super) fn heading(p: Paint, s: &Onboard) -> El {
@@ -372,7 +345,7 @@ pub(super) fn heading(p: Paint, s: &Onboard) -> El {
             .child(text("and say it.").key("rest").font(LEAD).color(p.muted()))
     };
     let (key, title, lead) = match s.step {
-        Step::Pick | Step::Started => (
+        Step::Key => (
             "intro",
             tr("Talk instead of typing").to_string(),
             line(
@@ -384,7 +357,7 @@ pub(super) fn heading(p: Paint, s: &Onboard) -> El {
         // stage doesn't move when `"With Hex"` brings its own. Composed in
         // two lines (the playground's layouts only, so English), it says what you
         // do, as `"With Hex"`'s does.
-        Step::Parked if !scene_over(s) || s.demo_hears() => (
+        Step::Parked => (
             "without",
             tr("Without Hex").to_string(),
             if Layout::chosen().two_lines() {
@@ -392,14 +365,6 @@ pub(super) fn heading(p: Paint, s: &Onboard) -> El {
             } else {
                 el().key("lead-none")
             },
-        ),
-        Step::Parked => (
-            "with",
-            tr("With Hex").to_string(),
-            line(
-                "lead-wait",
-                tr("Hex starts listening once the speech model has downloaded.").into(),
-            ),
         ),
         Step::YourTurn | Step::Hearing | Step::Heard => {
             ("with", tr("With Hex").to_string(), hold())
@@ -432,10 +397,9 @@ pub(super) fn heading(p: Paint, s: &Onboard) -> El {
         _ => None,
     };
     if Layout::chosen().split() {
-        return split_heading(p, s, key, title, lead, mode);
+        return split_heading(p, key, title, lead, mode);
     }
-    // The first run's download flies up past it from "Setting up Hex".
-    after_flight(col(), s)
+    col()
         .key(key)
         .gap(8.0)
         .items_center()
@@ -454,21 +418,14 @@ pub(super) fn heading(p: Paint, s: &Onboard) -> El {
 
 /// The split layout's heading, a column left of the stage: the mode, a big
 /// title, then what you do.
-fn split_heading(
-    p: Paint,
-    s: &Onboard,
-    key: &str,
-    title: String,
-    lead: El,
-    mode: Option<bool>,
-) -> El {
+fn split_heading(p: Paint, key: &str, title: String, lead: El, mode: Option<bool>) -> El {
     let big = TextStyle {
         size: 44.0,
         line_height: 50.0,
         ..title_font(p)
     }
     .tracking(-0.8);
-    after_flight(col(), s)
+    col()
         .key(key.to_string())
         .w(SPLIT_HEADING_W)
         .gap(14.0)
@@ -996,22 +953,6 @@ fn thread_at(
 fn without_hex_card(p: Paint, s: &Onboard, focus: Focus, frozen: bool, opening: Option<f64>) -> El {
     let t = thread_time(s).unwrap_or(-1e-3);
     scene_card(p, s, &s.scene, t, focus, frozen, opening, look(p, opening))
-}
-
-/// A sketch's conversation at its time `t`, typed by hand.
-pub(super) fn sketch_card(p: Paint, s: &Onboard, scene: &Scene, t: f64) -> El {
-    let focus = if t < 0.0 {
-        Focus::Waiting
-    } else {
-        scene.focus(t)
-    };
-    let look = Look {
-        icon: None,
-        matched: None,
-        bare: false,
-        reveal: None,
-    };
-    scene_card(p, s, scene, t, focus, scene.frozen(t), None, look)
 }
 
 /// `scene`'s conversation at its time `t`.

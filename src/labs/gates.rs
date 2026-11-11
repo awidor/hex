@@ -120,12 +120,6 @@ pub fn double_tap_modifiers() -> bool {
     on(DOUBLE_TAP_MODIFIERS) && Feature::DoubleTapModifiers.on_this_os()
 }
 
-/// Parakeet Ultra joins the catalog (read wherever a model is listed,
-/// chosen, or run).
-pub fn parakeet_ultra() -> bool {
-    on(PARAKEET_ULTRA)
-}
-
 /// History's summary of retained dictations and `hex history stats` (read
 /// when the History pane reloads and when the command starts).
 pub fn history_stats() -> bool {
@@ -334,12 +328,4 @@ pub fn api_timestamps() -> bool {
 /// row).
 pub fn expire_meeting_audio() -> bool {
     on(EXPIRE_MEETING_AUDIO) && Feature::ExpireMeetingAudio.on_this_os()
-}
-
-/// How long the speech model may sit unused before the engine unloads it,
-/// while Labs › Unload model when idle is on.
-pub fn unload_idle() -> Option<std::time::Duration> {
-    let state = state();
-    (state & UNLOAD_IDLE != 0)
-        .then(|| std::time::Duration::from_secs(((state >> MINUTES_SHIFT) & MINUTES_MASK) * 60))
 }

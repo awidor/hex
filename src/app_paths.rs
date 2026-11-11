@@ -47,18 +47,11 @@ pub fn logs_dir() -> Result<PathBuf> {
     machine_local(&LOGS, "logs")
 }
 
-/// Where the speech models live (`transcription::models::models_dir`).
-pub fn models_dir() -> Result<PathBuf> {
-    static MODELS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    machine_local(&MODELS, "models")
-}
-
-/// `name` in the support folder, except on Windows, where logs and models
-/// belong to this computer: `%LOCALAPPDATA%\hex`, not the Roaming
-/// `%APPDATA%\hex`, which managed networks copy to a server at every sign-in.
-/// An older Hex's Roaming copy moves over once. While it can't (a running Hex
-/// holds its files), the Roaming copy keeps being used, so nothing downloads
-/// again.
+/// `name` in the support folder, except on Windows, where logs belong to
+/// this computer: `%LOCALAPPDATA%\hex`, not the Roaming `%APPDATA%\hex`,
+/// which managed networks copy to a server at every sign-in. An older Hex's
+/// Roaming copy moves over once. While it can't (a running Hex holds its
+/// files), the Roaming copy keeps being used.
 fn machine_local(cell: &std::sync::OnceLock<PathBuf>, name: &str) -> Result<PathBuf> {
     if let Some(path) = cell.get() {
         return Ok(path.clone());
@@ -249,18 +242,18 @@ mod tests {
     #[test]
     fn an_older_roaming_folder_moves_to_the_local_one_once() {
         let root = std::env::temp_dir().join(format!("hex-local-move-{}", std::process::id()));
-        let roaming = root.join("Roaming").join("hex").join("models");
-        let local = root.join("Local").join("hex").join("models");
+        let roaming = root.join("Roaming").join("hex").join("logs");
+        let local = root.join("Local").join("hex").join("logs");
         fs::create_dir_all(&roaming).unwrap();
-        fs::write(roaming.join("model.gguf"), b"weights").unwrap();
+        fs::write(roaming.join("process.log"), b"lines").unwrap();
 
         assert_eq!(move_once(&roaming, &local), local);
-        assert_eq!(fs::read(local.join("model.gguf")).unwrap(), b"weights");
+        assert_eq!(fs::read(local.join("process.log")).unwrap(), b"lines");
         assert!(!roaming.exists());
 
         // Later runs, and fresh installs, use the local folder as it is.
         assert_eq!(move_once(&roaming, &local), local);
-        let fresh = root.join("Fresh").join("models");
+        let fresh = root.join("Fresh").join("logs");
         assert_eq!(move_once(&root.join("none"), &fresh), fresh);
         fs::remove_dir_all(root).unwrap();
     }
@@ -268,13 +261,13 @@ mod tests {
     #[test]
     fn a_move_that_fails_keeps_the_roaming_folder_in_use() {
         let root = std::env::temp_dir().join(format!("hex-local-stay-{}", std::process::id()));
-        let roaming = root.join("Roaming").join("models");
+        let roaming = root.join("Roaming").join("logs");
         fs::create_dir_all(&roaming).unwrap();
         // A file where the local parent folder should be makes the move fail.
         fs::write(root.join("Local"), b"").unwrap();
 
         assert_eq!(
-            move_once(&roaming, &root.join("Local").join("models")),
+            move_once(&roaming, &root.join("Local").join("logs")),
             roaming
         );
         assert!(roaming.exists());

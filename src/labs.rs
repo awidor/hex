@@ -105,7 +105,6 @@ impl Feature {
             | Self::MouseShortcuts
             | Self::PauseBrowser
             | Self::ShareShortcut
-            | Self::UnloadIdle
             | Self::RestoreShortcutDefault
             | Self::KeepOnClipboard
             | Self::CopyOnly
@@ -117,21 +116,15 @@ impl Feature {
             | Self::TerminalPasteShortcut
             | Self::SmartSpacing
             | Self::SpokenSymbols
-            | Self::PickerSortFilter
             | Self::SidedChords
             | Self::TapOrHold
             | Self::DoubleTapModifiers
-            | Self::BenchmarkDetails
-            | Self::ParakeetUltra
             | Self::StandaloneSpecialKeys
             | Self::HistoryStats
             | Self::RecentDictations
             | Self::SkipPauses
             | Self::StopWhenCallEnds
             | Self::OutputFixes
-            | Self::PickerActiveFirst
-            | Self::ModelInPlace
-            | Self::PickerDownloaded
             | Self::SectionKeyAlone
             | Self::KeepRecordings
             | Self::SettingsSearch
@@ -180,8 +173,7 @@ impl Feature {
             | Self::MouseShortcuts
             | Self::PauseBrowser
             | Self::ShareShortcut => 20261030,
-            Self::UnloadIdle
-            | Self::RestoreShortcutDefault
+            Self::RestoreShortcutDefault
             | Self::KeepOnClipboard
             | Self::CopyOnly
             | Self::SpokenFormatting
@@ -190,20 +182,14 @@ impl Feature {
             | Self::SecondDictationShortcut
             | Self::SmartSpacing
             | Self::SpokenSymbols
-            | Self::PickerSortFilter
             | Self::SidedChords
-            | Self::TapOrHold
-            | Self::BenchmarkDetails => 20261031,
-            Self::ParakeetUltra
-            | Self::StandaloneSpecialKeys
+            | Self::TapOrHold => 20261031,
+            Self::StandaloneSpecialKeys
             | Self::HistoryStats
             | Self::RecentDictations
             | Self::SkipPauses => 20261101,
             Self::StopWhenCallEnds
             | Self::OutputFixes
-            | Self::PickerActiveFirst
-            | Self::ModelInPlace
-            | Self::PickerDownloaded
             | Self::SectionKeyAlone
             | Self::KeepRecordings
             | Self::HideMenuBarIcon => 20261102,
@@ -240,23 +226,9 @@ impl Feature {
         }
     }
 
-    /// Why turning this feature off is refused now: Parakeet Ultra stays on
-    /// while it is the dictation model, until a switch to another succeeds.
-    pub fn off_refusal(self, settings: &AppSettings) -> Option<&'static str> {
-        (self == Self::ParakeetUltra
-            && settings.transcription.model
-                == crate::transcription::models::TranscriptionModelId::ParakeetUltra)
-            .then_some(
-                "Parakeet Ultra is the dictation model; choose another model before turning it off",
-            )
-    }
-
-    /// The feature `hex settings` key `key` switches (its toggle, or
-    /// Unload when idle's minutes).
+    /// The feature `hex settings` key `key` belongs to (its toggle, or a
+    /// value only it reads, such as Caps Lock dictation's light).
     pub fn for_settings_key(key: &str) -> Option<Self> {
-        if key == "labs.unload_idle_minutes" {
-            return Some(Self::UnloadIdle);
-        }
         if key == "labs.caps_lock_light" {
             return Some(Self::CapsLockDictation);
         }
@@ -328,18 +300,11 @@ impl Feature {
             | Self::FailureNotices
             | Self::SecondDictationShortcut
             | Self::VocabularyBiasing
-            | Self::UnloadIdle
             | Self::RestoreShortcutDefault
             | Self::SpokenFormatting
             | Self::SpokenSymbols
-            | Self::PickerSortFilter
-            | Self::BenchmarkDetails
-            | Self::ParakeetUltra
             | Self::HistoryStats
             | Self::OutputFixes
-            | Self::PickerActiveFirst
-            | Self::ModelInPlace
-            | Self::PickerDownloaded
             | Self::KeepRecordings
             | Self::MeetingNotesVocabulary
             | Self::MeetingFinishedEvent
@@ -376,7 +341,6 @@ impl Feature {
             Self::MouseShortcuts => "mouse-shortcuts",
             Self::PauseBrowser => "pause-browser",
             Self::ShareShortcut => "share-shortcut",
-            Self::UnloadIdle => "unload-idle",
             Self::RestoreShortcutDefault => "restore-shortcut-default",
             Self::KeepOnClipboard => "keep-on-clipboard",
             Self::CopyOnly => "copy-only",
@@ -388,21 +352,15 @@ impl Feature {
             Self::TerminalPasteShortcut => "terminal-paste-shortcut",
             Self::SmartSpacing => "smart-spacing",
             Self::SpokenSymbols => "spoken-symbols",
-            Self::PickerSortFilter => "picker-sort-filter",
             Self::SidedChords => "sided-modifier-chords",
             Self::TapOrHold => "tap-or-hold",
             Self::DoubleTapModifiers => "double-tap-modifiers",
-            Self::BenchmarkDetails => "benchmark-details",
-            Self::ParakeetUltra => "parakeet-ultra",
             Self::StandaloneSpecialKeys => "special-keys",
             Self::HistoryStats => "history-stats",
             Self::RecentDictations => "recent-dictations",
             Self::SkipPauses => "skip-pauses",
             Self::StopWhenCallEnds => "stop-when-call-ends",
             Self::OutputFixes => "output-fixes",
-            Self::PickerActiveFirst => "picker-active-first",
-            Self::ModelInPlace => "model-in-place",
-            Self::PickerDownloaded => "picker-downloaded",
             Self::SectionKeyAlone => "section-key",
             Self::KeepRecordings => "keep-recordings",
             Self::SettingsSearch => "settings-search",
@@ -454,7 +412,6 @@ impl Feature {
             Self::MouseShortcuts => "labs.mouse_shortcuts",
             Self::PauseBrowser => "pause_browser_media",
             Self::ShareShortcut => "share_dictation_shortcut",
-            Self::UnloadIdle => "labs.unload_idle",
             Self::RestoreShortcutDefault => "labs.restore_shortcut_default",
             Self::KeepOnClipboard => "labs.keep_on_clipboard",
             Self::CopyOnly => "labs.copy_only",
@@ -466,21 +423,15 @@ impl Feature {
             Self::TerminalPasteShortcut => "labs.terminal_paste_shortcut",
             Self::SmartSpacing => "labs.smart_spacing",
             Self::SpokenSymbols => "labs.spoken_symbols",
-            Self::PickerSortFilter => "labs.picker_sort_filter",
             Self::SidedChords => "labs.sided_modifier_chords",
             Self::TapOrHold => "labs.tap_or_hold",
             Self::DoubleTapModifiers => "labs.double_tap_modifiers",
-            Self::BenchmarkDetails => "labs.benchmark_details",
-            Self::ParakeetUltra => "labs.parakeet_ultra",
             Self::StandaloneSpecialKeys => "labs.standalone_special_keys",
             Self::HistoryStats => "labs.history_stats",
             Self::RecentDictations => "labs.recent_dictations",
             Self::SkipPauses => "labs.skip_pauses",
             Self::StopWhenCallEnds => "labs.stop_when_call_ends",
             Self::OutputFixes => "labs.output_fixes",
-            Self::PickerActiveFirst => "labs.picker_active_first",
-            Self::ModelInPlace => "labs.model_in_place",
-            Self::PickerDownloaded => "labs.picker_downloaded",
             Self::SectionKeyAlone => "labs.section_key_alone",
             Self::KeepRecordings => "labs.keep_recordings",
             Self::SettingsSearch => "labs.settings_search",
@@ -536,7 +487,6 @@ impl Feature {
             Self::MouseShortcuts => settings.labs.mouse_shortcuts,
             Self::PauseBrowser => settings.pause_browser_media,
             Self::ShareShortcut => settings.share_dictation_shortcut,
-            Self::UnloadIdle => settings.labs.unload_idle,
             Self::RestoreShortcutDefault => settings.labs.restore_shortcut_default,
             Self::KeepOnClipboard => settings.labs.keep_on_clipboard,
             Self::CopyOnly => settings.labs.copy_only,
@@ -548,21 +498,15 @@ impl Feature {
             Self::TerminalPasteShortcut => settings.labs.terminal_paste_shortcut,
             Self::SmartSpacing => settings.labs.smart_spacing,
             Self::SpokenSymbols => settings.labs.spoken_symbols,
-            Self::PickerSortFilter => settings.labs.picker_sort_filter,
             Self::SidedChords => settings.labs.sided_modifier_chords,
             Self::TapOrHold => settings.labs.tap_or_hold,
             Self::DoubleTapModifiers => settings.labs.double_tap_modifiers,
-            Self::BenchmarkDetails => settings.labs.benchmark_details,
-            Self::ParakeetUltra => settings.labs.parakeet_ultra,
             Self::StandaloneSpecialKeys => settings.labs.standalone_special_keys,
             Self::HistoryStats => settings.labs.history_stats,
             Self::RecentDictations => settings.labs.recent_dictations,
             Self::SkipPauses => settings.labs.skip_pauses,
             Self::StopWhenCallEnds => settings.labs.stop_when_call_ends,
             Self::OutputFixes => settings.labs.output_fixes,
-            Self::PickerActiveFirst => settings.labs.picker_active_first,
-            Self::ModelInPlace => settings.labs.model_in_place,
-            Self::PickerDownloaded => settings.labs.picker_downloaded,
             Self::SectionKeyAlone => settings.labs.section_key_alone,
             Self::KeepRecordings => settings.labs.keep_recordings,
             Self::SettingsSearch => settings.labs.settings_search,
@@ -615,7 +559,6 @@ impl Feature {
             &mut labs.live_chapters,
             &mut labs.vocabulary_biasing,
             &mut labs.mouse_shortcuts,
-            &mut labs.unload_idle,
             &mut labs.restore_shortcut_default,
             &mut labs.keep_on_clipboard,
             &mut labs.copy_only,
@@ -627,21 +570,15 @@ impl Feature {
             &mut labs.terminal_paste_shortcut,
             &mut labs.smart_spacing,
             &mut labs.spoken_symbols,
-            &mut labs.picker_sort_filter,
             &mut labs.sided_modifier_chords,
             &mut labs.tap_or_hold,
             &mut labs.double_tap_modifiers,
-            &mut labs.benchmark_details,
-            &mut labs.parakeet_ultra,
             &mut labs.standalone_special_keys,
             &mut labs.history_stats,
             &mut labs.recent_dictations,
             &mut labs.skip_pauses,
             &mut labs.stop_when_call_ends,
             &mut labs.output_fixes,
-            &mut labs.picker_active_first,
-            &mut labs.model_in_place,
-            &mut labs.picker_downloaded,
             &mut labs.section_key_alone,
             &mut labs.keep_recordings,
             &mut labs.settings_search,
@@ -698,7 +635,6 @@ impl Feature {
             Self::MouseShortcuts => settings.labs.mouse_shortcuts = on,
             Self::PauseBrowser => settings.pause_browser_media = on,
             Self::ShareShortcut => settings.share_dictation_shortcut = on,
-            Self::UnloadIdle => settings.labs.unload_idle = on,
             Self::RestoreShortcutDefault => settings.labs.restore_shortcut_default = on,
             Self::KeepOnClipboard => settings.labs.keep_on_clipboard = on,
             Self::CopyOnly => settings.labs.copy_only = on,
@@ -710,7 +646,6 @@ impl Feature {
             Self::TerminalPasteShortcut => settings.labs.terminal_paste_shortcut = on,
             Self::SmartSpacing => settings.labs.smart_spacing = on,
             Self::SpokenSymbols => settings.labs.spoken_symbols = on,
-            Self::PickerSortFilter => settings.labs.picker_sort_filter = on,
             Self::SidedChords => settings.labs.sided_modifier_chords = on,
             Self::TapOrHold => settings.labs.tap_or_hold = on,
             Self::DoubleTapModifiers => {
@@ -719,16 +654,11 @@ impl Feature {
                 // it falls back as a fresh load would.
                 settings.normalize_double_tap_settings();
             }
-            Self::BenchmarkDetails => settings.labs.benchmark_details = on,
-            Self::ParakeetUltra => settings.labs.parakeet_ultra = on,
             Self::HistoryStats => settings.labs.history_stats = on,
             Self::RecentDictations => settings.labs.recent_dictations = on,
             Self::SkipPauses => settings.labs.skip_pauses = on,
             Self::StopWhenCallEnds => settings.labs.stop_when_call_ends = on,
             Self::OutputFixes => settings.labs.output_fixes = on,
-            Self::PickerActiveFirst => settings.labs.picker_active_first = on,
-            Self::ModelInPlace => settings.labs.model_in_place = on,
-            Self::PickerDownloaded => settings.labs.picker_downloaded = on,
             Self::KeepRecordings => settings.labs.keep_recordings = on,
             Self::SettingsSearch => settings.labs.settings_search = on,
             Self::Appearance => settings.labs.appearance = on,
@@ -779,7 +709,6 @@ const LIVE_CHAPTERS: u64 = 1 << 2;
 const PLAYGROUND: u64 = 1 << 3;
 const VOCABULARY_BIASING: u64 = 1 << 4;
 const MOUSE_SHORTCUTS: u64 = 1 << 5;
-const UNLOAD_IDLE: u64 = 1 << 6;
 const KEEP_ON_CLIPBOARD: u64 = 1 << 7;
 const COPY_ONLY: u64 = 1 << 8;
 const SPOKEN_FORMATTING: u64 = 1 << 9;
@@ -790,7 +719,6 @@ const SPOKEN_SYMBOLS: u64 = 1 << 13;
 const SIDED_CHORDS: u64 = 1 << 14;
 const TAP_OR_HOLD: u64 = 1 << 15;
 const SKIP_PAUSES: u64 = 1 << 16;
-const PARAKEET_ULTRA: u64 = 1 << 17;
 const HISTORY_STATS: u64 = 1 << 18;
 const RECENT_DICTATIONS: u64 = 1 << 19;
 const STOP_WHEN_CALL_ENDS: u64 = 1 << 20;
@@ -807,15 +735,12 @@ const MEETING_FINISHED_EVENT: u64 = 1 << 28;
 const GNOME_MEETING_CAPSULES: u64 = 1 << 29;
 const SCREENSHOTS: u64 = 1 << 30;
 const ANNOTATE_REPLAY: u64 = 1 << 31;
-/// Unload-idle minutes (at most 1,440, 11 bits) sit above the switches.
-const MINUTES_SHIFT: u64 = 32;
-const MINUTES_BITS: u32 = 11;
-const MINUTES_MASK: u64 = (1 << MINUTES_BITS) - 1;
-/// Bits 1..31 are full, so this switch sits above the minutes.
-const MEETING_IMPORT: u64 = 1 << (MINUTES_SHIFT + MINUTES_BITS as u64);
-/// The next bit above Import audio's switch, clear of the minutes below it.
+/// The first switch above bit 31; each later one takes the next bit up.
+/// Bits 6 and 17 are free.
+const MEETING_IMPORT: u64 = 1 << 32;
+/// The next bit above Import audio's switch.
 const QUIT_CLOSES_WINDOW: u64 = MEETING_IMPORT << 1;
-/// The next bit above Quit closes Settings, also clear of the minutes below.
+/// The next bit above Quit closes Settings.
 const EXPIRE_MEETING_AUDIO: u64 = QUIT_CLOSES_WINDOW << 1;
 const LIVE_TYPING: u64 = EXPIRE_MEETING_AUDIO << 1;
 /// The next bit above Live typing's switch.
@@ -911,7 +836,6 @@ fn encode(settings: &LabsSettings) -> u64 {
 /// The switches `settings` hold for the features `reaches` admits; the
 /// rest read off while their saved setting stays as it is.
 fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u64 {
-    let minutes = u64::from(settings.unload_idle_minutes.clamp(1, 24 * 60)) << MINUTES_SHIFT;
     [
         (Feature::LiveText, settings.live_text, LIVE_TEXT),
         (
@@ -932,7 +856,6 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
             settings.mouse_shortcuts,
             MOUSE_SHORTCUTS,
         ),
-        (Feature::UnloadIdle, settings.unload_idle, UNLOAD_IDLE),
         (
             Feature::KeepOnClipboard,
             settings.keep_on_clipboard,
@@ -967,11 +890,6 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
             Feature::DoubleTapModifiers,
             settings.double_tap_modifiers,
             DOUBLE_TAP_MODIFIERS,
-        ),
-        (
-            Feature::ParakeetUltra,
-            settings.parakeet_ultra,
-            PARAKEET_ULTRA,
         ),
         (Feature::HistoryStats, settings.history_stats, HISTORY_STATS),
         (
@@ -1102,7 +1020,7 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
     ]
     .into_iter()
     .filter(|(feature, on, _)| *on && reaches(*feature))
-    .fold(KNOWN | minutes, |state, (_, _, bit)| state | bit)
+    .fold(KNOWN, |state, (_, _, bit)| state | bit)
 }
 
 /// The names of the features on, for `hex status`.
@@ -1134,8 +1052,9 @@ mod tests {
 
     #[test]
     fn graduated_features_answer_by_name() {
+        // A lab that only existed for local model files is simply unknown.
         let error = resolve("custom-models", |_| true).unwrap_err().to_string();
-        assert!(error.contains("graduated"), "{error}");
+        assert!(!error.contains("graduated"), "{error}");
         assert_eq!(Feature::from_name("custom-models"), None);
         let error = resolve("meeting-platform-icons", |_| true)
             .unwrap_err()
@@ -1231,10 +1150,6 @@ mod tests {
             );
         }
         assert_eq!(
-            Feature::for_settings_key("labs.unload_idle_minutes"),
-            Some(Feature::UnloadIdle)
-        );
-        assert_eq!(
             Feature::for_settings_key("labs.caps_lock_light"),
             Some(Feature::CapsLockDictation)
         );
@@ -1243,19 +1158,6 @@ mod tests {
             Some(Feature::Appearance)
         );
         assert_eq!(Feature::for_settings_key("dictation_hotkey"), None);
-    }
-
-    #[test]
-    fn unload_idle_carries_its_minutes() {
-        let mut labs = LabsSettings::default();
-        assert_eq!(labs.unload_idle_minutes, 15);
-        let state = encode(&labs);
-        assert_eq!(state & UNLOAD_IDLE, 0);
-        labs.unload_idle = true;
-        labs.unload_idle_minutes = 30;
-        let state = encode(&labs);
-        assert_ne!(state & UNLOAD_IDLE, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 30);
     }
 
     #[test]
@@ -1279,10 +1181,8 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode(&labs) & SPOKEN_FORMATTING, 0);
         labs.spoken_formatting = true;
-        labs.unload_idle_minutes = 60;
         let state = encode(&labs);
         assert_ne!(state & SPOKEN_FORMATTING, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 60);
     }
 
     #[test]
@@ -1290,11 +1190,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode(&labs) & FILLER_WORDS, 0);
         labs.filler_words = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode(&labs);
         assert_ne!(state & FILLER_WORDS, 0);
         assert_eq!(state & SPOKEN_FORMATTING, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1302,11 +1200,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode(&labs) & SUBTITLE_EXPORT, 0);
         labs.subtitle_export = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode(&labs);
         assert_ne!(state & SUBTITLE_EXPORT, 0);
         assert_eq!(state & FILLER_WORDS, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1314,11 +1210,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode(&labs) & SMART_SPACING, 0);
         labs.smart_spacing = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode(&labs);
         assert_ne!(state & SMART_SPACING, 0);
         assert_eq!(state & SUBTITLE_EXPORT, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1326,12 +1220,10 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode(&labs) & SPOKEN_SYMBOLS, 0);
         labs.spoken_symbols = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode(&labs);
         assert_ne!(state & SPOKEN_SYMBOLS, 0);
         assert_eq!(state & SPOKEN_FORMATTING, 0);
         assert_eq!(state & SMART_SPACING, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1339,11 +1231,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & SIDED_CHORDS, 0);
         labs.sided_modifier_chords = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & SIDED_CHORDS, 0);
         assert_eq!(state & SPOKEN_SYMBOLS, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1351,11 +1241,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & TAP_OR_HOLD, 0);
         labs.tap_or_hold = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & TAP_OR_HOLD, 0);
         assert_eq!(state & SIDED_CHORDS, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1363,11 +1251,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & DOUBLE_TAP_MODIFIERS, 0);
         labs.double_tap_modifiers = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & DOUBLE_TAP_MODIFIERS, 0);
         assert_eq!(state & TAP_OR_HOLD, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
         assert_eq!(
             Feature::DoubleTapModifiers.on_this_os(),
             cfg!(target_os = "macos")
@@ -1380,11 +1266,8 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & HISTORY_STATS, 0);
         labs.history_stats = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & HISTORY_STATS, 0);
-        assert_eq!(state & PARAKEET_ULTRA, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1392,11 +1275,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & RECENT_DICTATIONS, 0);
         labs.recent_dictations = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & RECENT_DICTATIONS, 0);
         assert_eq!(state & HISTORY_STATS, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1404,12 +1285,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & SKIP_PAUSES, 0);
         labs.skip_pauses = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & SKIP_PAUSES, 0);
         assert_eq!(state & TAP_OR_HOLD, 0);
-        assert_eq!(state & PARAKEET_ULTRA, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1417,11 +1295,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & STOP_WHEN_CALL_ENDS, 0);
         labs.stop_when_call_ends = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & STOP_WHEN_CALL_ENDS, 0);
         assert_eq!(state & RECENT_DICTATIONS, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1429,11 +1305,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & KEEP_RECORDINGS, 0);
         labs.keep_recordings = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & KEEP_RECORDINGS, 0);
         assert_eq!(state & STOP_WHEN_CALL_ENDS, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1441,11 +1315,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & HIDE_MENU_BAR_ICON, 0);
         labs.hide_menu_bar_icon = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & HIDE_MENU_BAR_ICON, 0);
         assert_eq!(state & KEEP_RECORDINGS, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1453,13 +1325,10 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & QUIT_CLOSES_WINDOW, 0);
         labs.quit_closes_window = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & QUIT_CLOSES_WINDOW, 0);
         assert_eq!(state & MEETING_IMPORT, 0);
         assert_eq!(state & HIDE_MENU_BAR_ICON, 0);
-        // The switch sits above the minutes, which keep their value.
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
     }
 
     #[test]
@@ -1467,11 +1336,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & SCREENSHOTS, 0);
         labs.screenshots = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & SCREENSHOTS, 0);
         assert_eq!(state & MEETING_FINISHED_EVENT, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1479,11 +1346,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & NOTCH_INDICATOR, 0);
         labs.notch_indicator = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & NOTCH_INDICATOR, 0);
         assert_eq!(state & MEETING_NOTES_VOCABULARY, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1491,11 +1356,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & MOVABLE_MEETING_CAPSULES, 0);
         labs.movable_meeting_capsules = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & MOVABLE_MEETING_CAPSULES, 0);
         assert_eq!(state & HIDE_MENU_BAR_ICON, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1503,11 +1366,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & GNOME_CLIPBOARD_RESTORE, 0);
         labs.gnome_clipboard_restore = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & GNOME_CLIPBOARD_RESTORE, 0);
         assert_eq!(state & MEETING_NOTES_VOCABULARY, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1515,11 +1376,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & TYPED_TEXT, 0);
         labs.typed_text = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & TYPED_TEXT, 0);
         assert_eq!(state & GNOME_CLIPBOARD_RESTORE, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
         assert_eq!(Feature::TypedText.on_this_os(), cfg!(target_os = "linux"));
     }
 
@@ -1528,11 +1387,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & MEETING_FINISHED_EVENT, 0);
         labs.meeting_finished_event = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & MEETING_FINISHED_EVENT, 0);
         assert_eq!(state & NOTCH_INDICATOR, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1540,23 +1397,19 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & ANNOTATE_REPLAY, 0);
         labs.annotate_replay = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & ANNOTATE_REPLAY, 0);
         assert_eq!(state & GNOME_MEETING_CAPSULES, 0);
         assert_eq!(state & SCREENSHOTS, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
     #[test]
     fn gnome_meeting_capsules_is_its_own_bit_and_off_by_default() {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & GNOME_MEETING_CAPSULES, 0);
         labs.gnome_meeting_capsules = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & GNOME_MEETING_CAPSULES, 0);
         assert_eq!(state & GNOME_CLIPBOARD_RESTORE, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1564,12 +1417,10 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & GNOME_ANNOTATE, 0);
         labs.gnome_annotate = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & GNOME_ANNOTATE, 0);
         assert_eq!(state & GNOME_MEETING_CAPSULES, 0);
         assert_eq!(state & CAPS_LOCK_DICTATION, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
     }
 
     #[test]
@@ -1577,11 +1428,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & MORE_CALL_APPS, 0);
         labs.more_call_apps = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & MORE_CALL_APPS, 0);
         assert_eq!(state & STOP_WHEN_CALL_ENDS, 0);
-        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]
@@ -1589,11 +1438,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & MEETING_IMPORT, 0);
         labs.meeting_import = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & MEETING_IMPORT, 0);
         assert_eq!(state & ANNOTATE_REPLAY, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
     }
 
     #[test]
@@ -1604,11 +1451,9 @@ mod tests {
             0
         );
         labs.meeting_descriptive_filenames = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & MEETING_DESCRIPTIVE_FILENAMES, 0);
         assert_eq!(state & LIVE_TYPING, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
     }
 
     #[test]
@@ -1616,11 +1461,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & MEETING_NOTES_FILE, 0);
         labs.meeting_notes_file = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & MEETING_NOTES_FILE, 0);
         assert_eq!(state & MEETING_DESCRIPTIVE_FILENAMES, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
     }
 
     #[test]
@@ -1628,12 +1471,10 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & FAILURE_NOTICES, 0);
         labs.failure_notices = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & FAILURE_NOTICES, 0);
         assert_eq!(state & MEETING_DESCRIPTIVE_FILENAMES, 0);
         assert_eq!(state & LIVE_TYPING, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
     }
 
     #[test]
@@ -1641,12 +1482,10 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & EXPIRE_MEETING_AUDIO, 0);
         labs.expire_meeting_audio = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & EXPIRE_MEETING_AUDIO, 0);
         assert_eq!(state & MEETING_IMPORT, 0);
         assert_eq!(state & QUIT_CLOSES_WINDOW, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
     }
 
     #[test]
@@ -1654,11 +1493,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & CAPS_LOCK_DICTATION, 0);
         labs.caps_lock_dictation = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & CAPS_LOCK_DICTATION, 0);
         assert_eq!(state & MEETING_DESCRIPTIVE_FILENAMES, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
         assert_eq!(
             Feature::CapsLockDictation.on_this_os(),
             cfg!(target_os = "macos")
@@ -1676,7 +1513,6 @@ mod tests {
         assert_ne!(state & CAPS_LOCK_SLOW_BLINK, 0);
         assert_ne!(state & CAPS_LOCK_DICTATION, 0);
         assert_eq!(state & GNOME_ANNOTATE, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 15);
     }
 
     #[test]
@@ -1684,12 +1520,10 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & OPENCODE_IN_WSL, 0);
         labs.opencode_in_wsl = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & OPENCODE_IN_WSL, 0);
         assert_eq!(state & CAPS_LOCK_SLOW_BLINK, 0);
         assert_eq!(state & TYPED_TEXT, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
         assert_eq!(
             Feature::OpenCodeInWsl.on_this_os(),
             cfg!(target_os = "windows")
@@ -1701,12 +1535,10 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & API_PROCESSING, 0);
         labs.api_processing = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & API_PROCESSING, 0);
         assert_eq!(state & OPENCODE_IN_WSL, 0);
         assert_eq!(state & TYPED_TEXT, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
         assert!(Feature::ApiProcessing.on_this_os());
     }
 
@@ -1715,12 +1547,10 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & API_TIMESTAMPS, 0);
         labs.api_timestamps = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & API_TIMESTAMPS, 0);
         assert_eq!(state & API_PROCESSING, 0);
         assert_eq!(state & MEETING_NOTES_FILE, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
         assert!(Feature::ApiTimestamps.on_this_os());
         assert_eq!(Feature::ApiTimestamps.added(), 20261110);
         assert_eq!(Feature::ApiTimestamps.audience(), Audience::Everyone);
@@ -1728,18 +1558,16 @@ mod tests {
 
     #[test]
     fn speakers_only_is_its_own_bit_and_off_by_default() {
-        assert_eq!(SPEAKERS_ONLY, 1 << 57);
+        assert_eq!(SPEAKERS_ONLY, 1 << 46);
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & SPEAKERS_ONLY, 0);
         labs.speakers_only = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & SPEAKERS_ONLY, 0);
         assert_eq!(state & API_PROCESSING, 0);
         assert_eq!(state & DOUBLE_TAP_MODIFIERS, 0);
         assert_eq!(state & RETURN_TO_APP, 0);
         assert_eq!(state & TYPED_TEXT, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
         assert!(Feature::SpeakersOnly.on_this_os());
         assert_eq!(Feature::SpeakersOnly.added(), 20261109);
         assert_eq!(Feature::SpeakersOnly.audience(), Audience::Everyone);
@@ -1747,15 +1575,13 @@ mod tests {
 
     #[test]
     fn pause_menu_is_its_own_bit_and_macos_only() {
-        assert_eq!(PAUSE_MENU, 1 << 60);
+        assert_eq!(PAUSE_MENU, 1 << 49);
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & PAUSE_MENU, 0);
         labs.pause_menu = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & PAUSE_MENU, 0);
         assert_eq!(state & MEETING_NOTES_FILE, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
         assert_eq!(Feature::PauseMenu.on_this_os(), cfg!(target_os = "macos"));
         assert_eq!(Feature::PauseMenu.added(), 20261110);
         assert_eq!(Feature::PauseMenu.audience(), Audience::Everyone);
@@ -1781,11 +1607,9 @@ mod tests {
         let mut labs = LabsSettings::default();
         assert_eq!(encode_where(&labs, |_| true) & RETURN_TO_APP, 0);
         labs.return_to_app = true;
-        labs.unload_idle_minutes = 24 * 60;
         let state = encode_where(&labs, |_| true);
         assert_ne!(state & RETURN_TO_APP, 0);
         assert_eq!(state & DOUBLE_TAP_MODIFIERS, 0);
-        assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 24 * 60);
         assert_eq!(Feature::ReturnToApp.on_this_os(), cfg!(target_os = "macos"));
         assert_eq!(Feature::ReturnToApp.audience(), Audience::Everyone);
         assert_eq!(Feature::ReturnToApp.group(), Group::Output);
@@ -1797,6 +1621,31 @@ mod tests {
             Feature::TerminalPasteShortcut.on_this_os(),
             cfg!(any(target_os = "windows", target_os = "linux"))
         );
+    }
+
+    #[test]
+    fn upstream_local_model_switches_are_read_and_ignored() {
+        let removed = [
+            "unload_idle",
+            "unload_idle_minutes",
+            "parakeet_ultra",
+            "model_in_place",
+            "picker_sort_filter",
+            "benchmark_details",
+            "picker_active_first",
+            "picker_downloaded",
+        ];
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"labs": {"unload_idle": true, "unload_idle_minutes": 30, "parakeet_ultra": true, "model_in_place": true, "picker_sort_filter": true, "benchmark_details": true, "picker_active_first": true, "picker_downloaded": true, "live_text": true}}"#,
+        )
+        .unwrap();
+        assert!(settings.labs.live_text);
+        assert!(!settings.labs.playground);
+        let json = serde_json::to_value(&settings).unwrap();
+        for key in removed {
+            assert!(json["labs"].get(key).is_none(), "{key} is written back");
+            assert_eq!(Feature::for_settings_key(&format!("labs.{key}")), None);
+        }
     }
 
     #[test]

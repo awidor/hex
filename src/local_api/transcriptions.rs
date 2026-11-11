@@ -1,8 +1,9 @@
 //! The `POST /transcriptions` body: reading the uploaded WAV, waiting for the
-//! service's transcription, and answering with the raw fields, the model's
-//! native timings, and (when asked) Global mode's processed text.
+//! service to have ElevenLabs transcribe it, and answering with the raw
+//! fields, Scribe's own timings, and (when asked) Global mode's processed
+//! text.
 //!
-//! The query, the lab gates, and the model selection stay in
+//! The query, the lab gates, the selection, and the API-key check stay in
 //! [`super::transcription_action`]; this module owns what happens once the
 //! request is admitted.
 
@@ -19,8 +20,8 @@ use super::{
 };
 
 /// Everything `/transcriptions` admitted for one request before its audio
-/// arrives: the model selection, the audio-memory slot, Global mode's
-/// processing slot, and the timing level the lab allowed.
+/// arrives: the selection (Scribe and a language), the audio-memory slot,
+/// Global mode's processing slot, and the timing level the lab allowed.
 pub(super) struct Admitted {
     pub selection: crate::transcription::models::TranscriptionSelection,
     pub admission: crate::transcription::service::AudioAdmission,
@@ -108,6 +109,10 @@ pub(super) fn transcribe_audio(
     }
 }
 
+/// The answer for a transcription the service could not give. A failed
+/// request to ElevenLabs carries its reason (a refused key, spent quota, no
+/// network) as `message`; that text never holds the key, the audio, or any
+/// transcript.
 pub(super) fn transcription_error(
     error: crate::transcription::service::TranscriptionServiceError,
 ) -> HttpResponse {
@@ -122,15 +127,47 @@ pub(super) fn transcription_error(
             HttpResponse::code(409, "cancelled")
         }
         crate::transcription::service::TranscriptionServiceError::Model(error) => {
-            tracing::error!(%error, "prepared transcription model could not load");
-            HttpResponse::code(500, "model-load-failed")
+            tracing::error!(%error, "transcription could not start");
+            HttpResponse::refusal(500, "model-load-failed", &error)
         }
         crate::transcription::service::TranscriptionServiceError::Inference(error) => {
-            tracing::error!(%error, "local transcription failed");
-            HttpResponse::code(500, "transcription-failed")
+            tracing::error!(%error, "transcription failed");
+            HttpResponse::refusal(500, "transcription-failed", &error)
         }
         crate::transcription::service::TranscriptionServiceError::Timestamps => {
             HttpResponse::code(422, "unsupported-timestamps")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcription::scribe::ScribeError;
+    use crate::transcription::service::TranscriptionServiceError;
+
+    #[test]
+    fn a_failed_request_to_elevenlabs_says_why() {
+        for (error, expected) in [
+            (ScribeError::InvalidKey, "refused the API key"),
+            (ScribeError::QuotaExceeded, "quota"),
+            (
+                ScribeError::Unreachable("no network".into()),
+                "couldn't reach ElevenLabs",
+            ),
+        ] {
+            let response =
+                transcription_error(TranscriptionServiceError::Inference(error.to_string()));
+            assert_eq!(response.status, 500);
+            let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["code"], "transcription-failed");
+            assert!(
+                body["message"].as_str().unwrap().contains(expected),
+                "{body}"
+            );
+        }
+        let busy = transcription_error(TranscriptionServiceError::QueueFull);
+        assert_eq!(busy.status, 429);
+        assert_eq!(busy.body, br#"{"code":"queue-full"}"#);
     }
 }

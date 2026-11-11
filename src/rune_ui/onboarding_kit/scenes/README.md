@@ -12,7 +12,7 @@ reports errors with their line numbers.
 - `boss Jay amber`: the main other person, with an optional colour (`amber apple blue cobalt coral ember lilac mint solaris yuzu`). Initials come from the name; Jay shows his photo instead (`PHOTOS` in `inbox.rs`).
 - `side Priya`: up to three side characters, each with an optional colour.
 - `pill Jay is presenting`: the red status pill at the right of the header, level with the title (optional).
-- `lead Investors are waiting. One quick reply by hand.`: the line under the title.
+- `lead Investors are waiting. One quick reply by hand.`: a line older scenes carry; no page shows it now (optional).
 
 **Without Hex.** Lines before `start` are already in the thread when the scene opens. `end` is the last line.
 - `Jay: text [0.4]`: someone's message. Without a number, the scene holds for its reading time. `[#desk]` names the line for a later `tap`.
@@ -56,14 +56,6 @@ effect confetti
 score  {hex}, no typos, one wedding.
 typed  Typing: {secs}, {typos}, and one date.
 ```
-
-## Sketches
-
-`sketch-*.scene` files are what "Watch another one" plays while the speech
-model downloads: a "Without Hex" part only, no `with`, `score` or `typed`,
-ending at `end`. Each runs 15–18 s, and the first run cuts one short only
-after a reply has gone out, so give it a few replies. They are listed in
-`sketches.rs`, in the order they play.
 
 ## Limits and checking
 

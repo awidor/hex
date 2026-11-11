@@ -15,8 +15,8 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 
 use super::{
     ActiveMeeting, FINAL_PENDING_FILE, IMPORT_PENDING_FILE, MeetingManifest, MeetingStatus,
-    SAMPLE_RATE, TrackManifest, create_empty_track, finish::finish_transcription, now_ms, root,
-    set_owner_only, sync_directory, sync_file, write_manifest,
+    SAMPLE_RATE, TrackManifest, create_empty_track, finish::finish_transcription, now_ms,
+    require_api_key, root, set_owner_only, sync_directory, sync_file, write_manifest,
 };
 
 /// The extensions the picker offers and the native decoder reads.
@@ -48,10 +48,8 @@ pub(crate) fn import(source: &Path) -> Result<MeetingManifest> {
         ));
     }
     let (_, selection) = crate::app_settings::transcription_selection();
-    let model = crate::transcription::models::validate(&selection)?;
-    if !crate::transcription::models::is_installed(model, &selection.language) {
-        return Err(eyre!("{} is not installed", model.name));
-    }
+    crate::transcription::models::validate(&selection)?;
+    require_api_key()?;
 
     let created_at_ms = now_ms();
     let id = format!("{created_at_ms}-{}", std::process::id());

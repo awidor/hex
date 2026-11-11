@@ -123,9 +123,8 @@ const VOICE_HISTORY_FRAMES: usize = 150;
 /// room costs no false presses and saves missed ones.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 pub const BOTH_SIDES_WINDOW: Duration = Duration::from_millis(80);
-const MINIMUM_PARAKEET_DURATION: Duration = Duration::from_millis(1500);
 const INITIAL_RECORDING_CAPACITY: Duration = Duration::from_secs(10);
-const PARAKEET_SAMPLE_RATE: u32 = 16_000;
+const TRANSCRIPTION_SAMPLE_RATE: u32 = 16_000;
 /// A capture whose loudest 30 ms window stays below this level is treated as
 /// empty rather than transcribed, because models hallucinate closing phrases
 /// such as "thank you" on silence. Deliberately conservative: whispered speech
@@ -383,7 +382,7 @@ pub struct DictationClip {
 
 impl DictationClip {
     pub fn duration_ms(&self) -> u64 {
-        self.samples.len() as u64 * 1_000 / u64::from(PARAKEET_SAMPLE_RATE)
+        self.samples.len() as u64 * 1_000 / u64::from(TRANSCRIPTION_SAMPLE_RATE)
     }
 
     /// Takes the clip's live stream; finish it with the complete clip.
@@ -480,7 +479,8 @@ impl DictationClip {
                 level_dbfs,
                 threshold_dbfs = SILENCE_THRESHOLD_DBFS,
                 audio_ms = self.duration_ms(),
-                pre_press_ms = self.press_samples as u64 * 1_000 / u64::from(PARAKEET_SAMPLE_RATE),
+                pre_press_ms =
+                    self.press_samples as u64 * 1_000 / u64::from(TRANSCRIPTION_SAMPLE_RATE),
                 pre_press_dbfs = evidence.pre_press_dbfs,
                 post_press_dbfs = evidence.post_press_dbfs,
                 zero_fraction = evidence.zero_fraction,
@@ -497,41 +497,7 @@ impl DictationClip {
             );
             return true;
         }
-        let released = self.samples.len().saturating_sub(self.tail_samples);
-        let started = std::time::Instant::now();
-        match crate::transcription::speech_detector::contains_speech(&self.samples[..released]) {
-            Some(false) => {
-                let peak = self.samples[..released]
-                    .iter()
-                    .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-                tracing::info!(
-                    level_dbfs,
-                    silence_threshold_dbfs = SILENCE_THRESHOLD_DBFS,
-                    peak_dbfs = 20.0 * peak.max(f32::MIN_POSITIVE).log10(),
-                    speech_threshold = crate::transcription::speech_detector::THRESHOLD,
-                    audio_ms = self.duration_ms(),
-                    vad_ms = started.elapsed().as_millis() as u64,
-                    "discarded dictation without detected speech"
-                );
-                true
-            }
-            Some(true) => {
-                tracing::debug!(
-                    audio_ms = self.duration_ms(),
-                    vad_ms = started.elapsed().as_millis() as u64,
-                    "speech detected in dictation"
-                );
-                false
-            }
-            None => false,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn into_parakeet_samples(self) -> Vec<f32> {
-        let mut samples = self.samples;
-        pad_for_parakeet(&mut samples);
-        samples
+        false
     }
 
     pub fn into_transcription_samples(self) -> Vec<f32> {
@@ -556,27 +522,17 @@ fn loudest_window_dbfs(samples: &[f32]) -> f32 {
     (20.0 * loudest.max(1e-6).log10()) as f32
 }
 
-pub(crate) fn pad_for_parakeet(samples: &mut Vec<f32>) {
-    samples.resize(
-        samples
-            .len()
-            .max(samples_for(MINIMUM_PARAKEET_DURATION, PARAKEET_SAMPLE_RATE)),
-        0.0,
-    );
+pub fn resample_to_16k(samples: &[f32], source_rate: u32) -> Vec<f32> {
+    try_resample_to_16k(samples, source_rate).expect("microphone sample rate must be resampleable")
 }
 
-pub fn resample_for_parakeet(samples: &[f32], source_rate: u32) -> Vec<f32> {
-    try_resample_for_parakeet(samples, source_rate)
-        .expect("microphone sample rate must be resampleable")
-}
-
-pub fn try_resample_for_parakeet(samples: &[f32], source_rate: u32) -> Result<Vec<f32>, String> {
+pub fn try_resample_to_16k(samples: &[f32], source_rate: u32) -> Result<Vec<f32>, String> {
     let mut recording = Recording::try_new(CaptureInstant::ZERO, source_rate)?;
     recording.push(samples);
     Ok(recording.finish(None))
 }
 
-/// Incremental [`resample_for_parakeet`] for long recordings that must not be
+/// Incremental [`resample_to_16k`] for long recordings that must not be
 /// held in memory. Output excludes the resampler delay, and the total length
 /// after `finish` matches the whole-buffer conversion.
 pub struct StreamingResampler {
@@ -623,7 +579,7 @@ impl StreamingResampler {
 
     pub fn finish(mut self) -> Vec<f32> {
         let expected =
-            self.source_samples * PARAKEET_SAMPLE_RATE as usize / self.source_rate as usize;
+            self.source_samples * TRANSCRIPTION_SAMPLE_RATE as usize / self.source_rate as usize;
         let Some(mut resampler) = self.resampler.take() else {
             return Vec::new();
         };
@@ -725,11 +681,11 @@ impl Recording {
     }
 
     fn try_new(started_at: CaptureInstant, source_rate: u32) -> Result<Self, String> {
-        let resampler = (source_rate != PARAKEET_SAMPLE_RATE)
+        let resampler = (source_rate != TRANSCRIPTION_SAMPLE_RATE)
             .then(|| {
                 Fft::new_custom(
                     source_rate as usize,
-                    PARAKEET_SAMPLE_RATE as usize,
+                    TRANSCRIPTION_SAMPLE_RATE as usize,
                     Self::CHUNK_SIZE,
                     1,
                     1,
@@ -744,7 +700,7 @@ impl Recording {
             intentional: false,
             samples: Vec::with_capacity(samples_for(
                 INITIAL_RECORDING_CAPACITY,
-                PARAKEET_SAMPLE_RATE,
+                TRANSCRIPTION_SAMPLE_RATE,
             )),
             source_samples: 0,
             source_rate,
@@ -815,13 +771,13 @@ impl Recording {
     /// The 20 ms clip frame `at` falls in.
     fn frame_at(&self, at: CaptureInstant) -> usize {
         let from_start = self.pre_press + at.duration_since(self.started_at);
-        samples_for(from_start, PARAKEET_SAMPLE_RATE) / VoiceTrack::FRAME
+        samples_for(from_start, TRANSCRIPTION_SAMPLE_RATE) / VoiceTrack::FRAME
     }
 
     /// How far past `ended_at` clip frame `frame` begins.
     fn after(&self, ended_at: CaptureInstant, frame: usize) -> Duration {
         let offset = Duration::from_secs_f64(
-            (frame * VoiceTrack::FRAME) as f64 / f64::from(PARAKEET_SAMPLE_RATE),
+            (frame * VoiceTrack::FRAME) as f64 / f64::from(TRANSCRIPTION_SAMPLE_RATE),
         );
         offset.saturating_sub(self.pre_press + ended_at.duration_since(self.started_at))
     }
@@ -849,8 +805,8 @@ impl Recording {
                 .saturating_sub(samples_for(post_release, self.source_rate));
         }
         if let Some(resampler) = &mut self.resampler {
-            let expected_samples =
-                self.source_samples * PARAKEET_SAMPLE_RATE as usize / self.source_rate as usize;
+            let expected_samples = self.source_samples * TRANSCRIPTION_SAMPLE_RATE as usize
+                / self.source_rate as usize;
             if !self.input_buffer.is_empty() {
                 self.samples
                     .extend(resample_chunk(resampler, &self.input_buffer, true));
@@ -1315,8 +1271,8 @@ impl DictationCapture {
         let capture = recording.capture.take();
         let samples = recording.finish(Some(ended_at + tail));
         Finish::Transcribe(DictationClip {
-            tail_samples: samples_for(kept_tail, PARAKEET_SAMPLE_RATE).min(samples.len()),
-            press_samples: samples_for(pre_press, PARAKEET_SAMPLE_RATE).min(samples.len()),
+            tail_samples: samples_for(kept_tail, TRANSCRIPTION_SAMPLE_RATE).min(samples.len()),
+            press_samples: samples_for(pre_press, TRANSCRIPTION_SAMPLE_RATE).min(samples.len()),
             timeline,
             source: None,
             samples,
@@ -1347,7 +1303,7 @@ mod tests {
             let source: Vec<f32> = (0..rate as usize * 3 + 777)
                 .map(|index| (index as f32 * 0.013).sin() * 0.4)
                 .collect();
-            let whole = resample_for_parakeet(&source, rate);
+            let whole = resample_to_16k(&source, rate);
             let mut streaming = StreamingResampler::new(rate).unwrap();
             let mut output = Vec::new();
             for block in source.chunks(1_337) {
@@ -1410,20 +1366,6 @@ mod tests {
         assert!(!quiet_speech.is_near_silent());
         assert!((quiet_speech.loudest_window_dbfs() - -43.0).abs() < 0.5);
         assert!(!clip(tone(0.1, 16_000).collect()).is_near_silent());
-    }
-
-    #[test]
-    fn speech_detector_discards_loud_captures_without_speech() {
-        let clip = |samples: Vec<f32>| DictationClip::for_test(samples);
-        {
-            let _detector = crate::transcription::speech_detector::override_for_test(Some(false));
-            assert!(clip(tone(0.1, 16_000).collect()).is_near_silent());
-        }
-        let _detector = crate::transcription::speech_detector::override_for_test(Some(true));
-        assert!(!clip(tone(0.1, 16_000).collect()).is_near_silent());
-        // The level gate runs first: a silent capture never reaches the
-        // detector.
-        assert!(clip(vec![0.0; 16_000]).is_near_silent());
     }
 
     #[test]
@@ -1898,7 +1840,7 @@ mod tests {
     }
 
     #[test]
-    fn intentional_hold_includes_pre_roll_and_parakeet_padding() {
+    fn intentional_hold_includes_pre_roll_without_padding() {
         let mut capture = DictationCapture::new(16_000);
         capture.keep_warm(&vec![0.25; 16_000]);
         let start = capture_time();
@@ -1908,8 +1850,8 @@ mod tests {
             panic!("expected transcription")
         };
         assert_eq!(clip.duration_ms(), 950);
-        let samples = clip.into_parakeet_samples();
-        assert_eq!(samples.len(), 24_000);
+        let samples = clip.into_transcription_samples();
+        assert_eq!(samples.len(), 15_200);
         assert_eq!(samples[0], 0.25);
         assert!(samples.contains(&0.5));
     }
@@ -1938,7 +1880,7 @@ mod tests {
             let mut recording = Recording::new(capture_time(), sample_rate);
             recording.push(&vec![0.5; input_len]);
             let samples = recording.finish(None);
-            let expected = input_len * PARAKEET_SAMPLE_RATE as usize / sample_rate as usize;
+            let expected = input_len * TRANSCRIPTION_SAMPLE_RATE as usize / sample_rate as usize;
 
             assert_eq!(samples.len(), expected);
             assert!(samples.last().is_some_and(|sample| *sample > 0.25));
@@ -1951,8 +1893,8 @@ mod tests {
             &[(4_000, 1_000), (4_000, 1_000), (2_000, 0)],
             -70.0,
         );
-        let ratio = f64::from(PARAKEET_SAMPLE_RATE) / f64::from(sample_rate);
-        let frames = speech.len() * sample_rate as usize / PARAKEET_SAMPLE_RATE as usize;
+        let ratio = f64::from(TRANSCRIPTION_SAMPLE_RATE) / f64::from(sample_rate);
+        let frames = speech.len() * sample_rate as usize / TRANSCRIPTION_SAMPLE_RATE as usize;
         (0..frames)
             .map(|frame| {
                 let position = frame as f64 * ratio;
@@ -1990,7 +1932,7 @@ mod tests {
             let released_ms = audio.len() as u64 * 1_000 / u64::from(sample_rate) - 300;
             let kept_ms = released_ms + POST_RELEASE_TAIL.as_millis() as u64;
             let kept = kept_ms as usize * sample_rate as usize / 1_000;
-            let expected = resample_for_parakeet(&audio[..kept], sample_rate);
+            let expected = resample_to_16k(&audio[..kept], sample_rate);
             let mut clips = Vec::new();
             for streamed in [false, true] {
                 let (engine, commands) = TranscriptionEngine::for_test();

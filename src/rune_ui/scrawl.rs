@@ -69,9 +69,7 @@ pub(super) fn toggle(ui: &mut Ui) {
 
 fn transcriber_description(transcriber: CaptureTranscriber) -> &'static str {
     match transcriber {
-        CaptureTranscriber::Parakeet => {
-            tr("The model Hex dictates with, with a time for every word")
-        }
+        CaptureTranscriber::Scribe => tr("The model Hex dictates with, with a time for every word"),
         CaptureTranscriber::Apple => tr("Apple's speech recognizer, as Scrawl uses"),
     }
 }
@@ -339,7 +337,7 @@ fn transcriber_row(ui: &Ui, p: Paint) -> El {
         segmented(
             p,
             "capture-transcriber-choice",
-            &["Parakeet", "Apple"],
+            &["Scribe", "Apple"],
             selected,
             |ui: &mut Ui, index| {
                 let transcriber = CaptureTranscriber::ALL[index];

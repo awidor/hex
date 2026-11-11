@@ -403,20 +403,6 @@ pub(super) fn icon_described_row(
     )
 }
 
-/// A [`select`]'s field showing its one choice, disabled.
-pub(super) fn fixed_select(p: Paint, key: &str, name: &str, label: &str) -> El {
-    Select::new::<&str>(format!("{key}-field"), &[])
-        .appearance(SelectAppearance::Field)
-        .width(SELECT_WIDTH)
-        .current(Some(label))
-        .disabled(true)
-        .trigger(p.k)
-        .key(key)
-        .label(name)
-        .a11y_value(label)
-        .disabled(true)
-}
-
 /// A switch an organization holds off (`crate::policy`): shown off and
 /// disabled with the managed note; pressing it does nothing.
 pub(super) fn managed_row(

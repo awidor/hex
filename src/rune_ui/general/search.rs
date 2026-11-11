@@ -13,6 +13,7 @@ use super::super::settings as s;
 use super::super::{Pane, ShortcutTarget, Ui, scroll_body};
 use super::{
     advanced_open, advanced_toggle, application, basics, dictation, output, shortcut_rows,
+    transcription,
 };
 use crate::desktop::i18n::tr;
 use crate::labs::Feature;
@@ -56,6 +57,16 @@ pub(crate) fn pane(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
     }
     if let Some(basics) = basics(ui, p, layer, query) {
         content = content.child(basics);
+        matched = true;
+    }
+    let transcription = transcription::rows(ui, p, layer, query);
+    if !transcription.is_empty() {
+        content = content.child(section(
+            p,
+            "transcription",
+            tr("Transcription"),
+            transcription,
+        ));
         matched = true;
     }
     if !searching {
@@ -121,12 +132,7 @@ pub(crate) fn focus_search_key(ui: &mut Ui, event: &KeyEvent) -> bool {
     if event.key != Key::Command('f') || event.mods.shift {
         return false;
     }
-    if ui.picker.open
-        || ui.explainer.open
-        || ui.sound_sets.open
-        || ui.vocabulary.open
-        || ui.tour.is_some()
-    {
+    if ui.explainer.open || ui.sound_sets.open || ui.vocabulary.open || ui.tour.is_some() {
         return false;
     }
     if ui.labs_open {
@@ -271,14 +277,14 @@ mod tests {
         assert!(matches("mic", "Microphone", None));
         assert!(matches("MIC", "Microphone", None));
         assert!(matches("  microphone  ", "Microphone", None));
-        assert!(matches("model", "Speech model", Some("Download a model")));
+        assert!(matches("key", "ElevenLabs API key", Some("Audio is sent")));
         assert!(matches(
-            "download",
-            "Speech model",
-            Some("Download a model")
+            "audio",
+            "ElevenLabs API key",
+            Some("Audio is sent")
         ));
-        assert!(!matches("model", "Microphone", None));
-        assert!(!matches("model", "Microphone", Some("System input")));
+        assert!(!matches("key", "Microphone", None));
+        assert!(!matches("key", "Microphone", Some("System input")));
         assert!(matches("", "Microphone", None));
     }
 }

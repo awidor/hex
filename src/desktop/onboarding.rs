@@ -1,7 +1,8 @@
-//! First-run setup state. macOS gates dictation on its privacy permissions.
+//! First-run setup state. Every OS needs an ElevenLabs API key before Hex
+//! can transcribe. macOS also gates dictation on its privacy permissions.
 //! Windows has one switch that matters, "Let desktop apps access your
 //! microphone", which the tour shows only while it is off. Linux has no such
-//! grants, so only the transcription model step applies.
+//! grants, so only the key applies.
 
 use std::fs::{self, OpenOptions};
 #[cfg(unix)]
@@ -64,6 +65,9 @@ pub struct PermissionWarning {
 pub struct SetupStatus {
     pub microphone: PermissionState,
     pub accessibility: PermissionState,
+    /// A transcription can be asked for: an ElevenLabs API key is set
+    /// (`transcription::models::is_ready`). The name is from when a local
+    /// model had to be installed; the hosts that report it still use it.
     pub transcription_model: bool,
 }
 
@@ -106,9 +110,8 @@ pub fn permission_warnings(status: SetupStatus) -> Vec<PermissionWarning> {
     warnings
 }
 
-/// The first-run tour, in order. `Setup` holds every permission on one
-/// screen; `TryIt` is a practice dictation into a field in the window. The
-/// speech model downloads in the background from the moment the tour opens.
+/// The first-run tour, in order. `Setup` holds the API key and every
+/// permission; `TryIt` is a practice dictation into a field in the window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Step {
     Welcome,
@@ -128,15 +131,16 @@ impl Step {
     }
 }
 
-/// One row of the setup screen.
+/// One thing setup needs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetupItem {
+    /// The ElevenLabs API key.
+    ApiKey,
     Microphone,
     Accessibility,
-    Model,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ItemStatus {
     Ready,
     /// Not asked yet.
@@ -150,16 +154,8 @@ pub enum ItemStatus {
     Denied,
     /// Switched on; macOS applies it once Hex restarts.
     Restart,
-    /// Downloading, with progress from zero through one.
-    Downloading(f32),
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ModelProgress {
-    pub installed: bool,
-    pub downloading: Option<f32>,
-    pub failed: bool,
+    /// The person went on without it: dictation waits until it is set.
+    Skipped,
 }
 
 /// What a practice dictation looks like from the event log.
@@ -187,13 +183,16 @@ pub enum Practice {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Input {
     Continue,
     /// "Skip" on the practice step.
     Skip,
+    /// "Skip for now" on the API key: setup stops waiting for one, and the
+    /// practice, which needs one, is passed over.
+    SkipKey,
     Grant(SetupItem),
-    Status(SetupStatus, ModelProgress),
+    Status(SetupStatus),
     Dictation(Observation),
     /// The shortcut listener could not start after setup became ready.
     ListenerFailed {
@@ -214,7 +213,6 @@ pub enum Effect {
     /// Clear stale TCC entries for this permission and reopen the prompt and
     /// guide.
     ResetPermission(PermissionKind),
-    DownloadModel,
     /// Every permission just turned on: move to the next step after a beat,
     /// so the last check is seen.
     AdvanceSoon,
@@ -225,7 +223,7 @@ pub enum Effect {
     Finish,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Row {
     pub item: SetupItem,
     pub status: ItemStatus,
@@ -233,18 +231,15 @@ pub struct Row {
     pub next: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct View {
     pub step: Step,
     pub rows: Vec<Row>,
-    /// Every setup row is ready.
+    /// Setup can be left: every permission is on, and the API key is set or
+    /// was skipped.
     pub ready: bool,
-    /// Dictation can run: permissions and the model are ready.
+    /// Dictation can run: the permissions are on and an API key is set.
     pub dictation_ready: bool,
-    pub model: ItemStatus,
-    /// The tour downloaded the model, so its progress is worth showing
-    /// outside the setup rows.
-    pub show_download: bool,
     pub practice: Practice,
     /// The listener needs a restart Hex will not do by itself again.
     pub reopen: bool,
@@ -257,7 +252,6 @@ pub struct View {
 pub struct Flow {
     step: Step,
     status: SetupStatus,
-    model: ModelProgress,
     permissions: bool,
     /// Windows: the microphone switch was seen off, so its row shows.
     microphone_row: bool,
@@ -269,10 +263,8 @@ pub struct Flow {
     /// A refused microphone's System Settings guide is up.
     microphone_guide: bool,
     practice: Practice,
-    download_requested: bool,
-    /// The recommended model waits for the person: a scan for models already
-    /// on this computer is running, or found one and they choose.
-    download_held: bool,
+    /// The person went on without an API key.
+    key_skipped: bool,
     advance_due: bool,
     reopen: bool,
     relaunching: bool,
@@ -285,10 +277,6 @@ impl Flow {
         let mut flow = Self {
             step: Step::Welcome,
             status,
-            model: ModelProgress {
-                installed: status.transcription_model,
-                ..ModelProgress::default()
-            },
             permissions,
             microphone_row: status.microphone != PermissionState::Ready,
             practice_step: practice,
@@ -296,8 +284,7 @@ impl Flow {
             accessibility_stale: false,
             microphone_guide: false,
             practice: Practice::Waiting,
-            download_requested: false,
-            download_held: false,
+            key_skipped: false,
             advance_due: false,
             reopen: false,
             relaunching: false,
@@ -311,12 +298,6 @@ impl Flow {
             flow.forward_from(start)
         };
         flow
-    }
-
-    /// Holds (or releases) the download the tour starts by itself, while the
-    /// person can choose a model already on this computer instead.
-    pub fn hold_download(&mut self, held: bool) {
-        self.download_held = held;
     }
 
     pub fn step(&self) -> Step {
@@ -334,8 +315,9 @@ impl Flow {
             Input::Continue => self.primary(),
             Input::Skip if self.step == Step::TryIt => self.advance(),
             Input::Skip => Effect::None,
+            Input::SkipKey => self.skip_key(),
             Input::Grant(item) => self.grant(item),
-            Input::Status(status, model) => self.update(status, model),
+            Input::Status(status) => self.update(status),
             Input::Dictation(observation) => {
                 if self.step == Step::TryIt {
                     self.practice = next_practice(self.practice, observation);
@@ -366,8 +348,6 @@ impl Flow {
             rows: self.rows(),
             ready: self.setup_ready(),
             dictation_ready: self.status.ready(),
-            model: self.model_status(),
-            show_download: self.download_requested && !self.model_in_setup(),
             practice: self.practice,
             reopen: self.reopen,
             restart: self.restart_needed(),
@@ -386,56 +366,53 @@ impl Flow {
             })
     }
 
-    /// Where the practice step can wait for the model, the model is not a
-    /// setup row: it downloads behind the permissions.
-    fn model_in_setup(&self) -> bool {
-        !self.permissions || !self.practice_step
-    }
-
     fn permissions_ready(&self) -> bool {
         self.status.microphone == PermissionState::Ready
             && self.status.accessibility == PermissionState::Ready
     }
 
-    fn setup_ready(&self) -> bool {
-        self.permissions_ready() && (!self.model_in_setup() || self.status.transcription_model)
+    /// The key no longer holds setup: it is set, or the person skipped it.
+    fn key_settled(&self) -> bool {
+        self.status.transcription_model || self.key_skipped
     }
 
-    fn model_status(&self) -> ItemStatus {
+    fn setup_ready(&self) -> bool {
+        self.permissions_ready() && self.key_settled()
+    }
+
+    fn key_status(&self) -> ItemStatus {
         if self.status.transcription_model {
             ItemStatus::Ready
-        } else if let Some(progress) = self.model.downloading {
-            ItemStatus::Downloading(progress)
-        } else if self.model.failed {
-            ItemStatus::Failed
-        } else if self.download_requested {
-            ItemStatus::Downloading(0.0)
+        } else if self.key_skipped {
+            ItemStatus::Skipped
         } else {
             ItemStatus::Todo
         }
     }
 
-    fn update(&mut self, status: SetupStatus, model: ModelProgress) -> Effect {
+    /// Skip for now on the key: setup stops waiting for one. A key set
+    /// later still counts.
+    fn skip_key(&mut self) -> Effect {
+        if self.status.transcription_model || self.key_skipped {
+            return Effect::None;
+        }
+        let was_ready = self.setup_ready();
+        self.key_skipped = true;
+        if self.step == Step::Setup && !was_ready && self.setup_ready() {
+            return Effect::AdvanceSoon;
+        }
+        Effect::None
+    }
+
+    fn update(&mut self, status: SetupStatus) -> Effect {
         let was_ready = self.setup_ready();
         self.microphone_row |= status.microphone != PermissionState::Ready;
         self.status = status;
         if !grantable(self.status.accessibility) {
             self.accessibility_stale = false;
         }
-        self.model = model;
         if self.step == Step::Setup && !was_ready && self.setup_ready() {
             self.advance_due = true;
-        }
-        // The download starts the first time the tour sees no model, before
-        // any permission is asked, so it runs while the person reads.
-        if !status.transcription_model
-            && model.downloading.is_none()
-            && !model.failed
-            && !self.download_requested
-            && !self.download_held
-        {
-            self.download_requested = true;
-            return Effect::DownloadModel;
         }
         if std::mem::take(&mut self.advance_due) && self.step == Step::Setup {
             return Effect::AdvanceSoon;
@@ -444,7 +421,12 @@ impl Flow {
     }
 
     fn rows(&self) -> Vec<Row> {
-        let mut rows = Vec::with_capacity(4);
+        let mut rows = Vec::with_capacity(3);
+        rows.push(Row {
+            item: SetupItem::ApiKey,
+            status: self.key_status(),
+            next: false,
+        });
         if self.permissions || self.microphone_row {
             rows.push(Row {
                 item: SetupItem::Microphone,
@@ -472,18 +454,11 @@ impl Flow {
                 next: false,
             });
         }
-        if self.model_in_setup() {
-            rows.push(Row {
-                item: SetupItem::Model,
-                status: self.model_status(),
-                next: false,
-            });
-        }
         if let Some(row) = rows.iter_mut().find(|row| {
             !matches!(
                 row.status,
                 ItemStatus::Ready
-                    | ItemStatus::Downloading(_)
+                    | ItemStatus::Skipped
                     | ItemStatus::Waiting
                     | ItemStatus::Stale
                     | ItemStatus::Restart
@@ -497,7 +472,8 @@ impl Flow {
     fn passes(&self, step: Step) -> bool {
         match step {
             Step::Setup => self.setup_ready(),
-            Step::TryIt => !self.practice_step,
+            // Without a key there is nothing to practise with.
+            Step::TryIt => !self.practice_step || !self.status.transcription_model,
             _ => false,
         }
     }
@@ -527,16 +503,9 @@ impl Flow {
 
     fn grant(&mut self, item: SetupItem) -> Effect {
         match item {
-            // The model can be retried from any step: its progress follows
-            // the whole tour.
-            SetupItem::Model
-                if !self.status.transcription_model && self.model.downloading.is_none() =>
-            {
-                self.model.failed = false;
-                self.download_requested = true;
-                Effect::DownloadModel
-            }
             _ if self.step != Step::Setup => Effect::None,
+            // The window asks for the key itself; nothing here grants it.
+            SetupItem::ApiKey => Effect::None,
             SetupItem::Microphone => {
                 self.asked[0] = true;
                 match self.status.microphone {
@@ -919,7 +888,8 @@ pub(crate) fn recheck_after_identity_change_at(
 }
 
 /// Forgets that onboarding finished, so the window shows it again. Only the
-/// onboarding markers change: settings, history, models, and permissions stay.
+/// onboarding markers change: settings, history, the API key, and
+/// permissions stay.
 pub fn reset() -> color_eyre::Result<()> {
     reset_at(&crate::app_paths::support_dir()?)
 }
@@ -971,9 +941,11 @@ fn write_owner_only_marker(path: &Path, truncate: bool) -> color_eyre::Result<()
     Ok(())
 }
 
+/// What setup still needs for `selection`: this OS's permissions, and an
+/// API key to transcribe with.
 pub fn status(selection: &TranscriptionSelection) -> SetupStatus {
-    let transcription_model = crate::transcription::models::validate(selection)
-        .is_ok_and(|model| crate::transcription::models::is_installed(model, &selection.language));
+    let transcription_model = crate::transcription::models::validate(selection).is_ok()
+        && crate::transcription::models::is_ready();
     status_with_transcription_model(transcription_model)
 }
 
@@ -1222,7 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn dictation_setup_requires_permissions_and_model() {
+    fn dictation_setup_requires_permissions_and_an_api_key() {
         let mut status = SetupStatus {
             microphone: PermissionState::Ready,
             accessibility: PermissionState::Ready,
@@ -1455,13 +1427,6 @@ mod tests {
         }
     }
 
-    fn installed() -> ModelProgress {
-        ModelProgress {
-            installed: true,
-            ..ModelProgress::default()
-        }
-    }
-
     fn statuses(flow: &Flow) -> Vec<(SetupItem, ItemStatus, bool)> {
         flow.view()
             .rows
@@ -1470,17 +1435,19 @@ mod tests {
             .collect()
     }
 
-    fn downloading(progress: f32) -> ModelProgress {
-        ModelProgress {
-            downloading: Some(progress),
-            ..ModelProgress::default()
-        }
-    }
-
+    /// Every permission on, no API key yet.
     fn permissions_only() -> SetupStatus {
         SetupStatus {
             transcription_model: false,
             ..ready_status()
+        }
+    }
+
+    /// An API key set, no permission yet.
+    fn key_only() -> SetupStatus {
+        SetupStatus {
+            transcription_model: true,
+            ..fresh_status()
         }
     }
 
@@ -1491,7 +1458,7 @@ mod tests {
         assert_eq!(flow.step(), Step::Setup);
         assert_eq!(flow.on(Input::Continue), Effect::None, "setup is not ready");
         assert_eq!(flow.step(), Step::Setup);
-        flow.on(Input::Status(ready_status(), installed()));
+        flow.on(Input::Status(ready_status()));
         assert!(flow.view().ready);
         flow.on(Input::Continue);
         assert_eq!(flow.step(), Step::TryIt);
@@ -1506,153 +1473,98 @@ mod tests {
     }
 
     #[test]
-    fn the_model_downloads_as_soon_as_the_tour_opens() {
-        let mut flow = Flow::new(Step::Welcome, fresh_status(), true, true);
-        assert_eq!(flow.view().model, ItemStatus::Todo);
-        assert_eq!(
-            flow.on(Input::Status(fresh_status(), ModelProgress::default())),
-            Effect::DownloadModel,
-            "on the welcome screen, before any permission"
-        );
-        assert_eq!(flow.step(), Step::Welcome);
-        assert!(flow.view().show_download);
-        assert_eq!(
-            flow.view().model,
-            ItemStatus::Downloading(0.0),
-            "progress shows before the first byte"
-        );
-        assert_eq!(
-            flow.on(Input::Status(fresh_status(), ModelProgress::default())),
-            Effect::None,
-            "asked once"
-        );
-        flow.on(Input::Status(fresh_status(), downloading(0.3)));
-        assert_eq!(flow.view().model, ItemStatus::Downloading(0.3));
-
-        let installed_flow = {
-            let mut flow = Flow::new(Step::Welcome, ready_status(), true, true);
-            assert_eq!(
-                flow.on(Input::Status(ready_status(), installed())),
-                Effect::None
-            );
-            flow
-        };
-        assert!(!installed_flow.view().show_download);
-    }
-
-    #[test]
-    fn a_held_download_waits_for_the_person() {
-        let mut flow = Flow::new(Step::Welcome, fresh_status(), true, true);
-        flow.hold_download(true);
-        assert_eq!(
-            flow.on(Input::Status(fresh_status(), ModelProgress::default())),
-            Effect::None,
-            "found models are offered first"
-        );
-        assert_eq!(flow.view().model, ItemStatus::Todo);
-        assert_eq!(
-            flow.on(Input::Grant(SetupItem::Model)),
-            Effect::DownloadModel,
-            "choosing still starts it"
-        );
-        let mut released = Flow::new(Step::Welcome, fresh_status(), true, true);
-        released.hold_download(true);
-        released.on(Input::Status(fresh_status(), ModelProgress::default()));
-        released.hold_download(false);
-        assert_eq!(
-            released.on(Input::Status(fresh_status(), ModelProgress::default())),
-            Effect::DownloadModel,
-            "nothing found: the tour downloads as before"
-        );
-    }
-
-    #[test]
-    fn a_failed_download_retries_from_any_step() {
-        let mut flow = Flow::new(Step::Welcome, fresh_status(), true, true);
-        flow.on(Input::Status(fresh_status(), ModelProgress::default()));
-        let failed = ModelProgress {
-            failed: true,
-            ..ModelProgress::default()
-        };
-        assert_eq!(flow.on(Input::Status(fresh_status(), failed)), Effect::None);
-        assert_eq!(flow.view().model, ItemStatus::Failed);
-        assert_eq!(
-            flow.on(Input::Grant(SetupItem::Model)),
-            Effect::DownloadModel,
-            "retry on the welcome screen"
-        );
-        flow.on(Input::Status(fresh_status(), downloading(0.1)));
-        assert_eq!(
-            flow.on(Input::Grant(SetupItem::Model)),
-            Effect::None,
-            "a running download is not restarted"
-        );
-    }
-
-    #[test]
-    fn permissions_are_the_only_rows_and_the_model_waits_for_practice() {
+    fn setup_waits_for_the_api_key_as_well_as_the_permissions() {
         let mut flow = Flow::new(Step::Setup, fresh_status(), true, true);
         assert_eq!(
             statuses(&flow),
             [
-                (SetupItem::Microphone, ItemStatus::Todo, true),
+                (SetupItem::ApiKey, ItemStatus::Todo, true),
+                (SetupItem::Microphone, ItemStatus::Todo, false),
                 (SetupItem::Accessibility, ItemStatus::Todo, false),
             ]
         );
-        flow.on(Input::Status(permissions_only(), downloading(0.5)));
-        assert!(flow.view().ready, "permissions alone finish setup");
-        assert!(!flow.view().dictation_ready);
-        flow.on(Input::Continue);
-        assert_eq!(flow.step(), Step::TryIt);
-        assert_eq!(flow.view().model, ItemStatus::Downloading(0.5));
-        flow.on(Input::Status(ready_status(), installed()));
+        flow.on(Input::Status(permissions_only()));
+        assert!(!flow.view().ready, "no key yet");
+        assert_eq!(flow.on(Input::Continue), Effect::None);
+        assert_eq!(flow.step(), Step::Setup);
+        assert_eq!(
+            flow.on(Input::Status(ready_status())),
+            Effect::AdvanceSoon,
+            "the key was the last thing missing"
+        );
+        assert!(flow.view().ready);
         assert!(flow.view().dictation_ready);
     }
 
     #[test]
-    fn rows_flip_live_and_the_next_row_carries_the_accent() {
+    fn skipping_the_key_finishes_setup_and_passes_over_the_practice() {
+        let mut flow = Flow::new(Step::Setup, permissions_only(), true, true);
+        assert_eq!(flow.step(), Step::Setup);
+        assert_eq!(flow.on(Input::SkipKey), Effect::AdvanceSoon);
+        assert_eq!(
+            statuses(&flow)[0],
+            (SetupItem::ApiKey, ItemStatus::Skipped, false)
+        );
+        assert!(flow.view().ready, "setup no longer waits for a key");
+        assert!(!flow.view().dictation_ready, "but nothing can be dictated");
+        assert_eq!(flow.on(Input::SkipKey), Effect::None, "once");
+        flow.on(Input::Continue);
+        assert_eq!(flow.step(), Step::Done, "there is nothing to practise with");
+
+        // A key set after skipping still counts.
+        let mut flow = Flow::new(Step::Setup, permissions_only(), true, true);
+        flow.on(Input::SkipKey);
+        flow.on(Input::Status(ready_status()));
+        assert_eq!(statuses(&flow)[0].1, ItemStatus::Ready);
+        flow.on(Input::Continue);
+        assert_eq!(flow.step(), Step::TryIt);
+
+        // Skipping before the permissions leaves them to ask for.
         let mut flow = Flow::new(Step::Setup, fresh_status(), true, true);
+        assert_eq!(flow.on(Input::SkipKey), Effect::None);
+        assert!(!flow.view().ready);
+        assert!(flow.view().rows[1].next, "the microphone is next");
+    }
+
+    #[test]
+    fn rows_flip_live_and_the_next_row_carries_the_accent() {
+        let mut flow = Flow::new(Step::Setup, key_only(), true, true);
         assert_eq!(
             flow.on(Input::Grant(SetupItem::Microphone)),
             Effect::RequestMicrophone
         );
-        assert_eq!(flow.view().rows[0].status, ItemStatus::Waiting);
+        assert_eq!(flow.view().rows[1].status, ItemStatus::Waiting);
         assert!(
-            flow.view().rows[1].next,
+            flow.view().rows[2].next,
             "a waiting row hands on the accent"
         );
-        let mut status = fresh_status();
+        let mut status = key_only();
         status.microphone = PermissionState::Ready;
-        flow.on(Input::Status(status, downloading(0.4)));
-        assert_eq!(flow.view().rows[0].status, ItemStatus::Ready);
-        assert!(flow.view().rows[1].next);
+        flow.on(Input::Status(status));
+        assert_eq!(flow.view().rows[1].status, ItemStatus::Ready);
+        assert!(flow.view().rows[2].next);
         assert_eq!(
             flow.on(Input::Grant(SetupItem::Accessibility)),
             Effect::ShowGuide(PermissionKind::Accessibility)
         );
-        assert_eq!(flow.view().rows[1].status, ItemStatus::Waiting);
-        assert!(!flow.view().rows[1].next, "a waiting row has no accent");
+        assert_eq!(flow.view().rows[2].status, ItemStatus::Waiting);
+        assert!(!flow.view().rows[2].next, "a waiting row has no accent");
+        assert_eq!(
+            flow.on(Input::Grant(SetupItem::ApiKey)),
+            Effect::None,
+            "the window asks for the key itself"
+        );
     }
 
     #[test]
     fn the_last_grant_advances_after_a_beat() {
-        let mut flow = Flow::new(Step::Setup, fresh_status(), true, true);
-        flow.on(Input::Status(fresh_status(), downloading(0.2)));
-        let mut status = permissions_only();
+        let mut flow = Flow::new(Step::Setup, key_only(), true, true);
+        flow.on(Input::Status(key_only()));
+        let mut status = ready_status();
         status.accessibility = PermissionState::NeedsSettings;
-        assert_eq!(
-            flow.on(Input::Status(status, downloading(0.3))),
-            Effect::None
-        );
-        assert_eq!(
-            flow.on(Input::Status(permissions_only(), downloading(0.4))),
-            Effect::AdvanceSoon
-        );
-        assert_eq!(
-            flow.on(Input::Status(permissions_only(), downloading(0.5))),
-            Effect::None,
-            "once"
-        );
+        assert_eq!(flow.on(Input::Status(status)), Effect::None);
+        assert_eq!(flow.on(Input::Status(ready_status())), Effect::AdvanceSoon);
+        assert_eq!(flow.on(Input::Status(ready_status())), Effect::None, "once");
         assert_eq!(
             flow.step(),
             Step::Setup,
@@ -1667,40 +1579,25 @@ mod tests {
         let mut status = fresh_status();
         status.microphone = PermissionState::NeedsSettings;
         let mut flow = Flow::new(Step::Setup, status, true, true);
-        assert_eq!(flow.view().rows[0].status, ItemStatus::Denied);
+        assert_eq!(flow.view().rows[1].status, ItemStatus::Denied);
         assert_eq!(
             flow.on(Input::Grant(SetupItem::Microphone)),
             Effect::ShowGuide(PermissionKind::Microphone)
         );
-        assert_eq!(flow.view().rows[0].status, ItemStatus::Waiting);
+        assert_eq!(flow.view().rows[1].status, ItemStatus::Waiting);
     }
 
     #[test]
-    fn platforms_without_permissions_show_only_the_model() {
-        let status = SetupStatus {
-            transcription_model: false,
-            ..ready_status()
-        };
-        let mut flow = Flow::new(Step::Welcome, status, false, false);
+    fn platforms_without_permissions_ask_only_for_the_key() {
+        let mut flow = Flow::new(Step::Welcome, permissions_only(), false, false);
         assert_eq!(
             statuses(&flow),
-            [(SetupItem::Model, ItemStatus::Todo, true)]
-        );
-        assert_eq!(
-            flow.on(Input::Status(status, ModelProgress::default())),
-            Effect::DownloadModel
-        );
-        assert!(
-            !flow.view().show_download,
-            "the setup row shows the progress"
+            [(SetupItem::ApiKey, ItemStatus::Todo, true)]
         );
         flow.on(Input::Continue);
         assert_eq!(flow.step(), Step::Setup);
         assert_eq!(flow.on(Input::Continue), Effect::None);
-        assert_eq!(
-            flow.on(Input::Status(ready_status(), installed())),
-            Effect::AdvanceSoon
-        );
+        assert_eq!(flow.on(Input::Status(ready_status())), Effect::AdvanceSoon);
     }
 
     #[test]
@@ -1715,8 +1612,8 @@ mod tests {
         assert_eq!(
             statuses(&flow),
             [
+                (SetupItem::ApiKey, ItemStatus::Ready, false),
                 (SetupItem::Microphone, ItemStatus::Denied, true),
-                (SetupItem::Model, ItemStatus::Ready, false),
             ],
             "no Accessibility row"
         );
@@ -1724,18 +1621,15 @@ mod tests {
             flow.on(Input::Grant(SetupItem::Microphone)),
             Effect::ShowGuide(PermissionKind::Microphone)
         );
+        assert_eq!(flow.on(Input::Status(ready_status())), Effect::AdvanceSoon);
         assert_eq!(
-            flow.on(Input::Status(ready_status(), installed())),
-            Effect::AdvanceSoon
-        );
-        assert_eq!(
-            statuses(&flow)[0],
+            statuses(&flow)[1],
             (SetupItem::Microphone, ItemStatus::Ready, false),
             "the row stays to show its check"
         );
         assert_eq!(
             statuses(&Flow::new(Step::Welcome, ready_status(), false, false)),
-            [(SetupItem::Model, ItemStatus::Ready, false)],
+            [(SetupItem::ApiKey, ItemStatus::Ready, false)],
             "a switch already on adds nothing"
         );
     }
@@ -1744,16 +1638,19 @@ mod tests {
     fn without_practice_setup_continues_to_done() {
         let mut flow = Flow::new(Step::Setup, permissions_only(), false, false);
         assert_eq!(flow.step(), Step::Setup);
-        flow.on(Input::Status(ready_status(), installed()));
+        flow.on(Input::Status(ready_status()));
         flow.on(Input::Continue);
         assert_eq!(flow.step(), Step::Done);
     }
 
     #[test]
-    fn granted_permissions_skip_setup() {
-        let mut flow = Flow::new(Step::Welcome, permissions_only(), true, true);
+    fn a_ready_setup_is_passed() {
+        let mut flow = Flow::new(Step::Welcome, ready_status(), true, true);
         flow.on(Input::Continue);
         assert_eq!(flow.step(), Step::TryIt);
+        let mut flow = Flow::new(Step::Welcome, permissions_only(), true, true);
+        flow.on(Input::Continue);
+        assert_eq!(flow.step(), Step::Setup, "the key is still to ask for");
     }
 
     #[test]
@@ -1790,13 +1687,15 @@ mod tests {
         assert_eq!(flow.step(), Step::Setup);
         let flow = Flow::new(Step::TryIt, ready_status(), true, true);
         assert_eq!(flow.step(), Step::TryIt, "a ready setup is passed");
+        let flow = Flow::new(Step::Done, permissions_only(), true, true);
+        assert_eq!(flow.step(), Step::Setup, "a skipped key is asked for again");
     }
 
     #[test]
     fn resuming_at_setup_after_a_relaunch_passes_grants_that_are_now_real() {
         // macOS's Quit & Reopen after the last grant: setup is finished.
-        let flow = Flow::new(Step::Setup, permissions_only(), true, true);
-        assert_eq!(flow.step(), Step::TryIt, "the model can finish in practice");
+        let flow = Flow::new(Step::Setup, ready_status(), true, true);
+        assert_eq!(flow.step(), Step::TryIt);
         let flow = Flow::new(Step::Setup, ready_status(), false, false);
         assert_eq!(flow.step(), Step::Done);
 
@@ -1819,7 +1718,7 @@ mod tests {
         assert_eq!(
             Flow::new(Step::Setup, permissions_only(), false, false).step(),
             Step::Setup,
-            "without practice the model is a setup row"
+            "the key is still to ask for"
         );
     }
 
@@ -1833,7 +1732,7 @@ mod tests {
             Effect::None,
             "nothing to relaunch for before setup is ready"
         );
-        flow.on(Input::Status(ready_status(), installed()));
+        flow.on(Input::Status(ready_status()));
         assert_eq!(
             flow.on(Input::ListenerFailed {
                 relaunch_allowed: true
@@ -1919,25 +1818,19 @@ mod tests {
         );
 
         let mut flow = Flow::new(Step::Setup, fresh_status(), true, true);
-        flow.on(Input::Status(
-            SetupStatus {
-                accessibility: PermissionState::NeedsSettings,
-                ..ready_status()
-            },
-            downloading(0.5),
-        ));
+        flow.on(Input::Status(SetupStatus {
+            accessibility: PermissionState::NeedsSettings,
+            ..ready_status()
+        }));
         assert_eq!(
             flow.on(Input::Grant(SetupItem::Accessibility)),
             Effect::ShowGuide(PermissionKind::Accessibility)
         );
         assert_eq!(
-            flow.on(Input::Status(
-                SetupStatus {
-                    accessibility: accessibility_state(false, true),
-                    ..ready_status()
-                },
-                downloading(0.5),
-            )),
+            flow.on(Input::Status(SetupStatus {
+                accessibility: accessibility_state(false, true),
+                ..ready_status()
+            })),
             Effect::AdvanceSoon
         );
         assert!(!flow.view().restart);
@@ -1947,15 +1840,12 @@ mod tests {
     #[test]
     fn setup_offers_a_restart_once_every_permission_is_on() {
         let mut flow = Flow::new(Step::Setup, fresh_status(), true, true);
-        flow.on(Input::Status(
-            SetupStatus {
-                accessibility: PermissionState::NeedsRestart,
-                ..fresh_status()
-            },
-            downloading(0.5),
-        ));
+        flow.on(Input::Status(SetupStatus {
+            accessibility: PermissionState::NeedsRestart,
+            ..fresh_status()
+        }));
         assert_eq!(
-            statuses(&flow)[1],
+            statuses(&flow)[2],
             (SetupItem::Accessibility, ItemStatus::Restart, false)
         );
         assert!(!flow.view().restart, "the microphone is still off");
@@ -1966,14 +1856,11 @@ mod tests {
             "nothing left to switch on"
         );
 
-        flow.on(Input::Status(
-            SetupStatus {
-                accessibility: PermissionState::NeedsRestart,
-                transcription_model: false,
-                ..ready_status()
-            },
-            downloading(0.5),
-        ));
+        flow.on(Input::Status(SetupStatus {
+            accessibility: PermissionState::NeedsRestart,
+            transcription_model: false,
+            ..ready_status()
+        }));
         assert!(flow.view().restart);
         assert!(!flow.view().ready);
         assert_eq!(flow.on(Input::Continue), Effect::None);
@@ -2128,19 +2015,19 @@ mod tests {
             accessibility: PermissionState::NeedsSettings,
             transcription_model: false,
         };
-        flow.on(Input::Status(untrusted, downloading(0.4)));
+        flow.on(Input::Status(untrusted));
         assert_eq!(
             flow.on(Input::Grant(SetupItem::Accessibility)),
             Effect::ShowGuide(PermissionKind::Accessibility)
         );
         assert_eq!(
-            statuses(&flow)[1],
+            statuses(&flow)[2],
             (SetupItem::Accessibility, ItemStatus::Waiting, false)
         );
 
         flow.set_accessibility_stale(true);
         assert_eq!(
-            statuses(&flow)[1],
+            statuses(&flow)[2],
             (SetupItem::Accessibility, ItemStatus::Stale, false)
         );
         assert_eq!(
@@ -2148,7 +2035,7 @@ mod tests {
             Effect::ResetPermission(PermissionKind::Accessibility)
         );
         assert_eq!(
-            statuses(&flow)[1],
+            statuses(&flow)[2],
             (SetupItem::Accessibility, ItemStatus::Waiting, false)
         );
     }

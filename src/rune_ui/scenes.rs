@@ -172,68 +172,45 @@ pub(super) const SCENES: &[Scene] = &[
         ui.open = Some(Menu::Transformations);
         ui.pane = Pane::Modes;
     }),
-    // Labs › Switch model with app: each mode's speech model and language.
+    // Labs › Switch language with app: each mode's transcription language.
     ("modes-speech", |ui| {
         *ui = mac_fixture();
         modes::fixture(ui);
         ui.settings.labs.app_model_switching = true;
         ui.settings.dictation_processing.modes[0].speech =
             Some(crate::app_settings::KeyboardModelChoice {
-                model: TranscriptionModelId::ParakeetV3,
+                model: TranscriptionModelId::ScribeV3,
                 language: "es".into(),
             });
-        ui.picker.installed = Some(vec![TranscriptionModelId::ParakeetV3]);
         ui.pane = Pane::Modes;
     }),
-    ("picker", |ui| {
+    // General's Transcription section: no API key yet, a key from the
+    // environment (read-only), a saved key ElevenLabs accepted, and a typed
+    // key it refused.
+    ("transcription-no-key", |ui| {
         *ui = portal_fixture();
-        picker::fixture(ui, None);
+        ui.api_key.source = api_key::Source::NotSet;
     }),
-    ("picker-downloading", |ui| {
+    ("transcription-key-environment", |ui| {
         *ui = portal_fixture();
-        picker::fixture(ui, Some(TranscriptionModelId::CohereTranscribe));
+        ui.api_key.source = api_key::Source::Environment;
     }),
-    // Labs › Parakeet Ultra: its card's details, credit, and published
-    // benchmarks (lists Ultra only where the saved settings turn it on).
-    ("picker-parakeet-ultra", |ui| {
+    ("transcription-key-works", |ui| {
         *ui = portal_fixture();
-        picker::parakeet_ultra_fixture(ui);
+        ui.api_key.check = api_key::Check::Works;
     }),
-    // Every model, with the full list's Add model file….
-    ("picker-custom-models", |ui| {
+    ("transcription-key-refused", |ui| {
         *ui = portal_fixture();
-        picker::all_fixture(ui);
+        ui.api_key.source = api_key::Source::NotSet;
+        ui.api_key
+            .field
+            .replace_text("sk_fixture_key_that_is_typed");
+        ui.api_key.check =
+            api_key::Check::Failed("ElevenLabs refused the API key; check it in Settings".into());
     }),
-    // Found on this computer: Parakeet v3's exact file and an untested Whisper.
-    ("picker-found", |ui| {
-        *ui = portal_fixture();
-        ui.found.models = found::fixture();
-        picker::all_fixture(ui);
-    }),
-    // Japanese saved: Japanese models compared, SenseVoice downloading.
-    ("picker-japanese", |ui| {
-        *ui = portal_fixture();
-        picker::japanese_fixture(ui, Some(TranscriptionModelId::SenseVoiceSmall));
-    }),
-    // Every model: the English-only ones fold away and switch the language.
-    ("picker-japanese-all", |ui| {
-        *ui = portal_fixture();
-        picker::japanese_fixture(ui, None);
-        (ui.picker.view, ui.picker.others_open) = (picker::View::All, true);
-    }),
-    // Parakeet chosen over Japanese: Settings names the language change.
-    ("language-fallback", |ui| {
-        *ui = portal_fixture();
-        ui.picker.fallback = Some(picker::LanguageFallback {
-            model: TranscriptionModelId::ParakeetUnifiedEnglish,
-            from: "ja".into(),
-        });
-    }),
-    // Whisper's languages open below the model.
+    // The languages open below their row.
     ("language-menu", |ui| {
         *ui = portal_fixture();
-        ui.settings.transcription.model = TranscriptionModelId::WhisperLargeV3Turbo;
-        ui.picker.installed = Some(vec![TranscriptionModelId::WhisperLargeV3Turbo]);
         ui.open = Some(Menu::Pick("transcription-language"));
     }),
     ("shortcut-mode", shortcut_mode::scene_modifier),
@@ -271,34 +248,24 @@ pub(super) const SCENES: &[Scene] = &[
             },
         );
     }),
-    // The first run on Linux (Windows is the same window): setting up Hex
-    // with nothing found, the model step with models found here, the demo,
-    // waiting for the model, the practice game, and Hex is ready.
-    ("onboarding", |ui| {
-        first_run(ui, FirstRun::Fresh, Page::Download)
+    // The first run on Linux (Windows is the same window): the key step on
+    // a new install, while ElevenLabs is asked about a pasted key, and
+    // after it refused one; then the demo, the practice game, and Hex is
+    // ready, with and without a key.
+    ("onboarding", |ui| first_run(ui, FirstRun::Fresh, Page::Key)),
+    ("onboarding-key-checking", |ui| {
+        first_run(ui, FirstRun::Checking, Page::Key)
     }),
-    ("onboarding-download-failed", |ui| {
-        first_run(ui, FirstRun::Failed, Page::Download)
+    ("onboarding-key-refused", |ui| {
+        first_run(ui, FirstRun::Refused, Page::Key)
     }),
-    // Continue without a model after it, then Settings with no model.
-    ("onboarding-no-model", |ui| {
-        first_run(ui, FirstRun::Failed, Page::Download);
-        onboarding_kit::live::continue_without_model(ui);
+    // Skip for now on the key step, on to Hex is ready, which says
+    // dictation waits for a key.
+    ("onboarding-no-key", |ui| {
+        first_run(ui, FirstRun::Skipped, Page::Ready)
     }),
-    ("onboarding-model-found", found::listed),
-    ("onboarding-model-found-downloading", found::loading),
-    ("onboarding-model-found-recommended", found::present),
-    ("onboarding-model-found-back", found::chosen),
     ("onboarding-demo", |ui| {
-        first_run(ui, FirstRun::Downloading, Page::Demo)
-    }),
-    ("onboarding-waiting", |ui| {
-        first_run(ui, FirstRun::Downloading, Page::Waiting)
-    }),
-    // "Watch another one": the first sketch, after its second reply.
-    ("onboarding-sketch", |ui| {
-        first_run(ui, FirstRun::Downloading, Page::Waiting);
-        onboarding_kit::sketch_fixture(ui, 11.0);
+        first_run(ui, FirstRun::Ready, Page::Demo)
     }),
     // GNOME and KDE on Wayland: why the desktop asks before the first paste.
     ("onboarding-paste", |ui| {
@@ -317,7 +284,10 @@ pub(super) const SCENES: &[Scene] = &[
         ui.host = platform::PlatformHost::Fixture(Vec::new());
         ui.platform.permissions.microphone =
             crate::desktop::onboarding::PermissionState::NeedsSettings;
-        onboarding::fixture(ui, crate::desktop::onboarding::Step::Setup, true);
+        onboarding::fixture(ui, crate::desktop::onboarding::Step::Setup);
+        // The key step comes first, so the microphone's page has a key.
+        ui.api_key.source = api_key::Source::fixture();
+        onboarding::poll(ui);
         onboarding_kit::live::fixture(ui, Page::Permissions);
     }),
     // macOS and Windows surfaces, from preview data (see `platform`).
@@ -346,23 +316,15 @@ pub(super) const SCENES: &[Scene] = &[
         ui.advanced = vec![Pane::General];
         ui.settings.keyboard_model_switching.enabled = true;
         ui.settings.keyboard_model_switching.mappings = [
-            (
-                "com.apple.keylayout.ABC",
-                TranscriptionModelId::ParakeetUnifiedEnglish,
-                "en",
-            ),
-            (
-                "com.apple.keylayout.RussianWin",
-                TranscriptionModelId::ParakeetV3,
-                "ru",
-            ),
+            ("com.apple.keylayout.ABC", "en"),
+            ("com.apple.keylayout.RussianWin", "ru"),
         ]
         .into_iter()
-        .map(|(id, model, language)| {
+        .map(|(id, language)| {
             (
                 id.into(),
                 KeyboardModelChoice {
-                    model,
+                    model: TranscriptionModelId::ScribeV3,
                     language: language.into(),
                 },
             )
@@ -382,10 +344,6 @@ pub(super) const SCENES: &[Scene] = &[
             },
         )
         .collect();
-        ui.picker.installed = Some(vec![
-            TranscriptionModelId::ParakeetUnifiedEnglish,
-            TranscriptionModelId::ParakeetV3,
-        ]);
     }),
     // The sound sets sheet at rest, then Wood's dictation recording.
     ("sound-sets", |ui| {
@@ -434,25 +392,28 @@ pub(super) const SCENES: &[Scene] = &[
         *ui = mac_fixture();
         vocabulary::fixture(ui, false);
     }),
-    // Cohere ignores the list: the row and the sheet say so.
-    ("vocabulary-unused", |ui| {
-        *ui = portal_fixture();
-        ui.settings.transcription.model = TranscriptionModelId::CohereTranscribe;
-        ui.picker.installed = Some(vec![TranscriptionModelId::CohereTranscribe]);
-        vocabulary::fixture(ui, true);
-    }),
-    // Whisper reads only the terms that fit its prompt: the sheet says how many.
+    // Labs › Vocabulary biasing on, with terms ElevenLabs doesn't take as
+    // keyterms: the switch says how many it uses.
     ("vocabulary-budget", |ui| {
         *ui = portal_fixture();
-        ui.settings.transcription.model = TranscriptionModelId::WhisperLargeV3Turbo;
-        ui.picker.installed = Some(vec![TranscriptionModelId::WhisperLargeV3Turbo]);
+        ui.settings.labs.vocabulary_biasing = true;
         vocabulary::fixture(ui, true);
-        let entries: Vec<_> = (1..=52)
+        let mut entries: Vec<_> = (1..=50)
             .map(|n| crate::dictation::vocabulary::VocabularyEntry {
                 term: format!("Project codename {n}"),
                 sounds_like: Vec::new(),
             })
             .collect();
+        entries.extend(
+            [
+                "the one where the deploy failed twice",
+                "a name with [brackets]",
+            ]
+            .map(|term| crate::dictation::vocabulary::VocabularyEntry {
+                term: term.into(),
+                sounds_like: Vec::new(),
+            }),
+        );
         ui.settings.vocabulary = entries;
         ui.vocabulary.reload(&ui.settings.vocabulary);
     }),
@@ -711,8 +672,8 @@ pub(super) const SCENES: &[Scene] = &[
     // A lab's own settings on its card while it's on.
     ("mac-labs-settings", |ui| {
         labs_with_some_on(ui);
-        ui.settings.labs.unload_idle = true;
-        ui.lab_store.group = Some(crate::labs::Feature::UnloadIdle.group());
+        ui.settings.labs.appearance = true;
+        ui.lab_store.group = Some(crate::labs::Feature::Appearance.group());
     }),
     // Labs › Screenshots' card while on (macOS only: elsewhere the lab has
     // no row).
@@ -768,10 +729,10 @@ pub(super) const SCENES: &[Scene] = &[
             key: None,
         };
     }),
-    // The first run on macOS: setting up Hex, each permission state, the
+    // The first run on macOS: the key step, each permission state, the
     // practice game, and Hex is ready.
     ("mac-onboarding", |ui| {
-        mac_first_run(ui, onboarding::MacStep::Setup, Page::Download)
+        mac_first_run(ui, onboarding::MacStep::Setup, Page::Key)
     }),
     ("mac-onboarding-permissions", |ui| {
         mac_first_run(ui, onboarding::MacStep::Setup, Page::Permissions)
@@ -784,13 +745,6 @@ pub(super) const SCENES: &[Scene] = &[
     }),
     ("mac-onboarding-restart", |ui| {
         mac_first_run(ui, onboarding::MacStep::SetupRestart, Page::Permissions)
-    }),
-    ("mac-onboarding-waiting", |ui| {
-        mac_first_run(ui, onboarding::MacStep::SetupWaiting, Page::Waiting)
-    }),
-    ("mac-onboarding-sketch", |ui| {
-        mac_first_run(ui, onboarding::MacStep::SetupWaiting, Page::Waiting);
-        onboarding_kit::sketch_fixture(ui, 11.0);
     }),
     ("mac-onboarding-try", |ui| {
         mac_first_run(ui, onboarding::MacStep::TryIt, Page::Try)
@@ -909,7 +863,7 @@ pub(super) fn fixture(shortcuts: DesktopShortcuts) -> Ui {
             key: Some(HotkeyKey::named("f12")),
         },
         transcription: crate::transcription::models::TranscriptionSelection {
-            model: TranscriptionModelId::ParakeetUnifiedEnglish,
+            model: TranscriptionModelId::ScribeV3,
             language: "en".into(),
         },
         paste_with_shift: true,
@@ -918,7 +872,9 @@ pub(super) fn fixture(shortcuts: DesktopShortcuts) -> Ui {
     let mut ui = Ui::with(settings, Service::Fixture(Vec::new()));
     ui.platform.wayland = true;
     ui.models = models::Models::fixture();
-    ui.picker.installed = Some(vec![TranscriptionModelId::ParakeetUnifiedEnglish]);
+    // A saved key, so a scene shows Hex ready to dictate unless it says
+    // otherwise.
+    ui.api_key.source = api_key::Source::fixture();
     ui.view = Some(ServiceView {
         listener: DesktopListenerSnapshot {
             running: true,
@@ -932,11 +888,8 @@ pub(super) fn fixture(shortcuts: DesktopShortcuts) -> Ui {
         },
         operation_error: None,
         transcription: DesktopTranscriptionSnapshot {
-            downloaded_bytes: 0,
             error: None,
-            preparation_stage: None,
             selection: ui.settings.transcription.clone(),
-            preparing: None,
         },
         update_status: DesktopUpdateStatus::Current,
         update_notes: None,

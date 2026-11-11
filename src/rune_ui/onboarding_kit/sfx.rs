@@ -97,7 +97,7 @@ pub(crate) struct SfxTrack {
     /// Each cue's time, tone, and percent of its level.
     cues: Vec<(f64, Tone, u8)>,
     fired: usize,
-    almost_ready_scheduled: bool,
+    key_set_scheduled: bool,
     flushed: bool,
 }
 
@@ -106,7 +106,7 @@ impl SfxTrack {
     /// record the offline soundtrack is mixed from.
     pub(crate) fn clear(&mut self) {
         self.cues.truncate(self.fired);
-        self.almost_ready_scheduled = false;
+        self.key_set_scheduled = false;
         self.flushed = false;
     }
 
@@ -160,17 +160,13 @@ impl SfxTrack {
             .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     }
 
-    /// Initial `"Setting up Hex"` hexagon bloom.
-    pub(crate) fn on_download_start(&mut self, now: f64) {
+    /// The key step's hexagon blooms.
+    pub(crate) fn on_key_step(&mut self, now: f64) {
         self.push(now + 0.08, Tone::Onboarding(OnboardingTone::Hexagon));
     }
 
-    /// `"Without Hex"` waiting to start: the hexagon settles into the top
-    /// pill.
-    pub(crate) fn on_parked(&mut self, now: f64, had_model: bool) {
-        if !had_model {
-            self.push(now + 0.12, Tone::Onboarding(OnboardingTone::Hexagon));
-        }
+    /// `"Without Hex"` waiting to start.
+    pub(crate) fn on_parked(&mut self, now: f64) {
         // Jay's messages landing on the Launch Room's row.
         for at in super::inbox::DINGS {
             self.push(now + at, Tone::Onboarding(OnboardingTone::Incoming));
@@ -448,10 +444,10 @@ impl SfxTrack {
         );
     }
 
-    /// `"Almost ready"` waiting screen (fires at most once per run).
-    pub(crate) fn on_almost_ready(&mut self, now: f64) {
-        if !self.almost_ready_scheduled {
-            self.almost_ready_scheduled = true;
+    /// The key step's key accepted (fires at most once per run).
+    pub(crate) fn on_key_set(&mut self, now: f64) {
+        if !self.key_set_scheduled {
+            self.key_set_scheduled = true;
             self.push(now + 0.06, Tone::Onboarding(OnboardingTone::AlmostReady));
         }
     }
@@ -666,11 +662,11 @@ mod tests {
     #[test]
     fn voice_and_permission_cues_include_real_dictation_tones_and_motion_beats() {
         let mut track = SfxTrack::default();
-        track.on_download_start(0.0);
+        track.on_key_step(0.0);
         track.on_voice_take(10.0, &ANSWER_JAY);
         track.on_microphone(14.0);
         track.on_accessibility(17.0);
-        track.on_almost_ready(21.5);
+        track.on_key_set(21.5);
         track.on_ready(28.0, false);
         track.advance_to(30.0);
 

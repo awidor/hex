@@ -1,8 +1,8 @@
 //! The Linux and Windows host of `hex` control commands. Each OS supplies a
 //! [`Host`], its thin adapter to the running process (the listener's
-//! queue, the window, model preparation, the updater); [`answer`] carries
-//! out every command the same way on both, with the rules the window and
-//! the macOS host apply. A command the OS can't carry out answers
+//! queue, the window, the transcription selection, the updater); [`answer`]
+//! carries out every command the same way on both, with the rules the window
+//! and the macOS host apply. A command the OS can't carry out answers
 //! `unsupported` here, at runtime, instead of being left out of the CLI.
 
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use super::{
     CaptureAction, CaptureReport, CaptureSnapshot, CaptureState, ControlCommand, ControlError,
     ControlReply, ControlRequest, ControlResponse, FeatureReport, ListenerReport, MeetingReport,
-    ModelReport, Pane, PermissionReport, PrintReply, StatusReport, WindowReport, settings,
+    Pane, PermissionReport, PrintReply, StatusReport, WindowReport, settings,
 };
 use crate::app_settings::AppSettings;
 use crate::desktop::host::{
@@ -18,7 +18,8 @@ use crate::desktop::host::{
 };
 use crate::transcription::models::TranscriptionSelection;
 
-/// How long `model use` waits to confirm, inside the transport's deadline.
+/// How long `meetings record` and `stop` wait to confirm, inside the
+/// transport's deadline.
 const CONFIRM_WAIT: Duration = Duration::from_secs(8);
 
 /// What the running Hex published last.
@@ -61,10 +62,9 @@ pub(crate) trait Host {
     /// Closes the window; false when it wasn't open.
     fn hide_window(&self) -> bool;
     fn onboarding_reset(&self) -> ControlReply;
-    /// Prepares `selection` (downloading it when missing) and switches to
-    /// it once it is ready.
+    /// Saves `selection` and has the next dictation use its language.
+    /// Nothing is downloaded or loaded, so this returns once it is applied.
     fn choose_model(&self, selection: TranscriptionSelection) -> Result<(), ControlError>;
-    fn cancel_model(&self);
     fn check_for_updates(&self) -> Result<(), ControlError>;
     /// Launch at login, after setting it when `enabled` is given; `None`
     /// when this OS has no login item.
@@ -175,29 +175,9 @@ fn command(host: &dyn Host, command: ControlCommand) -> ControlReply {
         })),
         ControlCommand::SettingsSet { key, value } => reply(set_setting(host, &key, &value)),
         ControlCommand::SettingsApply { values } => reply(apply_settings(host, &values)),
-        ControlCommand::ModelList => reply(load().map(|settings| ControlReply::Models {
-            models: super::model_infos(&settings.transcription),
-        })),
+        ControlCommand::ModelList => reply(host.state().map(|state| models(&state.settings))),
         ControlCommand::ModelUse { model, language } => {
-            reply(use_model(host, &model, language.as_deref(), false))
-        }
-        ControlCommand::ModelInstall { model, language } => {
-            reply(use_model(host, &model, language.as_deref(), true))
-        }
-        ControlCommand::ModelCancel => {
-            reply(
-                host.state()
-                    .map(|state| match state.transcription.preparing {
-                        None => ControlReply::unchanged("No model is downloading or loading"),
-                        Some(model) => {
-                            host.cancel_model();
-                            ControlReply::done(format!(
-                                "Stopped preparing {}",
-                                crate::transcription::models::definition(model).name
-                            ))
-                        }
-                    }),
-            )
+            reply(use_model(host, &model, language.as_deref()))
         }
         ControlCommand::WindowShow { pane } => reply(
             host.show_window(pane)
@@ -408,83 +388,31 @@ fn commit(
     Ok(ControlReply::done(change.message))
 }
 
-/// `hex model use` (installed only) and `hex model install` (downloads
-/// first). Both switch once the model is ready.
+/// `hex model list`: the one model, with the language the running Hex asks
+/// it for and the API key the running Hex has.
+fn models(settings: &AppSettings) -> ControlReply {
+    ControlReply::Models {
+        models: super::model_infos(&settings.transcription),
+    }
+}
+
+/// `hex model use`: sets the language Scribe is told to expect. The host
+/// applies it at once; there is nothing to download, load, or wait for.
 fn use_model(
     host: &dyn Host,
     model: &str,
     language: Option<&str>,
-    install: bool,
 ) -> Result<ControlReply, ControlError> {
-    let selection = super::model_selection(&load()?, model, language)?;
-    let definition = crate::transcription::models::definition(selection.model);
-    let installed = crate::transcription::models::is_installed(definition, &selection.language);
-    let state = host.state()?;
-    if same_model(&state.settings.transcription, &selection) && installed {
-        return Ok(ControlReply::unchanged(format!(
-            "{} ({}) is already in use",
-            definition.name, selection.language
+    let settings = host.state()?.settings;
+    let selection = super::model_selection(&settings, model, language)?;
+    if settings.transcription == selection {
+        return Ok(ControlReply::unchanged(super::model_use_message(
+            &selection, false,
         )));
-    }
-    if !installed && !install {
-        return Err(ControlError::new(
-            "not-installed",
-            format!(
-                "{} isn't installed; `hex model install {}` downloads it ({})",
-                definition.name,
-                selection.model.as_str(),
-                definition.size_label()
-            ),
-        ));
     }
     host.choose_model(selection.clone())?;
-    if !installed {
-        return Ok(ControlReply::done(format!(
-            "Downloading {} ({}); Hex switches to it once it's ready. \
-             `hex status` shows progress, `hex model cancel` stops it",
-            definition.name,
-            definition.size_label()
-        )));
-    }
-    wait_for_model(host, &selection)
-}
-
-fn same_model(current: &TranscriptionSelection, wanted: &TranscriptionSelection) -> bool {
-    current.model == wanted.model && current.language == wanted.language
-}
-
-fn wait_for_model(
-    host: &dyn Host,
-    selection: &TranscriptionSelection,
-) -> Result<ControlReply, ControlError> {
-    let name = crate::transcription::models::definition(selection.model).name;
-    let started = Instant::now();
-    let mut seen_preparing = false;
-    while started.elapsed() < CONFIRM_WAIT {
-        std::thread::sleep(Duration::from_millis(100));
-        let state = host.state()?;
-        let preparing = state.transcription.preparing.is_some();
-        seen_preparing |= preparing;
-        if preparing {
-            continue;
-        }
-        if same_model(&state.settings.transcription, selection) {
-            return Ok(ControlReply::done(format!(
-                "Switched to {name} ({})",
-                selection.language
-            )));
-        }
-        if let Some(error) = &state.transcription.error
-            && (seen_preparing || started.elapsed() > Duration::from_secs(1))
-        {
-            return Err(ControlError::new(
-                "failed",
-                format!("couldn't switch to {name}: {error}"),
-            ));
-        }
-    }
-    Ok(ControlReply::done(format!(
-        "Loading {name}; `hex status` shows when it's ready"
+    Ok(ControlReply::done(super::model_use_message(
+        &selection, true,
     )))
 }
 
@@ -545,8 +473,8 @@ fn status(host: &dyn Host) -> Result<ControlReply, ControlError> {
     let state = host.state()?;
     let settings = &state.settings;
     let selection = &settings.transcription;
-    let definition = crate::transcription::models::definition(selection.model);
-    let installed = crate::transcription::models::is_installed(definition, &selection.language);
+    // Nothing is installed: transcription is ready once an API key is set.
+    let ready = crate::transcription::models::is_ready();
     let capture = if state.listener.running {
         CaptureReport::from(state.capture)
     } else {
@@ -583,18 +511,7 @@ fn status(host: &dyn Host) -> Result<ControlReply, ControlError> {
         },
         capture,
         meeting: meeting_report(),
-        model: ModelReport {
-            id: selection.model.as_str().into(),
-            name: definition.name.into(),
-            language: selection.language.clone(),
-            installed,
-            preparing: state
-                .transcription
-                .preparing
-                .map(|model| model.as_str().into()),
-            downloaded_bytes: state.transcription.downloaded_bytes,
-            error: state.transcription.error.clone(),
-        },
+        model: super::model_report(selection, state.transcription.error.clone()),
         features: FeatureReport {
             meetings: crate::app_settings::meetings_enabled(),
             release_microphone_while_idle: settings.release_microphone_while_idle,
@@ -605,10 +522,10 @@ fn status(host: &dyn Host) -> Result<ControlReply, ControlError> {
         },
         // Linux and Windows gate dictation on no privacy permission.
         permissions: PermissionReport {
-            ready: installed,
+            ready,
             microphone: "ready".into(),
             accessibility: "ready".into(),
-            transcription_model: installed,
+            transcription_model: ready,
         },
         window: WindowReport {
             open: state.window_open,
@@ -631,12 +548,17 @@ mod tests {
         recording: bool,
         quits: Mutex<Vec<bool>>,
         dictations: Mutex<Vec<CaptureAction>>,
+        chosen: Mutex<Vec<TranscriptionSelection>>,
     }
 
     impl Host for FakeHost {
         fn state(&self) -> Result<HostState, ControlError> {
+            // A new install's language follows this computer's interface
+            // language; the tests save one.
+            let mut settings = AppSettings::default();
+            settings.transcription.language = "en".into();
             Ok(HostState {
-                settings: AppSettings::default(),
+                settings,
                 listener: DesktopListenerSnapshot {
                     running: true,
                     warming: false,
@@ -648,11 +570,8 @@ mod tests {
                     shortcuts_configurable: false,
                 },
                 transcription: DesktopTranscriptionSnapshot {
-                    downloaded_bytes: 0,
                     error: None,
-                    preparation_stage: None,
                     selection: Default::default(),
-                    preparing: None,
                 },
                 update: DesktopUpdateStatus::Current,
                 capture: capture_from_state(
@@ -692,10 +611,10 @@ mod tests {
         fn onboarding_reset(&self) -> ControlReply {
             ControlReply::done("Opened onboarding")
         }
-        fn choose_model(&self, _: TranscriptionSelection) -> Result<(), ControlError> {
+        fn choose_model(&self, selection: TranscriptionSelection) -> Result<(), ControlError> {
+            self.chosen.lock().unwrap().push(selection);
             Ok(())
         }
-        fn cancel_model(&self) {}
         fn check_for_updates(&self) -> Result<(), ControlError> {
             Ok(())
         }
@@ -768,6 +687,69 @@ mod tests {
             *host.dictations.lock().unwrap(),
             [CaptureAction::Stop, CaptureAction::Stop]
         );
+    }
+
+    #[test]
+    fn using_the_model_applies_its_language_and_answers_at_once() {
+        let host = FakeHost::default();
+        let use_model = |model: &str, language: Option<&str>| ControlCommand::ModelUse {
+            model: model.into(),
+            language: language.map(str::to_owned),
+        };
+        let asked = Instant::now();
+        assert_eq!(
+            ask(&host, use_model("scribe_v3", Some("de"))),
+            ControlReply::done("Scribe v3 now expects German (de)")
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "nothing to wait for"
+        );
+        let chosen = host.chosen.lock().unwrap().clone();
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].language, "de");
+
+        // The saved selection again changes nothing and asks the host nothing.
+        assert_eq!(
+            ask(&host, use_model("scribe_v3", Some("en"))),
+            ControlReply::unchanged("Scribe v3 already expects English (en)")
+        );
+        assert!(matches!(
+            ask(&host, use_model("scribe_v3", None)),
+            ControlReply::Done { changed: false, .. }
+        ));
+        assert_eq!(host.chosen.lock().unwrap().len(), 1);
+
+        let unknown = ask(&host, use_model("parakeet_v3", None));
+        assert!(
+            matches!(&unknown, ControlReply::Error { code, message }
+                if code == "unknown-model" && message.contains("scribe_v3")),
+            "{unknown:?}"
+        );
+        assert_eq!(
+            code(&ask(&host, use_model("scribe_v3", Some("klingon")))),
+            "invalid-value"
+        );
+        assert_eq!(host.chosen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn status_reports_the_language_and_that_no_key_is_set() {
+        let host = FakeHost::default();
+        let ControlReply::Status(report) = ask(&host, ControlCommand::Status) else {
+            panic!("a status report");
+        };
+        assert_eq!(report.model.id, "scribe_v3");
+        assert_eq!(report.model.language, "en");
+        // Unit tests never read this computer's key, so none is set.
+        assert_eq!(report.model.api_key, None);
+        assert!(!report.permissions.ready);
+        assert!(!report.permissions.transcription_model);
+        let ControlReply::Models { models } = models(&host.state().unwrap().settings) else {
+            panic!("the model list");
+        };
+        assert_eq!(models.len(), 1);
+        assert!(models[0].selected);
     }
 
     #[test]

@@ -20,21 +20,18 @@ impl Feature {
             }
             Self::LiveChapters => "Break meeting transcripts into chapters while recording",
             Self::VocabularyBiasing => {
-                "Bias Parakeet transcription toward your vocabulary; rewriting and search use it either way"
+                "Send your vocabulary to ElevenLabs as keyterms, which it bills extra; rewriting and search use the vocabulary either way"
             }
             Self::TerminalPaste => "Paste with Ctrl+Shift+V, for apps that ignore Ctrl+V",
             Self::KeyboardModelSwitching => {
-                "Changing the keyboard language switches the speech model and language"
+                "Changing the keyboard language switches the transcription language"
             }
             Self::AppModelSwitching => {
-                "Each dictation mode's speech model and language follow the app in front"
+                "Each dictation mode's transcription language follows the app in front"
             }
             Self::MouseShortcuts => "Record mouse buttons as shortcuts",
             Self::PauseBrowser => "Also pause the browser while dictating, with Pause media",
             Self::ShareShortcut => "Let apps such as Discord see the dictation shortcut too",
-            Self::UnloadIdle => {
-                "Free the speech model's memory after a while unused (labs.unload_idle_minutes); the next dictation reloads it"
-            }
             Self::RestoreShortcutDefault => {
                 "Offer Restore default next to Paste last dictation's shortcut"
             }
@@ -67,9 +64,6 @@ impl Feature {
             Self::SpokenSymbols => {
                 "Turn spoken \"comma\", \"colon\", \"hashtag\", \"underscore\", and similar words into symbols joined to their words"
             }
-            Self::PickerSortFilter => {
-                "Sort the Local transcription picker by size or name and show only models for the saved language"
-            }
             Self::SidedChords => {
                 "Record which side each modifier of a shortcut is on, such as Right Command + Right Option"
             }
@@ -78,12 +72,6 @@ impl Feature {
             }
             Self::DoubleTapModifiers => {
                 "Double-tap shortcut mode accepts any shortcut without a key, such as Option, Globe, or ⌃⌥"
-            }
-            Self::BenchmarkDetails => {
-                "Show each model's raw error rate, benchmark, and source in the Local transcription picker"
-            }
-            Self::ParakeetUltra => {
-                "Offer Parakeet Ultra, Moondream's post-trained Parakeet v3, in the Local transcription picker"
             }
             Self::StandaloneSpecialKeys if cfg!(target_os = "windows") => {
                 "Use Insert, Home, End, Page Up, or Page Down alone as a shortcut"
@@ -98,7 +86,7 @@ impl Feature {
                 "Copy one of your last five dictations from the menu bar, under Paste Last Dictation"
             }
             Self::SkipPauses => {
-                "Shorten long pauses before a whole dictation goes to the model, so slow computers paste sooner"
+                "Shorten long pauses before a whole dictation is uploaded, so it is billed and answered for less audio"
             }
             Self::StopWhenCallEnds => {
                 "Stop a meeting recording Hex started on its own 30 s after the call app leaves the microphone and goes quiet"
@@ -106,18 +94,11 @@ impl Feature {
             Self::OutputFixes => {
                 "Offer Vocabulary and Fix this beside Output's Try result, to correct a wrong result"
             }
-            Self::PickerActiveFirst => "The speech model picker lists the model you're using first",
-            Self::ModelInPlace => {
-                "Add a speech model file and use it where it is, without copying it, so several accounts can share one file"
-            }
-            Self::PickerDownloaded => {
-                "Show only downloaded speech models in the picker, with the space they take"
-            }
             Self::SectionKeyAlone => {
                 "Use the § key, left of 1 on ISO keyboards, alone as a shortcut; Hex takes § from every app while it's bound"
             }
             Self::KeepRecordings => {
-                "Keep the audio of dictations saved to History, so you can transcribe them again with another model"
+                "Keep the audio of dictations saved to History, so you can transcribe them again"
             }
             Self::SettingsSearch => "Find any setting in General with a search field",
             Self::Appearance => "Use light or dark for the main window instead of the system's",
@@ -185,7 +166,7 @@ impl Feature {
                 "Use an OpenCode service running in your default WSL distribution for Modes rewriting and the Modes model picker; looking for it can start WSL"
             }
             Self::TranscribeFiles => {
-                "Turn a WAV recording into text with hex transcribe <file> and your dictation model"
+                "Turn a WAV recording into text with hex transcribe <file> and your dictation language"
             }
             Self::ApiProcessing => {
                 "Let apps using Hex's local API ask for transcripts with your Global mode's corrections, rewrite, and transformations applied"

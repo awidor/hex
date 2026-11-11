@@ -1,7 +1,7 @@
-//! `/streams`: live transcription of an app's own audio on the dictation
-//! engine's model (`docs/streams.md`). The routes are thin; the stream
-//! itself, its windows, and dictation priority live in
-//! `crate::transcription::stream`.
+//! `/streams`: live transcription of an app's own audio through the
+//! dictation engine, which sends it to ElevenLabs (`docs/streams.md`). The
+//! routes are thin; the stream itself, its windows, and dictation priority
+//! live in `crate::transcription::stream`.
 
 use std::io::Write;
 use std::net::TcpStream;
@@ -180,15 +180,19 @@ fn create(
     let Some(format) = SampleFormat::parse(&request.sample_format) else {
         return HttpResponse::code(400, "unsupported-sample-format");
     };
-    let model = match request
-        .model
-        .as_deref()
-        .map(str::parse::<crate::transcription::models::TranscriptionModelId>)
-    {
+    // `model` is optional; when given it must be the one Hex has.
+    let model = match request.model.as_deref() {
         None => None,
-        Some(Ok(model)) => Some(model),
-        Some(Err(_)) => return HttpResponse::code(400, "unknown-model"),
+        Some(model) => match model.parse::<crate::transcription::models::TranscriptionModelId>() {
+            Ok(model) => Some(model),
+            Err(_) => return super::unknown_model(model),
+        },
     };
+    // A stream's audio goes to ElevenLabs, so one without a key could only
+    // fail at its first window.
+    if let Err(response) = context.key.gate() {
+        return response;
+    }
     let (engine, selection) = match (context.stream_engine)() {
         Ok(engine) => engine,
         Err(code) => return HttpResponse::code(503, code),
@@ -350,6 +354,13 @@ mod tests {
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
     fn start(stream_engine: Option<crate::transcription::stream::EngineSource>) -> LocalApi {
+        start_with_key(stream_engine, super::super::KeyGate::gated(|| true))
+    }
+
+    fn start_with_key(
+        stream_engine: Option<crate::transcription::stream::EngineSource>,
+        key: super::super::KeyGate,
+    ) -> LocalApi {
         let directory = std::env::temp_dir().join(format!(
             "hex-streams-{}-{}",
             std::process::id(),
@@ -363,6 +374,7 @@ mod tests {
             events,
             LocalApiOptions {
                 stream_engine,
+                key,
                 ..LocalApiOptions::default()
             },
             None,
@@ -481,7 +493,32 @@ mod tests {
     }
 
     #[test]
-    fn create_validates_the_format_and_the_loaded_model_and_admits_one_stream() {
+    fn creating_a_stream_without_an_api_key_is_refused_before_any_audio() {
+        let api = start_with_key(
+            Some(crate::transcription::stream::tests::fake_source()),
+            super::super::KeyGate::gated(|| false),
+        );
+        let (status, body) = post_json(&api, "/streams", CREATE);
+        assert_eq!(status, 409, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["code"], "api-key-missing");
+        assert!(
+            body["message"].as_str().unwrap().contains("hex key set"),
+            "{body}"
+        );
+        // A request that is wrong in itself is told so first.
+        let (status, body) = post_json(
+            &api,
+            "/streams",
+            r#"{"sampleFormat":"f32le","sampleRate":16000,"model":"parakeet_v3"}"#,
+        );
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("unknown-model"), "{body}");
+        assert!(body.contains("scribe_v3"), "{body}");
+    }
+
+    #[test]
+    fn create_validates_the_format_and_the_model_and_admits_one_stream() {
         let api = start(Some(crate::transcription::stream::tests::fake_source()));
         for (body, status, code) in [
             (
@@ -502,6 +539,11 @@ mod tests {
             ),
             (
                 r#"{"sampleFormat":"f32le","sampleRate":16000,"language":"zz"}"#,
+                409,
+                "model-mismatch",
+            ),
+            (
+                r#"{"sampleFormat":"f32le","sampleRate":16000,"model":"scribe_v3","language":"zz"}"#,
                 409,
                 "model-mismatch",
             ),

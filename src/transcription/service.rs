@@ -14,12 +14,9 @@ use crate::transcription::engine::{
 use crate::transcription::models::TranscriptionSelection;
 use crate::transcription::transcript::{TimestampLevel, Transcript};
 
-/// The service's own model, for a selection the dictation engine does not
-/// hold: macOS's switchable transcriber, or one local GGUF model.
-#[cfg(target_os = "macos")]
-type WarmTranscriber = crate::transcription::WarmTranscriber;
-#[cfg(not(target_os = "macos"))]
-type WarmTranscriber = crate::transcription::local_transcriber::WarmLocal;
+/// The service's own transcriber, for a selection the dictation engine does
+/// not hold.
+type WarmTranscriber = crate::transcription::scribe::WarmScribe;
 
 const COMMAND_CAPACITY: usize = 1;
 const MIN_SAMPLE_RATE: u32 = 8_000;
@@ -79,11 +76,6 @@ pub enum TranscriptionServiceError {
 }
 
 enum Command {
-    Prepare {
-        selection: TranscriptionSelection,
-        canceled: Arc<AtomicBool>,
-        response: SyncSender<std::result::Result<(), TranscriptionServiceError>>,
-    },
     Transcribe {
         selection: TranscriptionSelection,
         clip: AudioClip,
@@ -135,22 +127,6 @@ impl TranscriptionServiceHandle {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
             .map(|_| AudioAdmission(self.audio_busy.clone()))
-    }
-
-    pub fn prepare(
-        &self,
-        selection: TranscriptionSelection,
-        canceled: Arc<AtomicBool>,
-    ) -> std::result::Result<(), TranscriptionServiceError> {
-        let (response, result) = mpsc::sync_channel(1);
-        self.submit(Command::Prepare {
-            selection,
-            canceled,
-            response,
-        })?;
-        result
-            .recv()
-            .unwrap_or(Err(TranscriptionServiceError::Unavailable))
     }
 
     pub fn transcribe(
@@ -215,6 +191,11 @@ impl Drop for TranscriptionJob {
 }
 
 impl AudioClip {
+    /// The clip's 16 kHz mono samples.
+    pub(crate) fn samples(&self) -> &[f32] {
+        &self.samples
+    }
+
     pub fn decode_wav<R: Read + Seek>(reader: R) -> std::result::Result<Self, AudioError> {
         let mut reader = WavReader::new(reader).map_err(|_| AudioError::Invalid)?;
         let spec = reader.spec();
@@ -260,7 +241,7 @@ impl AudioClip {
             _ => return Err(AudioError::Unsupported),
         };
         let duration_ms = mono.len() as u64 * 1_000 / u64::from(spec.sample_rate);
-        let samples = crate::dictation::try_resample_for_parakeet(&mono, spec.sample_rate)
+        let samples = crate::dictation::try_resample_to_16k(&mono, spec.sample_rate)
             .map_err(|_| AudioError::Unsupported)?;
         if samples.len() > MAX_NORMALIZED_SAMPLES {
             return Err(AudioError::ResourceExhausted);
@@ -311,17 +292,10 @@ where
 
 fn run(commands: Receiver<Command>) {
     #[cfg(target_os = "macos")]
-    crate::parakeet::prioritize_inference_thread();
+    crate::macos_dictation::prioritize_inference_thread();
     let mut active = WarmTranscriber::default();
     while let Ok(command) = commands.recv() {
         match command {
-            Command::Prepare {
-                selection,
-                canceled,
-                response,
-            } => {
-                let _ = response.send(prepare(&mut active, &selection, &canceled));
-            }
             Command::Transcribe {
                 selection,
                 clip,
@@ -345,53 +319,6 @@ fn check_canceled(canceled: &AtomicBool) -> std::result::Result<(), Transcriptio
     }
 }
 
-/// Loads `selection`, or prewarms it when it is already loaded, so a host can
-/// prepare when it starts recording and its clips skip the idle restore.
-/// When the dictation engine holds the model, prepare uses that copy and never
-/// loads its own; a dictation in progress means it is warm already.
-fn prepare(
-    active: &mut WarmTranscriber,
-    selection: &TranscriptionSelection,
-    canceled: &Arc<AtomicBool>,
-) -> std::result::Result<(), TranscriptionServiceError> {
-    if let Some(engine) = crate::transcription::engine::TranscriptionEngine::shared()
-        && engine.holds(selection)
-    {
-        *active = WarmTranscriber::default();
-        if dictation_busy() {
-            return Ok(());
-        }
-        return match with_shared_model(selection, canceled, Duration::ZERO, HeldModel::prewarm)? {
-            Some(prewarmed) => {
-                prewarmed.map_err(|error| TranscriptionServiceError::Model(error.to_string()))
-            }
-            // Dictation claimed the engine first, so the model is running.
-            None if engine.holds(selection) => Ok(()),
-            None => prepare_own(active, selection, canceled),
-        };
-    }
-    prepare_own(active, selection, canceled)
-}
-
-/// Loads `selection` into the service's own copy, or prewarms that copy.
-fn prepare_own(
-    active: &mut WarmTranscriber,
-    selection: &TranscriptionSelection,
-    canceled: &Arc<AtomicBool>,
-) -> std::result::Result<(), TranscriptionServiceError> {
-    check_canceled(canceled)?;
-    let loaded = active
-        .active()
-        .is_some_and(|model| model.matches_selection(selection));
-    let model = load(active, selection)?;
-    if loaded {
-        model
-            .prewarm()
-            .map_err(|error| TranscriptionServiceError::Model(error.to_string()))?;
-    }
-    Ok(())
-}
-
 fn load<'a>(
     active: &'a mut WarmTranscriber,
     selection: &TranscriptionSelection,
@@ -401,9 +328,8 @@ fn load<'a>(
         .map_err(|error| TranscriptionServiceError::Model(error.to_string()))
 }
 
-/// Runs `work` on the dictation engine's loaded model when it is the GGUF
-/// model `selection` asks for, so the app never holds a second copy for host
-/// audio. `None` when there is no engine (a direct-child service) or it holds
+/// Runs `work` on the dictation engine's model when it holds `selection`,
+/// so host audio queues behind dictation instead of racing it. `None` when there is no engine (a direct-child service) or it holds
 /// another model, or when dictation stays busy for `wait`. Like meeting
 /// chunks, it starts only while no dictation is capturing or transcribing.
 fn with_shared_model<R: Send + 'static>(

@@ -1,6 +1,8 @@
-//! `hex transcribe <file>` (Labs › Transcribe files): a saved WAV through
-//! the running Hex's local API, or in this process on Linux and Windows when
-//! Hex is stopped. Nothing is pasted, saved to History, or processed.
+//! `hex transcribe <file>` (Labs › Transcribe files) and `hex model
+//! transcribe <wav>`: a saved WAV sent to ElevenLabs, through the running
+//! Hex's local API or from this process when Hex is stopped (`hex model
+//! transcribe` always sends it from here). Nothing is pasted, saved to
+//! History, or processed.
 
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -8,13 +10,13 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{Output, print};
+use super::{Output, key, print};
 use crate::control::{ControlReply, model_selection};
 use crate::labs::Feature;
 use crate::transcription::models::TranscriptionSelection;
 use crate::transcription::service::{AudioClip, AudioError};
 
-/// A whole file waits for a cold model and a long clip.
+/// A long file takes a while to upload and transcribe.
 const TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_RESPONSE: usize = 1024 * 1024;
 
@@ -23,7 +25,7 @@ struct Transcript {
     transcript: String,
 }
 
-/// What `hex transcribe` sends once its file and model are settled.
+/// What `hex transcribe` sends once its file and language are settled.
 #[derive(Debug)]
 struct Job {
     wav: Vec<u8>,
@@ -36,20 +38,28 @@ pub(super) fn run(
     language: Option<String>,
     output: Output,
 ) -> u8 {
-    let settings = match crate::app_settings::AppSettings::read() {
-        Ok(settings) => settings,
-        Err(error) => {
-            return print(
-                ControlReply::error("failed", format!("couldn't read Hex's settings: {error:#}")),
-                output,
-            );
-        }
-    };
-    let reply = match prepare(&settings, &file, model, language) {
-        Ok(job) => transcribe(&job),
-        Err(reply) => reply,
-    };
-    print(reply, output)
+    let reply = settings().and_then(|settings| {
+        let job = prepare(&settings, &file, model, language)?;
+        Ok(transcribe(&settings, &job))
+    });
+    print(reply.unwrap_or_else(|refusal| refusal), output)
+}
+
+/// `hex model transcribe <wav>`: sends the file to ElevenLabs from this
+/// process, in the saved language unless one is given.
+pub(super) fn run_here(file: &Path, language: Option<String>, output: Output) -> u8 {
+    let reply = settings().and_then(|settings| {
+        let job = job(&settings, file, None, language)?;
+        Ok(here(&settings, &job))
+    });
+    print(reply.unwrap_or_else(|refusal| refusal), output)
+}
+
+/// The saved settings, read without changing the file.
+fn settings() -> std::result::Result<crate::app_settings::AppSettings, ControlReply> {
+    crate::app_settings::AppSettings::read().map_err(|error| {
+        ControlReply::error("failed", format!("couldn't read Hex's settings: {error:#}"))
+    })
 }
 
 /// The lab's gate, the file, and the model, all checked before Hex is asked.
@@ -69,6 +79,17 @@ fn prepare(
         };
         return Err(ControlReply::error("disabled", message));
     }
+    job(settings, file, model, language)
+}
+
+/// The file as WAV and the selection it is transcribed with: Scribe, in the
+/// saved language unless one is given.
+fn job(
+    settings: &crate::app_settings::AppSettings,
+    file: &Path,
+    model: Option<String>,
+    language: Option<String>,
+) -> std::result::Result<Job, ControlReply> {
     let wav = read_wav(file)?;
     let model = model.unwrap_or_else(|| settings.transcription.model.as_str().to_owned());
     let selection = model_selection(settings, &model, language.as_deref())?;
@@ -119,16 +140,15 @@ fn too_large(name: &std::path::Display<'_>) -> ControlReply {
     )
 }
 
-fn transcribe(job: &Job) -> ControlReply {
+fn transcribe(settings: &crate::app_settings::AppSettings, job: &Job) -> ControlReply {
     if crate::local_api::running_pid().is_some() {
         return in_running_hex(job);
     }
-    offline(&job.wav, &job.selection)
+    here(settings, job)
 }
 
-/// The running Hex transcribes with the model the request names: a clip up to
-/// 30 s runs on its dictation engine's loaded copy, and a longer one makes
-/// its transcription service load its own.
+/// The running Hex sends the file to ElevenLabs with its own API key, its
+/// vocabulary, and its Scribe settings, queued behind any dictation.
 fn in_running_hex(job: &Job) -> ControlReply {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("model", job.selection.model.as_str())
@@ -139,7 +159,8 @@ fn in_running_hex(job: &Job) -> ControlReply {
         Ok((200, body)) => transcript(&body),
         Ok((status, body)) => {
             let code = crate::local_api::error_code(status, &body);
-            refusal(status, &code, job.selection.model.as_str())
+            let message = crate::local_api::error_message(&body);
+            refusal(status, &code, message.as_deref())
         }
         Err(error) => ControlReply::error("transport", format!("{error:#}")),
     }
@@ -153,15 +174,22 @@ fn transcript(body: &[u8]) -> ControlReply {
     }
 }
 
-fn refusal(status: u16, code: &str, model: &str) -> ControlReply {
+/// What the running Hex's refusal means for `hex transcribe`. `message` is
+/// Hex's own account of it, when it gave one.
+fn refusal(status: u16, code: &str, message: Option<&str>) -> ControlReply {
+    let said = |fallback: &str| message.unwrap_or(fallback).to_owned();
     match code {
+        "api-key-missing" => ControlReply::error(
+            "api-key-missing",
+            "the running Hex has no ElevenLabs API key; run `hex key set`",
+        ),
         "unknown-model" => ControlReply::error(
             "unknown-model",
-            format!("the running Hex doesn't know `{model}`; run `hex model list`"),
+            said("the running Hex doesn't know that model; restart Hex (`hex restart`)"),
         ),
-        "unsupported-model" => ControlReply::error(
-            "model-unavailable",
-            format!("the running Hex can't use `{model}`; run `hex model list` to see what it has"),
+        "unsupported-language" | "unsupported-model" => ControlReply::error(
+            "invalid-value",
+            said("the running Hex can't transcribe in that language"),
         ),
         "invalid-request" => ControlReply::error("failed", "Hex refused the request; update Hex"),
         "unsupported-audio" | "invalid-audio" => ControlReply::error(
@@ -173,7 +201,7 @@ fn refusal(status: u16, code: &str, model: &str) -> ControlReply {
             "resource-exhausted",
             "Hex says the file is too large or too long to transcribe",
         ),
-        "model-not-ready" => ControlReply::error("model-unavailable", not_ready(model)),
+        "model-not-ready" => ControlReply::error("model-unavailable", not_ready()),
         "queue-full" => {
             ControlReply::error("busy", "Hex is busy with another transcription; try again")
         }
@@ -185,17 +213,17 @@ fn refusal(status: u16, code: &str, model: &str) -> ControlReply {
             "unavailable",
             "Hex's transcription service stopped; restart Hex",
         ),
-        "model-load-failed" => ControlReply::error(
+        "model-load-failed" | "transcription-failed" => ControlReply::error(
             "failed",
-            format!("Hex couldn't load `{model}`; try again or pick another model"),
+            match message {
+                Some(why) => format!("Hex couldn't transcribe it: {why}"),
+                None => "Hex couldn't transcribe it; try again".into(),
+            },
         ),
-        "transcription-failed" => {
-            ControlReply::error("failed", "Hex couldn't transcribe it; try again")
-        }
         _ => match status {
             401 => ControlReply::error("failed", "Hex rejected the request; restart Hex"),
             408 => ControlReply::error("failed", "Hex timed out reading the file; try again"),
-            409 => ControlReply::error("model-unavailable", not_ready(model)),
+            409 => ControlReply::error("model-unavailable", not_ready()),
             413 => ControlReply::error(
                 "resource-exhausted",
                 "Hex says the file is too large to transcribe",
@@ -213,14 +241,10 @@ fn refusal(status: u16, code: &str, model: &str) -> ControlReply {
     }
 }
 
-/// An imported model has no `hex model install` id, so it is checked where it
-/// was imported instead.
-fn not_ready(model: &str) -> String {
-    if model.starts_with("custom-") {
-        format!("`{model}` isn't ready in the running Hex; check it in Hex's model picker")
-    } else {
-        format!("`{model}` isn't ready in the running Hex; run `hex model install {model}`")
-    }
+/// A Hex that answers "not ready" is an older one, waiting on something
+/// this `hex` no longer has.
+fn not_ready() -> &'static str {
+    "the running Hex isn't ready to transcribe; restart it with `hex restart`"
 }
 
 fn no_speech() -> ControlReply {
@@ -230,20 +254,18 @@ fn no_speech() -> ControlReply {
     )
 }
 
-/// Without a running Hex, Linux and Windows load the model here as
-/// `hex model transcribe` does; macOS runs models only inside the app.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn offline(wav: &[u8], selection: &TranscriptionSelection) -> ControlReply {
-    match crate::transcription::local_transcriber::transcribe_wav_bytes(wav, selection) {
+/// Sends the file to ElevenLabs from this process, with the saved Scribe
+/// settings. A missing key is refused before anything is uploaded.
+fn here(settings: &crate::app_settings::AppSettings, job: &Job) -> ControlReply {
+    if !crate::transcription::scribe::key::is_set() {
+        return ControlReply::error("api-key-missing", key::missing_key_message());
+    }
+    crate::transcription::scribe::apply(settings.scribe);
+    match crate::transcription::scribe::transcribe_wav_bytes(&job.wav, &job.selection) {
         Ok(text) if text.trim().is_empty() => no_speech(),
         Ok(text) => ControlReply::Transcript { text },
         Err(error) => ControlReply::error("failed", format!("couldn't transcribe it: {error:#}")),
     }
-}
-
-#[cfg(target_os = "macos")]
-fn offline(_: &[u8], _: &TranscriptionSelection) -> ControlReply {
-    super::not_running()
 }
 
 #[cfg(test)]
@@ -339,56 +361,105 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_follows_hexs_code_rather_than_its_status() {
-        let (code, message) = error(refusal(415, "unsupported-audio", "parakeet_v2"));
-        assert_eq!(code, "unsupported");
-        assert!(
-            message.contains("couldn't read the file as WAV"),
-            "{message}"
+    fn only_scribe_can_be_named_and_the_language_can_be_given() {
+        let mut settings = AppSettings::default();
+        settings.labs.transcribe_files = true;
+        let path = std::env::temp_dir().join(format!(
+            "hex-transcribe-language-{}.wav",
+            std::process::id()
+        ));
+        std::fs::write(&path, wav()).unwrap();
+        let named = prepare(
+            &settings,
+            &path,
+            Some("scribe_v3".into()),
+            Some("yue".into()),
         );
-
-        let (code, message) = error(refusal(400, "invalid-audio", "parakeet_v2"));
-        assert_eq!(code, "unsupported");
-        assert!(
-            message.contains("couldn't read the file as WAV"),
-            "{message}"
-        );
-
-        let (code, message) = error(refusal(400, "unknown-model", "parakeet_v2"));
+        let unknown = prepare(&settings, &path, Some("parakeet_v3".into()), None);
+        let language = prepare(&settings, &path, None, Some("cantonese".into()));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(named.unwrap().selection.language, "yue");
+        let (code, message) = error(unknown.unwrap_err());
         assert_eq!(code, "unknown-model");
-        assert!(message.contains("hex model list"), "{message}");
+        assert!(message.contains("scribe_v3"), "{message}");
+        assert_eq!(error(language.unwrap_err()).0, "invalid-value");
+    }
 
-        let (code, message) = error(refusal(409, "model-not-ready", "parakeet_v2"));
-        assert_eq!(code, "model-unavailable");
+    /// Unit tests have no API key, so nothing here reaches ElevenLabs.
+    #[test]
+    fn transcribing_here_without_a_key_is_refused_before_any_upload() {
+        let settings = AppSettings::default();
+        let job = Job {
+            wav: wav(),
+            selection: settings.transcription.clone(),
+        };
+        let (code, message) = error(here(&settings, &job));
+        assert_eq!(code, "api-key-missing");
+        assert!(message.contains("hex key set"), "{message}");
+    }
+
+    #[test]
+    fn a_refusal_follows_hexs_code_rather_than_its_status() {
+        let (code, message) = error(refusal(415, "unsupported-audio", None));
+        assert_eq!(code, "unsupported");
         assert!(
-            message.contains("hex model install parakeet_v2"),
+            message.contains("couldn't read the file as WAV"),
             "{message}"
         );
 
-        let (code, message) = error(refusal(409, "model-not-ready", "custom-ab12ab12ab12ab12"));
-        assert_eq!(code, "model-unavailable");
-        assert!(!message.contains("hex model install"), "{message}");
+        let (code, message) = error(refusal(400, "invalid-audio", None));
+        assert_eq!(code, "unsupported");
+        assert!(
+            message.contains("couldn't read the file as WAV"),
+            "{message}"
+        );
 
-        let (code, message) = error(refusal(429, "queue-full", "parakeet_v2"));
+        let (code, message) = error(refusal(409, "api-key-missing", Some("no key")));
+        assert_eq!(code, "api-key-missing");
+        assert!(message.contains("hex key set"), "{message}");
+
+        let only = "unknown model `parakeet_v2`; the only model is `scribe_v3`";
+        let (code, message) = error(refusal(400, "unknown-model", Some(only)));
+        assert_eq!(code, "unknown-model");
+        assert_eq!(message, only);
+        // An older Hex names no reason.
+        let (code, message) = error(refusal(400, "unknown-model", None));
+        assert_eq!(code, "unknown-model");
+        assert!(message.contains("hex restart"), "{message}");
+
+        let (code, _) = error(refusal(400, "unsupported-language", None));
+        assert_eq!(code, "invalid-value");
+
+        let (code, message) = error(refusal(409, "model-not-ready", None));
+        assert_eq!(code, "model-unavailable");
+        assert!(message.contains("hex restart"), "{message}");
+        assert!(!message.contains("install"), "{message}");
+
+        let why = "ElevenLabs refused the API key; check it in Settings";
+        let (code, message) = error(refusal(500, "transcription-failed", Some(why)));
+        assert_eq!(code, "failed");
+        assert!(message.ends_with(why), "{message}");
+
+        let (code, message) = error(refusal(429, "queue-full", None));
         assert_eq!(code, "busy");
         assert!(
             message.contains("busy with another transcription"),
             "{message}"
         );
 
-        let (code, _) = error(refusal(413, "resource-exhausted", "parakeet_v2"));
+        let (code, _) = error(refusal(413, "resource-exhausted", None));
         assert_eq!(code, "resource-exhausted");
 
-        let (code, _) = error(refusal(409, "cancelled", "parakeet_v2"));
+        let (code, _) = error(refusal(409, "cancelled", None));
         assert_eq!(code, "failed");
 
-        let (code, _) = error(refusal(503, "service-gone", "parakeet_v2"));
+        let (code, _) = error(refusal(503, "service-gone", None));
         assert_eq!(code, "unavailable");
 
-        let (code, _) = error(refusal(401, "http-401", "parakeet_v2"));
+        let (code, _) = error(refusal(401, "http-401", None));
         assert_eq!(code, "failed");
 
-        let (code, _) = error(refusal(413, "http-413", "parakeet_v2"));
+        let (code, _) = error(refusal(413, "http-413", None));
         assert_eq!(code, "resource-exhausted");
     }
 }

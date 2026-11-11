@@ -1,8 +1,10 @@
 //! The first-run onboarding flow (`t405`), featuring:
 //!
 //! - Flat, crisp Rune 2D UI (no embossed cards or shader starbursts).
+//! - The key step, which asks for an ElevenLabs API key before anything
+//!   else: Hex sends what you dictate to ElevenLabs to transcribe it.
 //! - Hex's real `Dot scope` phosphor dot-matrix HUD (`rune_hud.wgsl`) on
-//!   `"Setting up Hex"`, `"With Hex"`, and `"Your turn"`.
+//!   `"With Hex"` and `"Your turn"`.
 //! - Live interactive `"Your turn"` in desktop windows: pauses with a focused
 //!   [`rune_kit::TextArea`] so holding `⌥` and speaking into the running Hex
 //!   listener pastes real dictated words right into the card.
@@ -10,29 +12,28 @@
 //! - Auditionable typing key-sound candidates and `#292` `feedback` tones (`sfx`).
 
 use rune::{Anim, El, TextStyle, Transition, col, el, row, text};
-use rune_kit::{Badge, Button, ButtonVariant, RadioItem, TextArea, glyphs};
+use rune_kit::{Button, ButtonVariant, TextArea, TextInput, glyphs};
 
-use super::super::controls::{DESCRIPTION, KeySize, METRICS, Paint, PushSize, keycap};
-use super::super::found_choice::ChoiceRow;
-use super::super::lists::allowed;
+use super::super::api_key::Check;
+use super::super::controls::{DESCRIPTION, KeySize, Paint, PushSize, keycap};
 use super::composition::Layout;
 use super::dictated::Stage;
 use super::field_text::Field;
-use super::fixture::{ANSWER_TRY, Download};
+use super::fixture::ANSWER_TRY;
 use super::flight::{Flight, caret_x, ember_tone, flicker, flying, typeset};
 use super::flows::continue_button;
 use super::hex_meter::hex_meter;
-use super::hud_stage::{flow_box, frame_slot, voice_or_idle_slot};
+use super::hud_stage::{frame_slot, voice_or_idle_slot};
 use super::landing::{LEAD, arrives, keys, ready, title_font};
-use super::live::{Live, ModelStep};
 use super::login::{self, Login, login_ask};
 use super::mic_line::mic_capsule;
-use super::pill::{CAPSULE, FLY, PILL, after_flight, language_capsule, pill, slot};
 use super::sparks::impacts;
 use super::stories::{Onboard, Step, is_live_window};
 use super::{live, permissions, versus};
 use crate::desktop::i18n::{tr, tr_fill};
 
+/// The key step's field.
+const KEY_W: f32 = 320.0;
 const TOP_BAR: f32 = 48.0;
 /// Between the split layout's heading column and its stage.
 const SPLIT_GAP: f32 = 48.0;
@@ -58,20 +59,14 @@ const KNOCK: f32 = 8.0;
 const BURST: f64 = 0.06;
 
 pub(super) fn view(p: Paint, s: &Onboard) -> Vec<El> {
-    let sketch = super::sketches::playing(s);
     let top = row()
         .key("top-bar")
         .w_full()
         .h(TOP_BAR)
         .px(20.0)
         .center_y()
-        .justify_center()
-        .child(match s.download {
-            Some(d) if super::pill::up(s) => pill(p, d, s.closed),
-            _ => slot(),
-        });
+        .justify_center();
     let top = top
-        .children(back(p, s))
         .children(reopen(p, s))
         .children(skip(p, s))
         .children(corner_skip(p, s));
@@ -82,15 +77,12 @@ pub(super) fn view(p: Paint, s: &Onboard) -> Vec<El> {
         top
     };
     let page = match s.step {
-        Step::Pick | Step::Started => download_page(p, s, false),
-        Step::Waiting if sketch => sketch_page(p, s),
-        Step::Waiting => download_page(p, s, true),
+        Step::Key => key_page(p, s),
         Step::Parked | Step::YourTurn | Step::Hearing | Step::Heard | Step::Done => demo_page(p, s),
         Step::Microphone | Step::Accessibility => permissions::page(p, s),
-        // The download flies up past the game's title from "Almost ready".
-        Step::Try | Step::TryHearing | Step::TryHeard => super::game::page(p, s)
-            .map(|game| after_flight(game, s))
-            .unwrap_or_else(|| try_page(p, s)),
+        Step::Try | Step::TryHearing | Step::TryHeard => {
+            super::game::page(p, s).unwrap_or_else(|| try_page(p, s))
+        }
         Step::Ready => ready_page(p, s),
     };
     let note = super::first_screen::note(p, s);
@@ -112,7 +104,7 @@ pub(super) fn view(p: Paint, s: &Onboard) -> Vec<El> {
 
 /// Skip, quiet in the top-right corner of the optional pages only: the
 /// demo and the practice. It passes over that part to the next step setup
-/// still needs, and never past permissions or the model.
+/// still needs, and never past a permission.
 fn skip(p: Paint, s: &Onboard) -> Option<El> {
     s.live.as_ref().filter(|_| s.step.optional()).map(|_| {
         let label = tr("Skip");
@@ -183,100 +175,31 @@ fn reopen(p: Paint, s: &Onboard) -> Option<El> {
     })
 }
 
-/// Back to the model step, on the pages after it, once the person chose
-/// from it.
-fn back(p: Paint, s: &Onboard) -> Option<El> {
-    let chosen = s
-        .live
-        .as_ref()
-        .is_some_and(|live| live.model_step == ModelStep::Chosen);
-    let after = matches!(
-        s.step,
-        Step::Parked
-            | Step::YourTurn
-            | Step::Hearing
-            | Step::Heard
-            | Step::Done
-            | Step::Microphone
-            | Step::Waiting
-    );
-    (chosen && after).then(|| {
-        Button::new(tr("Back"))
-            .variant(ButtonVariant::Ghost)
-            .on_press(live::back_to_models)
-            .build_push(p.k)
-            .key("back")
-            .absolute(20.0, 8.0)
-            .transition(arrives())
-    })
-}
-
-/// The model step: the models found on this computer, Hex's recommended
-/// one first and selected. A pick starts at once; Continue moves on once it
-/// is under way.
-fn models_page(p: Paint, s: &Onboard, live: &Live) -> El {
-    let k = p.k;
-    let mut list = permissions::card(p).key("model-list").py(4.0);
-    for (index, model) in live.models.iter().enumerate() {
-        if index > 0 {
-            list = list.child(permissions::separator(p, &format!("sep{index}")));
-        }
-        list = list.child(model_row(p, index, model));
+/// The key step: Hex transcribes with ElevenLabs, so the first run asks for
+/// an API key before anything else. Continue checks the typed key with
+/// ElevenLabs and saves it; Skip for now goes on without one. A story has
+/// nobody to paste a key, so it shows the step at rest.
+fn key_page(p: Paint, s: &Onboard) -> El {
+    let key = s.live.as_ref().map(|live| &live.key);
+    let checking = key.is_some_and(|key| key.check == Check::Checking);
+    let typed = key.is_some_and(|key| !key.field.text.trim().is_empty());
+    let field = match key {
+        Some(key) => TextInput::new(&key.field)
+            .on_edit(live::key_field)
+            .on_submit(|ui: &mut super::super::Ui, _: &mut rune::Tx| live::continue_key(ui)),
+        None => TextInput::new(&rune::TextEdit::default()),
     }
-    let list = k.elevate(list, &k.elevation.raised);
-    col()
-        .key("models")
-        .gap(22.0)
-        .items_center()
-        .child(heading(
-            p,
-            s,
-            "models-head",
-            tr("Choose a speech model"),
-            lead(p, tr("Hex found speech models already on this computer.")),
-        ))
-        .child(s.motion.staggered(list, 1.0, 8.0))
-        .child(action(continue_model_button(p)))
-}
-
-fn model_row(p: Paint, index: usize, model: &ChoiceRow) -> El {
-    let radio = RadioItem::new(&model.name, model.selected)
-        .description(&model.line)
-        .on_select_tx(move |ui: &mut super::super::Ui, tx: &mut rune::Tx| {
-            tx.instant();
-            live::pick_model(index)(ui);
-        })
-        .build(p.k)
-        .key("radio")
-        .grow(1.0);
-    let tag = model
-        .recommended
-        .then(|| Badge::new(tr("Recommended")).build(p.k).key("recommended"));
-    // The radio inside is the choice assistive technology reads; the row
-    // only widens where a press lands.
-    row()
-        .key(format!("model{index}"))
-        .role("none")
-        .min_h(METRICS.row_h_described)
-        .mx(4.0)
-        .px(12.0)
-        .py(10.0)
-        .gap(12.0)
-        .center_y()
-        .radius(p.k.radius.md)
-        .hover(p.k.c.hover)
-        .on_press_tx(move |ui: &mut super::super::Ui, tx: &mut rune::Tx| {
-            tx.instant();
-            live::pick_model(index)(ui);
-        })
-        .child(radio)
-        .children(tag)
-}
-
-fn continue_model_button(p: Paint) -> El {
+    .secure()
+    .label(tr("ElevenLabs API key"))
+    .placeholder(tr("Paste your API key"))
+    .width(Some(KEY_W))
+    .disabled(checking || key.is_none())
+    .build(p.k)
+    .key("key-field");
     let label = tr("Continue");
-    Button::new(label)
+    let go = Button::new(label)
         .variant(ButtonVariant::Contrast)
+        .disabled(checking || !typed)
         .label_with(move |font, ink| {
             row()
                 .gap(6.0)
@@ -287,24 +210,111 @@ fn continue_model_button(p: Paint) -> El {
                         .key("arrow")
                         .color(ink),
                 )
-        })
-        .on_press(live::continue_model)
-        .build_push(p.k)
-        .key("continue")
-        .default_button()
-        .transition(arrives())
+        });
+    let go = if s.live.is_some() {
+        go.on_press(live::continue_key)
+    } else {
+        go
+    };
+    let said = key.and_then(|key| match (&key.error, &key.check) {
+        (Some(error), _) => Some((error.as_str(), p.danger())),
+        (None, Check::Checking) => Some((tr("Checking…"), p.muted())),
+        (None, Check::Failed(why)) => Some((why.as_str(), p.danger())),
+        (None, Check::Idle | Check::Works) => None,
+    });
+    let skip = Button::new(tr("Skip for now"))
+        .variant(ButtonVariant::Ghost)
+        .disabled(checking);
+    let skip = if s.live.is_some() {
+        skip.on_press(live::skip_key)
+    } else {
+        skip
+    };
+    col()
+        .key("key")
+        .gap(22.0)
+        .items_center()
+        .child(
+            s.motion
+                .staggered(hex_meter(p, "key-mark", 44.0, 1.0, 1.0), 0.0, 8.0),
+        )
+        .child(heading(
+            p,
+            s,
+            "key-head",
+            tr("Connect ElevenLabs"),
+            lead(
+                p,
+                tr("Paste an API key from your ElevenLabs account so Hex can transcribe what you say."),
+            ),
+        ))
+        .child(
+            s.motion.staggered(
+                col()
+                    .key("key-entry")
+                    .gap(10.0)
+                    .items_center()
+                    .child(
+                        row()
+                            .key("key-row")
+                            .gap(10.0)
+                            .center_y()
+                            .child(field)
+                            .child(go.build_push(p.k).key("continue").default_button()),
+                    )
+                    // The line keeps its place, so a result never moves the
+                    // field above it.
+                    .child(
+                        row()
+                            .key("key-said")
+                            .w(TRY_W)
+                            .min_h(18.0)
+                            .center()
+                            .children(said.map(|(copy, color)| {
+                                text(copy.to_owned())
+                                    .key("key-result")
+                                    .font(DESCRIPTION)
+                                    .color(color)
+                                    .align(rune::Align::Center)
+                                    .wrap()
+                                    .max_w(TRY_W)
+                                    .transition(Transition::opacity())
+                            })),
+                    ),
+                1.0,
+                8.0,
+            ),
+        )
+        .child(
+            s.motion.staggered(
+                col()
+                    .key("key-skip")
+                    .gap(6.0)
+                    .items_center()
+                    .child(skip.build_push(p.k).key("skip-key"))
+                    .child(no_key_note(p)),
+                2.0,
+                8.0,
+            ),
+        )
+}
+
+/// What going on without a key means, under Skip for now and on
+/// `"Hex is ready"`.
+fn no_key_note(p: Paint) -> El {
+    text(tr(
+        "Dictation won't work until you add a key in Settings › General.",
+    ))
+    .key("no-key-note")
+    .font(DESCRIPTION)
+    .color(p.muted())
+    .align(rune::Align::Center)
+    .wrap()
+    .w(TRY_W)
 }
 
 fn ready_page(p: Paint, s: &Onboard) -> El {
-    let core = ready(
-        p,
-        &s.caps,
-        (!s.had_model).then_some(PILL),
-        s.ready_age(),
-        s.reduced.get(),
-        s.motion,
-        s.home,
-    );
+    let core = ready(p, &s.caps, s.ready_age(), s.reduced.get(), s.motion, s.home);
 
     if s.live.is_some() {
         return col()
@@ -312,6 +322,9 @@ fn ready_page(p: Paint, s: &Onboard) -> El {
             .gap(20.0)
             .items_center()
             .child(core)
+            // Without a key Hex is set up but can't dictate yet: say so,
+            // and offer no practice, which needs one.
+            .children((!s.has_key).then(|| no_key_note(p).transition(arrives())))
             .children(
                 login_ask(p, &s.login, s.now, s.reduced.get(), false, login::toggle)
                     .map(|ask| ask.transition(arrives())),
@@ -322,13 +335,13 @@ fn ready_page(p: Paint, s: &Onboard) -> El {
                     .gap(10.0)
                     .center_y()
                     .transition(arrives())
-                    .child(
+                    .children(s.has_key.then(|| {
                         Button::new(tr("Try again"))
                             .variant(ButtonVariant::Neutral)
                             .on_press(live::on_ui(Onboard::jump_to_try))
                             .build_push(p.k)
-                            .key("try-again"),
-                    )
+                            .key("try-again")
+                    }))
                     .child(
                         Button::new(tr("Start using Hex"))
                             .variant(ButtonVariant::Contrast)
@@ -388,14 +401,6 @@ fn none() -> El {
     el().key("none")
 }
 
-fn download(s: &Onboard) -> Download {
-    s.download.unwrap_or(Download {
-        language: s.wants,
-        downloaded: 0,
-        total: s.wants.bytes(),
-    })
-}
-
 fn lead(p: Paint, copy: impl Into<String>) -> El {
     text(copy.into())
         .key("lead")
@@ -425,205 +430,6 @@ fn hold(p: Paint, s: &Onboard, rest: &str, down: bool) -> El {
         .child(text(tr("Hold")).key("hold").font(LEAD).color(p.muted()))
         .child(keys(p, "keys", &s.caps, down))
         .child(text(rest).key("rest").font(LEAD).color(p.muted()))
-}
-
-fn download_page(p: Paint, s: &Onboard, waiting: bool) -> El {
-    if let Some(live) = s
-        .live
-        .as_ref()
-        .filter(|live| !waiting && live.model_step != ModelStep::None)
-    {
-        return models_page(p, s, live);
-    }
-    let d = download(s);
-
-    let head = if waiting {
-        heading(
-            p,
-            s,
-            "waiting-head",
-            tr("Almost ready"),
-            lead(p, tr("Finishing the speech model so Hex can hear you.")),
-        )
-    } else {
-        let subtitle = row()
-            .key("download-line")
-            .gap(7.0)
-            .center_y()
-            .child(
-                text(tr("Downloading"))
-                    .key("pre")
-                    .font(LEAD)
-                    .color(p.muted()),
-            )
-            .child(if s.live.is_none() {
-                // The story's prototype has its other language by design.
-                language_capsule(p, d.language, Some(Onboard::cycle_language))
-            } else if s.live.as_ref().is_some_and(Live::switches_language) {
-                language_capsule(p, d.language, Some(live::cycle_language))
-            } else {
-                language_capsule::<Onboard>(p, d.language, None)
-            })
-            .child(
-                text(tr("speech model"))
-                    .key("post")
-                    .font(LEAD)
-                    .color(p.muted()),
-            );
-        heading(p, s, "download-head", tr("Setting up Hex"), subtitle)
-    };
-
-    let pct = (d.fraction() * 100.0).round() as u32;
-    let status_inner = if d.done() {
-        allowed(p, "status", tr("Ready")).transition(Transition::opacity())
-    } else {
-        text(format!("{pct}%"))
-            .key("status")
-            .font(TextStyle::new(13.0, 520.0).lh(18.0).features("'tnum' 1"))
-            .color(p.text())
-    };
-    let progress_capsule = row()
-        .key("download-progress-pill")
-        .h(32.0)
-        .pl(10.0)
-        .pr(13.0)
-        .gap(8.0)
-        .center_y()
-        .radius(16.0)
-        .fill(p.k.c.surface_raised)
-        .border(p.hair, p.k.c.border_weak)
-        .matched(CAPSULE)
-        .motion(FLY)
-        .width_leads()
-        .child(hex_meter(p, "meter", 18.0, d.fraction(), s.closed))
-        .child(status_inner)
-        .children(super::first_screen::amount(p, s, d));
-    // "Almost ready" receives the download back from the top bar as a
-    // quiet bar, by that flight rather than a staggered entrance, with
-    // "Watch another one" beside it.
-    let progress_capsule = if waiting {
-        super::sketches::progress(p, s, d)
-    } else {
-        s.motion.staggered(progress_capsule, 2.0, 6.0)
-    };
-
-    // A network that blocks the download: why, then retry or use a model
-    // file brought some other way (#894).
-    let retry = s.live.as_ref().filter(|live| live.failed).map(|live| {
-        let why = live
-            .failure
-            .clone()
-            .unwrap_or_else(|| tr("The download stopped.").to_owned());
-        col()
-            .key("download-failed")
-            .gap(12.0)
-            .items_center()
-            .transition(arrives())
-            .child(
-                text(why)
-                    .key("why")
-                    .font(LEAD)
-                    .color(p.muted())
-                    .align(rune::Align::Center)
-                    .wrap()
-                    .w(TRY_W),
-            )
-            .child(
-                row()
-                    .key("actions")
-                    .gap(10.0)
-                    .center_y()
-                    .child(
-                        Button::new(if live.using_file {
-                            tr("Adding model…")
-                        } else {
-                            tr("Use a model file…")
-                        })
-                        .variant(ButtonVariant::Neutral)
-                        .on_press(live::use_file)
-                        .build_push(p.k)
-                        .key("use-file"),
-                    )
-                    .child(
-                        Button::new(tr("Try again"))
-                            .variant(ButtonVariant::Neutral)
-                            .on_press(live::retry_download)
-                            .build_push(p.k)
-                            .key("retry-download"),
-                    ),
-            )
-    });
-    col()
-        .key(if waiting { "waiting" } else { "download" })
-        .gap(22.0)
-        .items_center()
-        // On "Almost ready" the download flies down past both into its bar.
-        .child(after_flight(
-            flow_box(
-                if waiting {
-                    "waiting-hud"
-                } else {
-                    "download-hud"
-                },
-                1.24,
-                s,
-            ),
-            s,
-        ))
-        .child(after_flight(head, s))
-        .child(progress_capsule)
-        .children(retry)
-        .children(without_model(p, s))
-}
-
-/// A sketch from `"Watch another one"`, the download up in the top pill.
-fn sketch_page(p: Paint, s: &Onboard) -> El {
-    // The download flies up past it from the bar.
-    after_flight(col(), s)
-        .key("sketch")
-        .gap(16.0)
-        .items_center()
-        .child(heading(
-            p,
-            s,
-            "without",
-            tr("Without Hex"),
-            lead(p, super::sketches::lead(s).unwrap_or_default()),
-        ))
-        .children(super::sketches::card(p, s))
-}
-/// The one way past a model that can't be had (#894): once its download
-/// failed or stalled, and every permission is ready, onboarding can finish
-/// without one.
-fn without_model(p: Paint, s: &Onboard) -> Option<El> {
-    s.live
-        .as_ref()
-        .filter(|live| s.granted && live.model_blocked())
-        .map(|_| {
-            col()
-                .key("without-model")
-                .gap(6.0)
-                .items_center()
-                .transition(arrives())
-                .child(
-                    Button::new(tr("Continue without a model"))
-                        .variant(ButtonVariant::Ghost)
-                        .on_press(live::continue_without_model)
-                        .build_push(p.k)
-                        .key("continue-without-model"),
-                )
-                .child(
-                    text(tr(
-                        "Dictation won't work until you add a model with Add model file… in Settings.",
-                    ))
-                    .key("without-model-why")
-                    .font(DESCRIPTION)
-                    .color(p.muted())
-                    .align(rune::Align::Center)
-                    .wrap()
-                    .w(TRY_W),
-                )
-        })
 }
 
 fn demo_page(p: Paint, s: &Onboard) -> El {

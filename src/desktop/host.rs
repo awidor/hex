@@ -1,7 +1,5 @@
 use crate::desktop::activity::DesktopActivity;
-use crate::transcription::models::{
-    ModelPreparationStage, TranscriptionModelId, TranscriptionSelection,
-};
+use crate::transcription::models::TranscriptionSelection;
 
 /// The Linux service's snapshot; Windows and macOS publish their own
 /// in-process.
@@ -20,11 +18,9 @@ pub(crate) struct DesktopSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DesktopTranscriptionSnapshot {
-    pub(crate) downloaded_bytes: u64,
+    /// Why the selection could not be applied, if it could not.
     pub(crate) error: Option<String>,
-    pub(crate) preparation_stage: Option<ModelPreparationStage>,
     pub(crate) selection: TranscriptionSelection,
-    pub(crate) preparing: Option<TranscriptionModelId>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

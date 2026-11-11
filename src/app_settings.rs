@@ -134,17 +134,6 @@ pub fn env_hex_experimental_mic() -> bool {
         .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
 }
 
-/// Where Linux and Windows run the speech model (#856): Auto picks a GPU
-/// unless it failed before under its current driver, then the CPU.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TranscriptionDevice {
-    #[default]
-    Auto,
-    Gpu,
-    Cpu,
-}
-
 /// Where the recording HUD appears while dictating.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -299,9 +288,8 @@ pub struct AppSettings {
     pub terminal_paste_hotkey: Option<HotkeyBinding>,
     pub show_dock_icon: bool,
     pub transcription: TranscriptionSelection,
-    /// Where the speech model runs (Linux and Windows).
-    pub transcription_device: TranscriptionDevice,
-    pub transcription_recents: Vec<TranscriptionSelection>,
+    /// How Scribe writes a transcript, and which model's text is pasted.
+    pub scribe: crate::transcription::scribe::ScribeSettings,
     pub keyboard_model_switching: KeyboardModelSwitching,
     pub dictation_processing: DictationProcessingSettings,
     /// Retired Voice Action settings, kept untouched in `settings.json`.
@@ -363,8 +351,6 @@ pub struct AppSettings {
     pub text_replacements: Vec<TextReplacement>,
 }
 
-/// Moves English dictation to the streaming English model once.
-const STREAMING_ENGLISH_MIGRATION: &str = "streaming-english-model";
 /// Annotate became a default feature: on for everyone once.
 #[cfg(hex_capture)]
 const ANNOTATE_DEFAULT_MIGRATION: &str = "annotate-on-by-default";
@@ -376,7 +362,6 @@ const ANNOTATE_DEFAULT_MIGRATION: &str = "annotate-on-by-default";
 const ANOMALY_IDENTITY_MIGRATION: &str = "anomaly-hex-identity";
 #[cfg(hex_capture)]
 const MIGRATIONS: &[&str] = &[
-    STREAMING_ENGLISH_MIGRATION,
     ANNOTATE_DEFAULT_MIGRATION,
     ANOMALY_IDENTITY_MIGRATION,
     MEETING_RETENTION_DEFAULT_MIGRATION,
@@ -384,7 +369,6 @@ const MIGRATIONS: &[&str] = &[
 ];
 #[cfg(not(hex_capture))]
 const MIGRATIONS: &[&str] = &[
-    STREAMING_ENGLISH_MIGRATION,
     ANOMALY_IDENTITY_MIGRATION,
     MEETING_RETENTION_DEFAULT_MIGRATION,
     MEETING_SUMMARIES_MIGRATION,
@@ -439,9 +423,8 @@ impl Default for AppSettings {
             extra_dictation_hotkeys: Vec::new(),
             terminal_paste_hotkey: None,
             show_dock_icon: true,
-            transcription: default_transcription(),
-            transcription_device: TranscriptionDevice::Auto,
-            transcription_recents: Vec::new(),
+            transcription: TranscriptionSelection::default(),
+            scribe: crate::transcription::scribe::ScribeSettings::default(),
             keyboard_model_switching: KeyboardModelSwitching::default(),
             dictation_processing: DictationProcessingSettings::default(),
             retired_voice_action: None,
@@ -470,9 +453,9 @@ impl Default for AppSettings {
     }
 }
 
-/// macOS input-source IDs mapped to the model and language they select. An
-/// absent entry means "Don't switch"; this never changes the model merely
-/// because dictation starts.
+/// Input-source IDs mapped to the language they select. An absent entry
+/// means "Don't switch"; this never changes the language merely because
+/// dictation starts.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct KeyboardModelSwitching {
@@ -480,7 +463,7 @@ pub struct KeyboardModelSwitching {
     pub mappings: std::collections::BTreeMap<String, KeyboardModelChoice>,
 }
 
-/// What one input source selects: a model and a language it supports.
+/// What one input source or mode selects: the language to transcribe in.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KeyboardModelChoice {
     pub model: TranscriptionModelId,
@@ -488,67 +471,16 @@ pub struct KeyboardModelChoice {
 }
 
 impl KeyboardModelChoice {
-    /// The picker's downloadable models only; Apple Speech is never mapped.
     pub fn validate(&self) -> Result<()> {
-        let selection = TranscriptionSelection {
+        crate::transcription::models::validate(&TranscriptionSelection {
             model: self.model,
             language: self.language.clone(),
-        };
-        // An import stays mapped while it is missing or off, like the
-        // saved selection; switching to it then runs the default model.
-        if self.model.is_labs_gated() {
-            return crate::transcription::models::validate_saved(&selection);
-        }
-        let model = crate::transcription::models::validate(&selection)?;
-        match model.runtime {
-            crate::transcription::models::ModelRuntime::Gguf(_) => Ok(()),
-            crate::transcription::models::ModelRuntime::AppleSpeech => {
-                Err(eyre!("{} can't be switched to by input source", model.name))
-            }
-        }
+        })
+        .map(drop)
     }
-}
-
-/// A new install starts with the model recommended for the person's
-/// language, so first-run setup can download it without asking.
-fn default_transcription() -> TranscriptionSelection {
-    crate::transcription::models::recommended_selection(&crate::desktop::i18n::preferred_language())
 }
 
 impl AppSettings {
-    pub fn transcription_for_model(&self, id: TranscriptionModelId) -> TranscriptionSelection {
-        if self.transcription.model == id {
-            return self.transcription.clone();
-        }
-        if let Some(selection) = self.transcription_recents.iter().rev().find(|selection| {
-            selection.model == id && crate::transcription::models::validate_saved(selection).is_ok()
-        }) {
-            return selection.clone();
-        }
-        let model = crate::transcription::models::definition(id);
-        TranscriptionSelection {
-            model: id,
-            language: model.language_for(&self.transcription.language).into(),
-        }
-    }
-
-    pub fn remember_transcription(&mut self, selection: TranscriptionSelection) {
-        self.transcription_recents.push(self.transcription.clone());
-        self.transcription_recents.push(selection.clone());
-        self.normalize_transcription_recents();
-        self.transcription = selection;
-    }
-
-    fn normalize_transcription_recents(&mut self) {
-        let mut seen = std::collections::HashSet::new();
-        self.transcription_recents.reverse();
-        self.transcription_recents.retain(|selection| {
-            crate::transcription::models::validate_saved(selection).is_ok()
-                && seen.insert(selection.model)
-        });
-        self.transcription_recents.reverse();
-    }
-
     pub fn save_transcription(&mut self, selection: TranscriptionSelection) -> Result<()> {
         self.save_transcription_with(selection, Self::save)
     }
@@ -560,7 +492,7 @@ impl AppSettings {
     ) -> Result<()> {
         crate::transcription::models::validate(&selection)?;
         let mut candidate = self.clone();
-        candidate.remember_transcription(selection);
+        candidate.transcription = selection;
         self.commit_with(candidate, save)
     }
 
@@ -758,8 +690,7 @@ impl AppSettings {
         crate::feedback::set_sound_set(self.sound_theme);
         crate::desktop::i18n::apply(self.ui_language.as_deref());
         INDICATOR_POSITION.store(self.indicator_position as u8, Ordering::Relaxed);
-        #[cfg(not(target_os = "macos"))]
-        crate::transcription::local_transcriber::set_device(self.transcription_device);
+        crate::transcription::scribe::apply(self.scribe);
         RECORDING_DUCK_VOLUME.store(self.recording_duck_volume.to_bits(), Ordering::Relaxed);
         RECORDING_AUDIO_BEHAVIOR.store(self.recording_audio_behavior.encoded(), Ordering::Relaxed);
         PAUSE_BROWSER_MEDIA.store(self.pause_browser_media, Ordering::Relaxed);
@@ -835,11 +766,7 @@ impl AppSettings {
             runtime: self.runtime_hotkeys(),
             settings: Some(Arc::new(self.clone())),
         };
-        // An import that can't run stays saved; the listener runs the
-        // default model until it is fixed.
-        set_transcription_selection(&crate::transcription::custom_models::runnable(
-            &self.transcription,
-        ));
+        set_transcription_selection(&self.transcription);
         set_microphone_selection(self.microphone.as_deref());
         #[cfg(target_os = "macos")]
         crate::dictation::config::update_dictation_profiles(&self.dictation_processing);
@@ -895,19 +822,6 @@ impl AppSettings {
     /// Applies each one-time change this file has not seen, then records it
     /// so a later choice, such as switching back, sticks.
     fn apply_one_time_migrations(&mut self) {
-        self.apply_one_time_migrations_with(|model| {
-            crate::transcription::models::is_installed(model, "en")
-        });
-    }
-
-    fn apply_one_time_migrations_with(
-        &mut self,
-        installed: impl Fn(&crate::transcription::models::ModelDefinition) -> bool,
-    ) {
-        if !self.has_migration(STREAMING_ENGLISH_MIGRATION) {
-            self.switch_english_to_streaming_model(installed);
-            self.migrations.push(STREAMING_ENGLISH_MIGRATION.into());
-        }
         if !self.has_migration(MEETING_RETENTION_DEFAULT_MIGRATION) {
             if self.meetings.retention == Some(MeetingRetention::Forever) {
                 self.meetings.retention = None;
@@ -956,53 +870,6 @@ impl AppSettings {
             self.write_to(path)?;
         }
         Ok(())
-    }
-
-    /// English dictation moves to Parakeet Unified English, which streams
-    /// while the shortcut is held. The previous model stays downloaded and
-    /// in the recent models, one click away. Other languages and Auto keep
-    /// their model because Parakeet Unified is English-only. Only an installed
-    /// model is switched to, so an upgrade never leaves dictation waiting on a
-    /// download.
-    fn switch_english_to_streaming_model(
-        &mut self,
-        installed: impl Fn(&crate::transcription::models::ModelDefinition) -> bool,
-    ) {
-        if self.transcription.language != "en"
-            || self.transcription.model == TranscriptionModelId::ParakeetUnifiedEnglish
-        {
-            return;
-        }
-        let model =
-            crate::transcription::models::definition(TranscriptionModelId::ParakeetUnifiedEnglish);
-        if !installed(model) {
-            return;
-        }
-        let selection = TranscriptionSelection {
-            model: model.id,
-            language: "en".into(),
-        };
-        if crate::transcription::models::validate(&selection).is_err() {
-            return;
-        }
-        tracing::info!(
-            from = self.transcription.model.as_str(),
-            "switched English dictation to the streaming English model"
-        );
-        self.remember_transcription(selection);
-    }
-
-    fn migrate_disabled_transcription_model(&mut self) {
-        if self.transcription.model.is_labs_gated()
-            || crate::transcription::models::definition(self.transcription.model).available()
-        {
-            return;
-        }
-        tracing::warn!(
-            model = self.transcription.model.as_str(),
-            "replaced a disabled transcription model"
-        );
-        self.transcription = TranscriptionSelection::default();
     }
 
     pub fn runtime_hotkeys(&self) -> RuntimeHotkeys {
@@ -1474,14 +1341,14 @@ mod tests {
     #[test]
     fn annotate_turns_on_once_for_older_settings() {
         let mut settings = AppSettings {
-            migrations: vec![STREAMING_ENGLISH_MIGRATION.into()],
+            migrations: Vec::new(),
             ..AppSettings::default()
         };
         settings.capture.enabled = false;
-        settings.apply_one_time_migrations_with(|_| true);
+        settings.apply_one_time_migrations();
         assert!(settings.capture.enabled);
         settings.capture.enabled = false;
-        settings.apply_one_time_migrations_with(|_| true);
+        settings.apply_one_time_migrations();
         assert!(!settings.capture.enabled, "only once");
     }
 
@@ -1492,7 +1359,7 @@ mod tests {
         let migrated = |meetings: &str| {
             let mut settings: AppSettings =
                 serde_json::from_str(&format!(r#"{{"meetings":{meetings}}}"#)).unwrap();
-            settings.apply_one_time_migrations_with(|_| true);
+            settings.apply_one_time_migrations();
             assert!(settings.has_migration(MEETING_SUMMARIES_MIGRATION));
             let written = serde_json::to_value(&settings).unwrap();
             assert!(written["meetings"].get("summarize_with_opencode").is_none());
@@ -1538,7 +1405,7 @@ mod tests {
             r#"{"meetings":{"summaries":"off","summarize_with_opencode":true},"migrations":["meeting-summaries-choice"]}"#,
         )
         .unwrap();
-        settings.apply_one_time_migrations_with(|_| true);
+        settings.apply_one_time_migrations();
         assert_eq!(settings.meetings.summaries, Off);
         assert!(AppSettings::default().has_migration(MEETING_SUMMARIES_MIGRATION));
     }
@@ -1552,7 +1419,7 @@ mod tests {
         settings.keyboard_model_switching.mappings.insert(
             "com.apple.keylayout.Spanish".into(),
             KeyboardModelChoice {
-                model: TranscriptionModelId::ParakeetV3,
+                model: TranscriptionModelId::ScribeV3,
                 language: "es".into(),
             },
         );
@@ -1565,11 +1432,11 @@ mod tests {
     }
 
     #[test]
-    fn loading_drops_keyboard_mappings_to_a_language_the_model_lacks() {
+    fn loading_drops_keyboard_mappings_whose_language_is_not_a_code() {
         let dir = TestSettingsDir::new("keyboard-mappings");
         let mut settings = AppSettings::default();
         let russian = KeyboardModelChoice {
-            model: TranscriptionModelId::ParakeetV3,
+            model: TranscriptionModelId::ScribeV3,
             language: "ru".into(),
         };
         settings
@@ -1579,8 +1446,8 @@ mod tests {
         settings.keyboard_model_switching.mappings.insert(
             "Japanese".into(),
             KeyboardModelChoice {
-                model: TranscriptionModelId::ParakeetUnifiedEnglish,
-                language: "ja".into(),
+                model: TranscriptionModelId::ScribeV3,
+                language: "japanese".into(),
             },
         );
         settings.write_to(&dir.path).unwrap();
@@ -1597,7 +1464,7 @@ mod tests {
         assert!(!settings.labs.app_model_switching);
         assert!(settings.dictation_processing.default_mode.speech.is_none());
         let speech = KeyboardModelChoice {
-            model: TranscriptionModelId::ParakeetV3,
+            model: TranscriptionModelId::ScribeV3,
             language: "es".into(),
         };
         settings.labs.app_model_switching = true;
@@ -1625,7 +1492,7 @@ mod tests {
         let dir = TestSettingsDir::new("mode-speech");
         let mut settings = AppSettings::default();
         let russian = KeyboardModelChoice {
-            model: TranscriptionModelId::ParakeetV3,
+            model: TranscriptionModelId::ScribeV3,
             language: "ru".into(),
         };
         settings.dictation_processing.modes = vec![
@@ -1637,8 +1504,8 @@ mod tests {
             DictationMode {
                 name: "Japanese".into(),
                 speech: Some(KeyboardModelChoice {
-                    model: TranscriptionModelId::ParakeetUnifiedEnglish,
-                    language: "ja".into(),
+                    model: TranscriptionModelId::ScribeV3,
+                    language: "japanese".into(),
                 }),
                 ..DictationMode::default()
             },
@@ -1655,7 +1522,7 @@ mod tests {
         let dir = TestSettingsDir::new("folded-hints");
         let mut file = serde_json::to_value(AppSettings {
             transcription: TranscriptionSelection {
-                model: TranscriptionModelId::WhisperLargeV3Turbo,
+                model: TranscriptionModelId::ScribeV3,
                 language: "en".into(),
             },
             vocabulary: vec![VocabularyEntry {
@@ -2222,101 +2089,6 @@ mod tests {
         );
     }
 
-    fn english(model: TranscriptionModelId) -> String {
-        format!(
-            r#"{{"transcription":{{"model":"{}","language":"en"}}}}"#,
-            model.as_str()
-        )
-    }
-
-    #[test]
-    fn english_dictation_switches_to_the_installed_streaming_model_once() {
-        let mut settings: AppSettings =
-            serde_json::from_str(&english(TranscriptionModelId::ParakeetV3)).unwrap();
-        settings.apply_one_time_migrations_with(|_| true);
-        assert_eq!(
-            settings.transcription.model,
-            TranscriptionModelId::ParakeetUnifiedEnglish
-        );
-        assert!(settings.has_migration(STREAMING_ENGLISH_MIGRATION));
-        assert!(
-            settings
-                .transcription_recents
-                .iter()
-                .any(|recent| recent.model == TranscriptionModelId::ParakeetV3),
-            "the previous model stays one click away"
-        );
-
-        // Switching back after the migration sticks.
-        let dir = TestSettingsDir::new("streaming-english");
-        let mut chosen = settings.clone();
-        chosen.transcription.model = TranscriptionModelId::ParakeetV3;
-        chosen.write_to(&dir.path).unwrap();
-        let reloaded = AppSettings::load_from(&dir.path).unwrap();
-        assert_eq!(
-            reloaded.transcription.model,
-            TranscriptionModelId::ParakeetV3
-        );
-    }
-
-    #[test]
-    fn english_dictation_keeps_its_model_when_the_streaming_model_is_missing() {
-        let mut settings: AppSettings =
-            serde_json::from_str(&english(TranscriptionModelId::ParakeetV3)).unwrap();
-        settings.apply_one_time_migrations_with(|_| false);
-        assert_eq!(
-            settings.transcription.model,
-            TranscriptionModelId::ParakeetV3
-        );
-        assert!(
-            settings.has_migration(STREAMING_ENGLISH_MIGRATION),
-            "a later download never switches the model behind the user's back"
-        );
-    }
-
-    #[test]
-    fn other_languages_and_auto_keep_their_model() {
-        for language in ["de", "auto"] {
-            let model = crate::transcription::models::choices_for_runtime(language)
-                .iter()
-                .map(|choice| choice.model.id)
-                .find(|model| *model != TranscriptionModelId::ParakeetUnifiedEnglish)
-                .expect("a model for the language");
-            let dir = TestSettingsDir::new("streaming-other");
-            fs::write(
-                &dir.path,
-                format!(
-                    r#"{{"transcription":{{"model":"{}","language":"{language}"}}}}"#,
-                    model.as_str()
-                ),
-            )
-            .unwrap();
-            let settings = AppSettings::load_from(&dir.path).unwrap();
-            assert_eq!(settings.transcription.model, model);
-            assert_eq!(settings.transcription.language, language);
-            assert!(settings.has_migration(STREAMING_ENGLISH_MIGRATION));
-        }
-    }
-
-    #[test]
-    fn new_settings_need_no_one_time_migration() {
-        assert!(AppSettings::default().has_migration(STREAMING_ENGLISH_MIGRATION));
-        let dir = TestSettingsDir::new("streaming-new");
-        let settings = AppSettings {
-            transcription: TranscriptionSelection {
-                model: TranscriptionModelId::ParakeetV3,
-                language: "en".into(),
-            },
-            ..AppSettings::default()
-        };
-        settings.write_to(&dir.path).unwrap();
-        let reloaded = AppSettings::load_from(&dir.path).unwrap();
-        assert_eq!(
-            reloaded.transcription.model,
-            TranscriptionModelId::ParakeetV3
-        );
-    }
-
     #[test]
     fn vocabulary_round_trips_and_stays_out_of_files_without_one() {
         // A file from before the vocabulary loads with an empty one and is
@@ -2675,7 +2447,7 @@ mod tests {
     fn transcription_selection_round_trips() {
         let settings = AppSettings {
             transcription: TranscriptionSelection {
-                model: crate::transcription::models::TranscriptionModelId::WhisperLargeV3Turbo,
+                model: crate::transcription::models::TranscriptionModelId::ScribeV3,
                 language: "zh".into(),
             },
             ..AppSettings::default()
@@ -2689,54 +2461,12 @@ mod tests {
     }
 
     #[test]
-    fn model_switches_remember_language_without_changing_other_settings() {
-        let french = TranscriptionSelection {
-            model: TranscriptionModelId::WhisperLargeV3Turbo,
-            language: "fr".into(),
-        };
-        let mut settings = AppSettings {
-            show_dock_icon: false,
-            microphone: Some("Test microphone".into()),
-            ..Default::default()
-        };
-        settings.remember_transcription(french.clone());
-        assert_eq!(
-            settings
-                .transcription_for_model(TranscriptionModelId::ParakeetV2)
-                .language,
-            "en"
-        );
-        assert_eq!(
-            settings
-                .transcription_for_model(TranscriptionModelId::CohereTranscribe)
-                .language,
-            "fr"
-        );
-        settings.remember_transcription(TranscriptionSelection::default());
-        let encoded = serde_json::to_vec(&settings).unwrap();
-        let mut decoded: AppSettings = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(
-            decoded.transcription_for_model(TranscriptionModelId::WhisperLargeV3Turbo),
-            french
-        );
-        for _ in 0..100 {
-            decoded.remember_transcription(french.clone());
-            decoded.remember_transcription(TranscriptionSelection::default());
-        }
-        assert_eq!(decoded.transcription_recents.len(), 2);
-        assert!(!decoded.show_dock_icon);
-        assert_eq!(decoded.microphone.as_deref(), Some("Test microphone"));
-        let old: AppSettings = serde_json::from_str("{}").unwrap();
-        assert!(old.transcription_recents.is_empty());
-    }
-
-    #[test]
-    fn failed_model_selection_save_preserves_selection_recents_and_unsaved_edits() {
+    fn a_failed_selection_save_preserves_the_selection_and_unsaved_edits() {
         let mut settings = AppSettings::default();
         settings.dictation_processing.default_mode.name = "Unsaved mode".into();
         let before = serde_json::to_value(&settings).unwrap();
         let candidate = TranscriptionSelection {
-            model: TranscriptionModelId::WhisperLargeV3Turbo,
+            model: TranscriptionModelId::ScribeV3,
             language: "fr".into(),
         };
         let error = settings
@@ -2766,9 +2496,8 @@ mod tests {
             microphone: Some("Test microphone".into()),
             ..AppSettings::default()
         };
-        let previous = settings.transcription.clone();
         let selection = TranscriptionSelection {
-            model: TranscriptionModelId::WhisperLargeV3Turbo,
+            model: TranscriptionModelId::ScribeV3,
             language: "fr".into(),
         };
         settings
@@ -2779,45 +2508,68 @@ mod tests {
         assert_eq!(persisted.transcription, selection);
         assert_eq!(persisted.microphone.as_deref(), Some("Test microphone"));
         assert!(!persisted.sound_effects);
-        assert!(persisted.transcription_recents.contains(&previous));
     }
 
     #[test]
-    fn invalid_remembered_languages_are_not_offered_by_model_switching() {
-        let mut settings = AppSettings {
-            transcription_recents: vec![
-                TranscriptionSelection {
-                    model: TranscriptionModelId::ParakeetV2,
-                    language: "fr".into(),
-                },
-                TranscriptionSelection {
-                    model: TranscriptionModelId::WhisperLargeV3Turbo,
-                    language: "not-a-language".into(),
-                },
-            ],
-            ..Default::default()
-        };
+    fn settings_saved_by_upstream_hex_load_as_scribe_with_their_language() {
+        // A local model, the recents list, the speech-engine device, and the
+        // streaming-English migration are all upstream's; none is an error.
+        let settings: AppSettings = serde_json::from_str(
+            r#"{
+                "transcription": {"model": "parakeet_v3", "language": "de"},
+                "transcription_device": "gpu",
+                "transcription_recents": [
+                    {"model": "whisper_large_v3_turbo", "language": "fr"},
+                    {"model": "custom-0123456789abcdef", "language": "en"}
+                ],
+                "migrations": ["streaming-english-model"]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(settings.transcription.model, TranscriptionModelId::ScribeV3);
+        assert_eq!(settings.transcription.language, "de");
+        assert!(crate::transcription::models::validate(&settings.transcription).is_ok());
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["transcription"]["model"], "scribe_v3");
+        assert!(saved.get("transcription_device").is_none());
+        assert!(saved.get("transcription_recents").is_none());
+    }
+
+    #[test]
+    fn scribe_settings_default_to_the_accurate_path_and_round_trip() {
+        use crate::transcription::scribe::{FinalText, NumbersFormat, ScribeSettings};
+
+        let defaults = AppSettings::default().scribe;
+        assert_eq!(defaults, ScribeSettings::default());
+        assert_eq!(defaults.final_text, FinalText::Batch);
+        assert!(!defaults.no_verbatim);
+        // A file from before the fork has no `scribe` at all.
+        let old: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.scribe, ScribeSettings::default());
+
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"scribe": {"no_verbatim": true, "numbers_format": "digits", "final_text": "live"}}"#,
+        )
+        .unwrap();
         assert_eq!(
-            settings
-                .transcription_for_model(TranscriptionModelId::ParakeetV2)
-                .language,
-            "en"
+            settings.scribe,
+            ScribeSettings {
+                no_verbatim: true,
+                numbers_format: NumbersFormat::Digits,
+                final_text: FinalText::Live,
+            }
         );
-        assert_eq!(
-            settings
-                .transcription_for_model(TranscriptionModelId::WhisperLargeV3Turbo)
-                .language,
-            "en"
-        );
-        settings.normalize_transcription_recents();
-        assert!(settings.transcription_recents.is_empty());
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["scribe"]["numbers_format"], "digits");
+        assert_eq!(saved["scribe"]["final_text"], "live");
     }
 
     #[test]
     fn automatic_language_selection_round_trips_explicitly() {
         let settings = AppSettings {
             transcription: TranscriptionSelection {
-                model: crate::transcription::models::TranscriptionModelId::WhisperLargeV3Turbo,
+                model: crate::transcription::models::TranscriptionModelId::ScribeV3,
                 language: crate::transcription::models::AUTO_LANGUAGE.into(),
             },
             ..AppSettings::default()
@@ -2829,16 +2581,6 @@ mod tests {
         assert!(encoded.contains(r#""language":"auto""#));
         assert_eq!(decoded.transcription, settings.transcription);
         assert!(crate::transcription::models::validate(&decoded.transcription).is_ok());
-    }
-
-    #[test]
-    fn disabled_apple_speech_selection_migrates_to_the_default_model() {
-        let mut settings: AppSettings =
-            serde_json::from_str(r#"{"transcription":{"model":"apple_speech","language":"de"}}"#)
-                .unwrap();
-
-        settings.migrate_disabled_transcription_model();
-        assert_eq!(settings.transcription, TranscriptionSelection::default());
     }
 
     #[test]

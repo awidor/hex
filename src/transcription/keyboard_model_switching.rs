@@ -1,9 +1,8 @@
-//! Input-source changes are model-picker choices, not recording-time routing.
+//! Input-source changes are language choices, not recording-time routing.
 
 use std::time::{Duration, Instant};
 
 use crate::app_settings::{KeyboardModelChoice, KeyboardModelSwitching};
-use crate::transcription::models::ModelDefinition;
 
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -16,20 +15,7 @@ pub(crate) struct InputSource {
     pub(crate) languages: Vec<String>,
 }
 
-impl InputSource {
-    /// The language a new mapping to `model` starts with: the first of this
-    /// source's languages the model supports, else `fallback`.
-    pub(crate) fn language_for(&self, model: &ModelDefinition, fallback: &str) -> String {
-        self.languages
-            .iter()
-            .map(|tag| tag.split(['-', '_']).next().unwrap_or(tag))
-            .find(|code| model.supports_language(code))
-            .unwrap_or(fallback)
-            .to_owned()
-    }
-}
-
-/// No models or workers live here: this only admits the latest picker choice.
+/// No transcriber lives here: this only admits the latest language choice.
 pub(crate) struct Switcher {
     settings: KeyboardModelSwitching,
     /// The observed source; unknown while switching is off, so turning it
@@ -95,7 +81,7 @@ impl Switcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcription::models::{TranscriptionModelId, definition};
+    use crate::transcription::models::TranscriptionModelId;
 
     fn choice(model: TranscriptionModelId, language: &str) -> KeyboardModelChoice {
         KeyboardModelChoice {
@@ -115,7 +101,7 @@ mod tests {
     }
 
     fn spanish() -> KeyboardModelChoice {
-        choice(TranscriptionModelId::ParakeetV3, "es")
+        choice(TranscriptionModelId::ScribeV3, "es")
     }
 
     #[test]
@@ -124,10 +110,11 @@ mod tests {
         let mut settings = mapped(&[("Spanish", spanish())]);
         let mut switcher = Switcher::new(settings.clone(), Some("Spanish".into()));
         assert_eq!(switcher.take_due(now + Duration::from_secs(1)), None);
-        let whisper = choice(TranscriptionModelId::WhisperLargeV3Turbo, "es");
-        settings.mappings.insert("Spanish".into(), whisper.clone());
+        // The mapping is edited to another language.
+        let catalan = choice(TranscriptionModelId::ScribeV3, "ca");
+        settings.mappings.insert("Spanish".into(), catalan.clone());
         assert!(switcher.configure(settings, now));
-        assert_eq!(switcher.take_due(now), Some(whisper));
+        assert_eq!(switcher.take_due(now), Some(catalan));
     }
 
     #[test]
@@ -148,9 +135,9 @@ mod tests {
     #[test]
     fn a_language_only_edit_of_the_active_mapping_applies_now() {
         let now = Instant::now();
-        let mut settings = mapped(&[("Russian", choice(TranscriptionModelId::ParakeetV3, "en"))]);
+        let mut settings = mapped(&[("Russian", choice(TranscriptionModelId::ScribeV3, "en"))]);
         let mut switcher = Switcher::new(settings.clone(), Some("Russian".into()));
-        let russian = choice(TranscriptionModelId::ParakeetV3, "ru");
+        let russian = choice(TranscriptionModelId::ScribeV3, "ru");
         settings.mappings.insert("Russian".into(), russian.clone());
         assert!(switcher.configure(settings, now));
         assert_eq!(switcher.take_due(now), Some(russian));
@@ -178,16 +165,16 @@ mod tests {
         assert_eq!(switcher.take_due(now), None);
         assert!(switcher.source_changed(Some("Spanish".into()), now));
         assert_eq!(switcher.take_due(now + DEBOUNCE), Some(spanish()));
-        settings.mappings.insert(
-            "ABC".into(),
-            choice(TranscriptionModelId::ParakeetUnifiedEnglish, "en"),
-        );
+        settings
+            .mappings
+            .insert("ABC".into(), choice(TranscriptionModelId::ScribeV3, "en"));
         assert!(!switcher.configure(settings.clone(), now));
         assert_eq!(switcher.take_due(now), None);
-        let whisper = choice(TranscriptionModelId::WhisperLargeV3Turbo, "es");
-        settings.mappings.insert("Spanish".into(), whisper.clone());
+        // The mapping is edited to another language.
+        let catalan = choice(TranscriptionModelId::ScribeV3, "ca");
+        settings.mappings.insert("Spanish".into(), catalan.clone());
         assert!(switcher.configure(settings.clone(), now));
-        assert_eq!(switcher.take_due(now), Some(whisper));
+        assert_eq!(switcher.take_due(now), Some(catalan));
         settings.enabled = false;
         assert!(switcher.configure(settings, now));
         assert_eq!(switcher.take_due(now), None);
@@ -196,7 +183,7 @@ mod tests {
     #[test]
     fn cycling_past_a_source_only_switches_to_the_last_mapping() {
         let now = Instant::now();
-        let french = choice(TranscriptionModelId::WhisperLargeV3Turbo, "fr");
+        let french = choice(TranscriptionModelId::ScribeV3, "fr");
         let mut switcher = Switcher::new(
             mapped(&[("French", french), ("Spanish", spanish())]),
             Some("ABC".into()),
@@ -229,23 +216,5 @@ mod tests {
         settings.enabled = true;
         switcher.configure(settings, now);
         assert_eq!(switcher.take_due(now + Duration::from_secs(3)), None);
-    }
-
-    #[test]
-    fn a_new_mapping_starts_in_the_sources_language_when_the_model_has_it() {
-        let source = InputSource {
-            id: "com.apple.keylayout.Russian".into(),
-            name: "Russian".into(),
-            languages: vec!["ru".into(), "en-US".into()],
-        };
-        let v3 = definition(TranscriptionModelId::ParakeetV3);
-        let english = definition(TranscriptionModelId::ParakeetUnifiedEnglish);
-        assert_eq!(source.language_for(v3, "en"), "ru");
-        assert_eq!(source.language_for(english, "en"), "en");
-        let unknown = InputSource {
-            languages: vec!["xx".into()],
-            ..source
-        };
-        assert_eq!(unknown.language_for(v3, "de"), "de");
     }
 }

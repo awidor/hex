@@ -177,7 +177,7 @@ mod tests {
     }
 
     fn spanish() -> KeyboardModelChoice {
-        choice(TranscriptionModelId::ParakeetV3, "es")
+        choice(TranscriptionModelId::ScribeV3, "es")
     }
 
     fn selection(model: TranscriptionModelId, language: &str) -> TranscriptionSelection {
@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(
             switcher.take_due(
                 now + Duration::from_secs(1),
-                &selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en")
+                &selection(TranscriptionModelId::ScribeV3, "en")
             ),
             None
         );
@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(
             switcher.take_due(
                 now + Duration::from_secs(2),
-                &selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en")
+                &selection(TranscriptionModelId::ScribeV3, "en")
             ),
             None
         );
@@ -215,7 +215,7 @@ mod tests {
         let mut switcher = Switcher::new(true, None);
         assert!(switcher.choice_changed(Some(spanish()), now));
         assert!(!switcher.choice_changed(Some(spanish()), now + Duration::from_millis(100)));
-        let current = selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en");
+        let current = selection(TranscriptionModelId::ScribeV3, "en");
         assert_eq!(
             switcher.take_due(now + Duration::from_millis(299), &current),
             None
@@ -234,7 +234,7 @@ mod tests {
     fn no_mode_or_no_choice_never_switches() {
         let now = Instant::now();
         let mut switcher = Switcher::new(true, Some(spanish()));
-        let current = selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en");
+        let current = selection(TranscriptionModelId::ScribeV3, "en");
         assert!(switcher.choice_changed(None, now));
         assert_eq!(
             switcher.take_due(now + Duration::from_secs(1), &current),
@@ -246,7 +246,7 @@ mod tests {
     fn a_choice_equal_to_the_current_selection_is_a_no_op() {
         let now = Instant::now();
         let mut switcher = Switcher::new(true, None);
-        let current = selection(TranscriptionModelId::ParakeetV3, "es");
+        let current = selection(TranscriptionModelId::ScribeV3, "es");
         assert!(switcher.choice_changed(Some(spanish()), now));
         assert_eq!(switcher.take_due(now + DEBOUNCE, &current), None);
         assert_eq!(
@@ -259,7 +259,7 @@ mod tests {
     fn a_language_only_change_switches_the_language() {
         let now = Instant::now();
         let mut switcher = Switcher::new(true, None);
-        let current = selection(TranscriptionModelId::ParakeetV3, "en");
+        let current = selection(TranscriptionModelId::ScribeV3, "en");
         switcher.choice_changed(Some(spanish()), now);
         assert_eq!(switcher.take_due(now + DEBOUNCE, &current), Some(spanish()));
     }
@@ -268,7 +268,7 @@ mod tests {
     fn a_manual_choice_cancels_the_pending_switch_until_another_mode_change() {
         let now = Instant::now();
         let mut switcher = Switcher::new(true, None);
-        let current = selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en");
+        let current = selection(TranscriptionModelId::ScribeV3, "en");
         switcher.choice_changed(Some(spanish()), now);
         switcher.manual_choice();
         assert_eq!(
@@ -286,9 +286,9 @@ mod tests {
     #[test]
     fn cycling_past_modes_only_switches_to_the_last_choice() {
         let now = Instant::now();
-        let french = choice(TranscriptionModelId::WhisperLargeV3Turbo, "fr");
+        let french = choice(TranscriptionModelId::ScribeV3, "fr");
         let mut switcher = Switcher::new(true, None);
-        let current = selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en");
+        let current = selection(TranscriptionModelId::ScribeV3, "en");
         switcher.choice_changed(Some(french.clone()), now);
         switcher.choice_changed(Some(spanish()), now + Duration::from_millis(100));
         assert_eq!(
@@ -311,7 +311,7 @@ mod tests {
     fn turning_off_the_feature_cancels_a_debounced_switch_and_forgets_the_mode() {
         let now = Instant::now();
         let mut switcher = Switcher::new(true, None);
-        let current = selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en");
+        let current = selection(TranscriptionModelId::ScribeV3, "en");
         switcher.choice_changed(Some(spanish()), now);
         assert!(switcher.configure(false));
         assert_eq!(
@@ -349,7 +349,7 @@ mod tests {
     fn hexs_own_window_keeps_the_last_apps_choice_and_its_pending_switch() {
         let now = Instant::now();
         let mut switcher = Switcher::new(true, None);
-        let current = selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en");
+        let current = selection(TranscriptionModelId::ScribeV3, "en");
         assert!(observe(&mut switcher, Observation::App("Notes"), now));
         assert_eq!(switcher.take_due(now + DEBOUNCE, &current), Some(spanish()));
         // Hex's own window names no mode: the Notes choice stays, nothing
@@ -379,7 +379,7 @@ mod tests {
     fn hex_in_front_during_the_debounce_does_not_cancel_the_switch() {
         let now = Instant::now();
         let mut switcher = Switcher::new(true, None);
-        let current = selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en");
+        let current = selection(TranscriptionModelId::ScribeV3, "en");
         assert!(observe(&mut switcher, Observation::App("Notes"), now));
         assert!(!observe(
             &mut switcher,
@@ -393,7 +393,7 @@ mod tests {
     fn no_application_in_front_keeps_the_last_apps_choice() {
         let now = Instant::now();
         let mut switcher = Switcher::new(true, Some(spanish()));
-        let current = selection(TranscriptionModelId::ParakeetUnifiedEnglish, "en");
+        let current = selection(TranscriptionModelId::ScribeV3, "en");
         assert_eq!(Observation::frontmost(None), Observation::Ignored);
         assert!(!observe(&mut switcher, Observation::frontmost(None), now));
         assert_eq!(

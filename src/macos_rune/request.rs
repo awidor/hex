@@ -3,7 +3,7 @@
 //! panes send the same requests on every platform.
 
 use crate::desktop::host::{DesktopAction, DesktopShortcut};
-use crate::transcription::models::{TranscriptionModelId, TranscriptionSelection};
+use crate::transcription::models::TranscriptionModelId;
 
 /// What the window asks the runtime, in the Linux service's vocabulary so
 /// the shared panes send the same requests on every platform.
@@ -21,17 +21,14 @@ pub(crate) enum Request {
         target: ShortcutTarget,
         shortcut: DesktopShortcut,
     },
+    /// The language to transcribe in (the model is always Scribe), from the
+    /// window or `hex model use`.
     ChooseModel {
         model: TranscriptionModelId,
         language: String,
     },
-    /// The menu bar's model list: only installed models, never a download.
-    SelectInstalledModel(TranscriptionModelId),
-    /// `hex model use`: this exact selection, installed only, never a download.
-    UseInstalledSelection(TranscriptionSelection),
     /// Snapshot from the main-thread TIS observer, not a shortcut event.
     InputSourceChanged(Option<String>),
-    CancelModel,
     /// The window saved `settings.json`; adopt it.
     ReloadSettings,
 }

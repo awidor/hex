@@ -15,8 +15,8 @@ use crate::desktop::events::{
 use crate::dictation::service::{DictationQueue, Effect, MICROPHONE_LOST, ServiceDictations};
 use crate::dictation::{DictationCapture, Finish, ReleaseWait};
 use crate::transcription::engine::{PendingTranscript, TranscriptionEngine};
-use crate::transcription::local_transcriber::LocalTranscriber;
 use crate::transcription::models::TranscriptionSelection;
+use crate::transcription::scribe::ScribeTranscriber;
 use crate::windows::input::WindowsHotkey;
 use crate::windows::input::{HotkeyAction, WindowsHotkeyMonitor};
 use crate::windows::paste::WindowsPaster;
@@ -122,8 +122,6 @@ pub struct WindowsDictationConfig {
     pub fallback_to_default_device: bool,
     /// Terminal paste: Ctrl+Shift+V instead of Ctrl+V.
     pub paste_with_shift: bool,
-    /// Where the listener reports a model change that failed to load.
-    pub swap_failures: Option<mpsc::Sender<crate::transcription::local_transcriber::SwapFailed>>,
     /// What the tray asks of the listener.
     pub commands: Option<mpsc::Receiver<ListenerCommand>>,
     /// The local API's `/dictations`: a client's dictation recorded beside
@@ -188,7 +186,6 @@ impl WindowsDictationConfig {
             transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
             fallback_to_default_device: true,
             paste_with_shift: settings.paste_with_shift,
-            swap_failures: None,
             commands: None,
             dictations: DictationQueue::default(),
         }
@@ -204,13 +201,14 @@ pub fn run(
     updates: mpsc::Receiver<Box<crate::app_settings::AppSettings>>,
     shutdown: &AtomicBool,
 ) -> Result<()> {
-    // Labs › Unload model when idle: a launch stays parked until the first
-    // dictation, as after an idle unload.
-    let transcriber = if crate::labs::unload_idle().is_some() {
-        None
-    } else {
-        Some(LocalTranscriber::load(selection)?)
-    };
+    // Nothing is loaded or sent here: the transcriber only remembers the
+    // language. The engine outlives the output worker, which waits on its
+    // transcripts.
+    let engine = Arc::new(TranscriptionEngine::start(ScribeTranscriber::load(
+        selection,
+    )?)?);
+    // The local API transcribes host audio on this engine's model.
+    engine.share();
     // The hook's shortcuts from the same settings, before its fields are
     // destructured below.
     let mut shortcuts = Shortcuts::from_config(&config);
@@ -228,7 +226,6 @@ pub fn run(
         transformations,
         fallback_to_default_device,
         paste_with_shift,
-        swap_failures,
         commands,
         dictations,
         ..
@@ -285,13 +282,10 @@ pub fn run(
     let mut while_dictating = while_dictating;
     let mut audio_suppressor =
         crate::windows::audio_control::AudioSuppressor::start(while_dictating);
-    let mut model = crate::transcription::local_transcriber::ModelSwap::new(selection);
-    let mut engine = match transcriber {
-        Some(transcriber) => Arc::new(TranscriptionEngine::start(transcriber)?),
-        None => Arc::new(TranscriptionEngine::start_parked(selection.clone())?),
-    };
-    // The local API transcribes host audio on this engine's model.
-    engine.share();
+    // The selection the engine was last told to use, and a change to it,
+    // applied once no transcription is pending.
+    let mut selection = selection.clone();
+    let mut next_selection: Option<TranscriptionSelection> = None;
     // The `capture` experiment: its host, the audio it copies from this
     // listener's microphone, and the capsule's commands.
     let timeline = crate::capture_host::ListenerTimeline::default();
@@ -353,12 +347,6 @@ pub fn run(
     );
 
     while !shutdown.load(Ordering::Relaxed) {
-        if let Some(failed) = model.poll() {
-            fail(&events, failed.error.clone())?;
-            if let Some(swap_failures) = &swap_failures {
-                let _ = swap_failures.send(failed);
-            }
-        }
         // Only the newest saved settings matter; they wait for a moment
         // without a recording.
         if !recording
@@ -410,34 +398,20 @@ pub fn run(
                 };
                 emit_current_state(&mut events, recording, pending, &device_label)?;
             }
-            model.want(&next.transcription);
+            if next.transcription != selection {
+                selection = next.transcription.clone();
+                next_selection = Some(selection.clone());
+            }
         }
-        // A GPU without room for two copies: the engine swaps in place.
         if !recording
             && !start_pending
             && finishing.is_none()
             && !service.is_active()
             && pending == 0
-            && let Some(selection) = model.take_reload()
+            && let Some(selection) = next_selection.take()
             && let Err(error) = engine.reload(selection)
         {
-            tracing::warn!(%error, "could not replace the transcription model");
-        }
-        if !recording
-            && !start_pending
-            && finishing.is_none()
-            && !service.is_active()
-            && pending == 0
-            && let Some(next) = model.take_ready()
-        {
-            let old = std::mem::replace(&mut engine, Arc::new(TranscriptionEngine::start(next)?));
-            engine.share();
-            crate::capture_host::use_engine(&engine);
-            // A request on the local API or a capture still transcribing
-            // holds the old engine a moment.
-            if let Ok(old) = Arc::try_unwrap(old) {
-                old.retire();
-            }
+            tracing::warn!(%error, "could not apply the transcription language");
         }
         crate::capture_host::CaptureHost::reconcile(
             &mut capture_host,

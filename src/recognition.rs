@@ -20,7 +20,7 @@ use crate::dictation::service::{
 };
 use crate::dictation::{DictationClip, Finish, POST_RELEASE_TAIL};
 use crate::feedback::{self, Tone};
-use crate::parakeet::{
+use crate::macos_dictation::{
     DictationJobStage, DictationWorker, PasteKind, TranscriptionTarget, WorkerEvent,
 };
 use crate::suppression::{DictationHotkey, DiscardCause, HotkeyAction, InputMonitor};
@@ -236,7 +236,7 @@ pub fn listen(
     let mut programmatic = None::<ProgrammaticDictation>;
     let mut programmatic_lost = None::<LostProgrammaticDictation>;
     let mut programmatic_results =
-        BTreeMap::<crate::parakeet::DictationJobId, FinishingProgrammaticDictation>::new();
+        BTreeMap::<crate::macos_dictation::DictationJobId, FinishingProgrammaticDictation>::new();
     let mut programmatic_completions = VecDeque::<Completion>::new();
 
     events.emit(&VoiceEvent::SessionStarted {
@@ -2300,7 +2300,7 @@ mod tests {
                 Duration::ZERO,
                 |clip, salvaged| {
                     submitted.push((clip.duration_ms(), salvaged));
-                    Ok(crate::parakeet::DictationJobId::for_test(1))
+                    Ok(crate::macos_dictation::DictationJobId::for_test(1))
                 },
                 "Test microphone",
                 &mut events,

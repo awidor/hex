@@ -1,7 +1,8 @@
 //! Native timings on transcription responses: the `timestamps` query on
-//! `POST /transcriptions` (Labs › Timestamps in API transcripts). The models
-//! produce the times; this module owns the query, the lab gate, and the
-//! response fields, and never estimates, interpolates, or downgrades one.
+//! `POST /transcriptions` (Labs › Timestamps in API transcripts). Scribe
+//! times every word, so both levels can always be answered; this module owns
+//! the query, the lab gate, and the response fields, and never estimates,
+//! interpolates, or downgrades a time.
 //!
 //! `/streams` keeps its own segment timing and does not offer this option.
 
@@ -143,6 +144,9 @@ mod tests {
             events,
             LocalApiOptions {
                 timestamps,
+                // No API key: a request that passes the lab stops there,
+                // before its audio would be read.
+                key: super::super::KeyGate::gated(|| false),
                 ..LocalApiOptions::default()
             },
             None,
@@ -205,7 +209,7 @@ mod tests {
     fn an_absent_parameter_asks_for_no_timings() {
         for path in [
             "/transcriptions",
-            "/transcriptions?model=parakeet_v2",
+            "/transcriptions?model=scribe_v3",
             "/transcriptions?timestamps=none",
         ] {
             assert_eq!(requested(path), Ok(TimestampLevel::None), "{path}");
@@ -219,7 +223,7 @@ mod tests {
             TimestampLevel::Segment
         );
         assert_eq!(
-            requested("/transcriptions?model=parakeet_v2&timestamps=word").unwrap(),
+            requested("/transcriptions?model=scribe_v3&timestamps=word").unwrap(),
             TimestampLevel::Word
         );
         for query in [
@@ -243,16 +247,17 @@ mod tests {
     fn the_lab_gates_a_timed_request_before_the_audio_body_is_read() {
         let api = start(off());
         assert_eq!(
-            refused(&api, "/transcriptions?model=parakeet_v2&timestamps=word"),
+            refused(&api, "/transcriptions?model=scribe_v3&timestamps=word"),
             (403, r#"{"code":"timestamps-disabled"}"#.into())
         );
-        // The untimed request is not refused by this lab at all.
-        let (status, body) = refused(&api, "/transcriptions?model=parakeet_v2");
+        // The untimed request is not refused by this lab at all: it gets as
+        // far as needing an API key, which unit tests never have.
+        let (status, body) = refused(&api, "/transcriptions?model=scribe_v3");
         assert_eq!(status, 409, "{body}");
-        assert_eq!(body, r#"{"code":"model-not-ready"}"#);
+        assert!(body.contains(r#""code":"api-key-missing""#), "{body}");
         // An invalid value is answered as invalid even while the lab is off.
         assert_eq!(
-            refused(&api, "/transcriptions?model=parakeet_v2&timestamps=loud"),
+            refused(&api, "/transcriptions?model=scribe_v3&timestamps=loud"),
             (400, r#"{"code":"invalid-request"}"#.into())
         );
     }
@@ -352,8 +357,24 @@ mod tests {
         assert!(gate(TimestampLevel::Segment, &on()).is_ok());
     }
 
+    /// With the lab on, a word request is never refused for its level: it is
+    /// admitted like an untimed one, and only the missing key stops it here.
     #[test]
-    fn a_model_without_that_level_answers_unsupported_timestamps() {
+    fn a_timed_request_with_the_lab_on_is_always_answerable() {
+        let api = start(on());
+        for level in ["segment", "word"] {
+            let (status, body) = refused(&api, &format!("/transcriptions?timestamps={level}"));
+            assert_eq!(status, 409, "{level}: {body}");
+            assert!(body.contains(r#""code":"api-key-missing""#), "{body}");
+        }
+        assert!(TimestampLevel::Word.supported_by(TimestampLevel::Word));
+        assert!(TimestampLevel::Segment.supported_by(TimestampLevel::Word));
+    }
+
+    /// The service keeps the refusal for an engine that cannot time a level;
+    /// Scribe never gives it.
+    #[test]
+    fn an_engine_without_that_level_answers_unsupported_timestamps() {
         let response = super::super::transcriptions::transcription_error(
             crate::transcription::service::TranscriptionServiceError::Timestamps,
         );

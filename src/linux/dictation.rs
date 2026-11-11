@@ -24,7 +24,7 @@ use crate::linux::input::{
 use crate::linux::paste::LinuxPaster;
 use crate::linux::rune_hud::LinuxIndicator;
 use crate::transcription::engine::{PendingTranscript, TranscriptionEngine};
-use crate::transcription::local_transcriber::LocalTranscriber;
+use crate::transcription::scribe::ScribeTranscriber;
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -139,11 +139,6 @@ impl Drop for OutputWorker {
 /// dictation records, so changing one never stops listening.
 pub(crate) enum ListenerUpdate {
     Settings(Box<AppSettings>),
-    /// A model the host prepared, swapped in once no transcription is pending.
-    Transcriber {
-        selection: crate::transcription::models::TranscriptionSelection,
-        transcriber: Box<LocalTranscriber>,
-    },
     /// True while the window records a shortcut: global matching stops.
     SuspendShortcuts(bool),
 }
@@ -299,10 +294,8 @@ fn readiness_message(
     }
 }
 
-/// Runs hotkey dictation until `shutdown`. A prepared transcriber skips the
-/// model load; otherwise the supplied transcription selection is loaded here,
-/// or parked until the first dictation with Labs › Unload model when idle.
-/// `updates` change settings, the model, and shortcut registration in place.
+/// Runs hotkey dictation until `shutdown`, transcribing in the settings'
+/// language. `updates` change settings and shortcut registration in place.
 /// `dictations` records a local API client's dictation beside the shortcut:
 /// one capture at a time, and neither ends the other.
 #[allow(clippy::too_many_arguments)]
@@ -312,33 +305,18 @@ pub(crate) fn run(
     shutdown: &AtomicBool,
     settings: &AppSettings,
     output_settings: DictationOutput,
-    transcriber: Option<LocalTranscriber>,
     hotkey_status: HotkeyStatus,
     commands: CommandQueue,
     dictations: DictationQueue,
     updates: mpsc::Receiver<ListenerUpdate>,
 ) -> Result<()> {
     let mut settings = settings.clone();
-    // Labs › Unload model when idle: a launch with no model Settings prepared
-    // for this listener starts parked, as after an idle unload, until the
-    // first dictation. A prepared model starts loaded; the idle timer unloads
-    // it.
-    let transcriber = match transcriber {
-        Some(transcriber) => Some(transcriber),
-        None if crate::labs::unload_idle().is_some() => None,
-        None => Some(LocalTranscriber::load(
-            &crate::transcription::custom_models::runnable(&settings.transcription),
-        )?),
-    };
-    crate::transcription::speech_detector::prewarm();
     // The engine outlives the output worker, which waits on its transcripts.
-    // Captures transcribe on it too, holding it weakly.
-    let mut engine = match transcriber {
-        Some(transcriber) => Arc::new(TranscriptionEngine::start(transcriber)?),
-        None => Arc::new(TranscriptionEngine::start_parked(
-            crate::transcription::custom_models::runnable(&settings.transcription),
-        )?),
-    };
+    // Captures transcribe on it too, holding it weakly. Nothing is loaded or
+    // sent here: the transcriber only remembers the language.
+    let engine = Arc::new(TranscriptionEngine::start(ScribeTranscriber::load(
+        &settings.transcription,
+    )?)?);
     // The local API transcribes host audio on this engine's model.
     engine.share();
     // Drop audio/hotkeys and close the job queue before joining slow output on
@@ -522,8 +500,8 @@ pub(crate) fn run(
     let mut next_capture_id = 0_u64;
     // Updates wait for a moment without a recording.
     let mut next_settings: Option<AppSettings> = None;
-    let mut model =
-        crate::transcription::local_transcriber::ModelSwap::new(&settings.transcription);
+    // A language change, applied once no transcription is pending.
+    let mut next_selection: Option<crate::transcription::models::TranscriptionSelection> = None;
     let mut next_suspended: Option<bool> = None;
     // A press that arrived while the microphone was opening, or before its
     // stream's first chunk; recording starts at that chunk.
@@ -570,15 +548,8 @@ pub(crate) fn run(
         for update in updates.try_iter() {
             match update {
                 ListenerUpdate::Settings(next) => next_settings = Some(*next),
-                ListenerUpdate::Transcriber {
-                    selection,
-                    transcriber,
-                } => model.offer(&selection, *transcriber),
                 ListenerUpdate::SuspendShortcuts(suspended) => next_suspended = Some(suspended),
             }
-        }
-        if let Some(failed) = model.poll() {
-            fail(&events, failed.error)?;
         }
         if !capture.is_recording() && !start_pending && finishing.is_none() && !service.is_active()
         {
@@ -587,7 +558,9 @@ pub(crate) fn run(
             });
             if let Some(next) = next_settings.take() {
                 register |= shortcuts(&next) != shortcuts(&settings);
-                model.want(&next.transcription);
+                if next.transcription != settings.transcription {
+                    next_selection = Some(next.transcription.clone());
+                }
                 toggle = next.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
                 paste_with_shift.store(next.paste_with_shift, Ordering::Relaxed);
                 if next.indicator_position != settings.indicator_position {
@@ -624,24 +597,11 @@ pub(crate) fn run(
                     hotkey = Some(start_shortcuts(shortcuts(&settings))?);
                 }
             }
-            // A GPU without room for two copies: the engine swaps in place.
             if pending == 0
-                && let Some(selection) = model.take_reload()
+                && let Some(selection) = next_selection.take()
                 && let Err(error) = engine.reload(selection)
             {
-                tracing::warn!(%error, "could not replace the transcription model");
-            }
-            if pending == 0
-                && let Some(next) = model.take_ready()
-            {
-                let old =
-                    std::mem::replace(&mut engine, Arc::new(TranscriptionEngine::start(next)?));
-                engine.share();
-                crate::capture_host::use_engine(&engine);
-                // A capture still transcribing holds the old engine a moment.
-                if let Ok(old) = Arc::try_unwrap(old) {
-                    old.retire();
-                }
+                tracing::warn!(%error, "could not apply the transcription language");
             }
         }
         crate::capture_host::CaptureHost::reconcile(

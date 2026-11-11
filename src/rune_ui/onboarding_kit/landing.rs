@@ -1,14 +1,10 @@
 //! Shared typography, motion transitions, and the `"Hex is ready"` finale.
 
-use rune::{El, Spring, SpringPair, TextStyle, Transition, col, el, row, text};
-use rune_kit::{Button, ButtonVariant};
-
 use crate::desktop::i18n::tr;
+use rune::{El, Spring, SpringPair, TextStyle, Transition, col, el, row, text};
 
-use super::super::controls::{KeySize, Paint, PushSize, key_tray, keycap};
-use super::fixture::Language;
+use super::super::controls::{KeySize, Paint, key_tray, keycap};
 use super::hex_meter::{hex_logo, hex_meter};
-use super::pill::{FLY, PILL};
 
 /// One display heading style across every onboarding step (`26 pt`, softened
 /// weight in dark mode so light ink on dark doesn't bloom).
@@ -83,55 +79,6 @@ pub(crate) fn arrives() -> Transition {
         .springs(SpringPair::new(UI_SPRING, EXIT_SPRING))
 }
 
-/// Incoming words rise as outgoing words lift away, on one presence spring.
-pub(crate) fn step_replace() -> Transition {
-    Motion::default().roll(Motion::default().travel)
-}
-
-/// A heading and the line under it, centred on the column spine.
-pub(crate) fn heading(p: Paint, key: &str, title: &str, lead: &str) -> El {
-    col()
-        .key(key)
-        .gap(8.0)
-        .items_center()
-        .transition(step_replace())
-        .child(text(title).key("title").font(title_font(p)).color(p.text()))
-        .child(
-            text(lead)
-                .key("lead")
-                .font(LEAD)
-                .color(p.muted())
-                .align(rune::Align::Center)
-                .wrap()
-                .max_w(440.0),
-        )
-}
-
-/// Download English, or pick another language (used by the older option stories).
-pub(crate) fn language_pick<S: 'static>(p: Paint, pick: fn(&mut S, Language)) -> El {
-    row()
-        .key("language-pick")
-        .gap(10.0)
-        .center_y()
-        .child(
-            Button::new("Download English")
-                .variant(ButtonVariant::Contrast)
-                .on_press(move |s: &mut S| pick(s, Language::English))
-                .build_push(p.k)
-                .key(PILL)
-                .matched(PILL)
-                .motion(FLY)
-                .default_button(),
-        )
-        .child(
-            Button::new("Other language")
-                .variant(ButtonVariant::Neutral)
-                .on_press(move |s: &mut S| pick(s, Language::Other))
-                .build_push(p.k)
-                .key("other"),
-        )
-}
-
 /// The shortcut's keys in a recessed tray, `down` while held.
 pub(crate) fn keys(p: Paint, key: &str, caps: &[String], down: bool) -> El {
     key_tray(
@@ -162,24 +109,19 @@ impl Home {
     }
 }
 
-/// Final `"Hex is ready"` landing: the Hex logo builds outside in (its
-/// outline arriving from the top pill when `matched`), followed by
-/// staggered copy and where Hex lives. `age`: seconds since the page
-/// appeared.
+/// Final `"Hex is ready"` landing: the Hex logo builds outside in,
+/// followed by staggered copy and where Hex lives. `age`: seconds since
+/// the page appeared.
 pub(crate) fn ready(
     p: Paint,
     caps: &[String],
-    matched: Option<&str>,
     age: f64,
     reduced: bool,
     motion: Motion,
     home: Home,
 ) -> El {
-    let mark = hex_logo(p, "meter", 64.0, age, reduced, matched.is_some());
-    let mark = match matched {
-        Some(id) => el().key(id).matched(id).motion(FLY).child(mark),
-        None => motion.staggered(mark.key("mark"), 0.0, 8.0),
-    };
+    let mark = hex_logo(p, "meter", 64.0, age, reduced);
+    let mark = motion.staggered(mark.key("mark"), 0.0, 8.0);
     col()
         .key("ready")
         .gap(24.0)

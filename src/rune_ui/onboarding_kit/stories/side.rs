@@ -1,6 +1,8 @@
 //! The playground's side panel for the onboarding stories: flow, shortcut,
 //! motion, and the Without Hex scene's timing knobs.
 
+use rune::el;
+
 use super::*;
 
 fn side_chip(
@@ -89,9 +91,16 @@ pub(super) fn side(s: &Onboard, cx: &mut Cx<Onboard>) -> El {
         let step_items = vec![
             side_chip(
                 p,
+                "step-key",
+                "· API key",
+                s.step == Step::Key,
+                Onboard::jump_to_key,
+            ),
+            side_chip(
+                p,
                 "step-demo",
                 "1 · Without Hex",
-                matches!(s.step, Step::Pick | Step::Started | Step::Parked),
+                s.step == Step::Parked,
                 Onboard::jump_to_demo,
             ),
             side_chip(
@@ -100,13 +109,6 @@ pub(super) fn side(s: &Onboard, cx: &mut Cx<Onboard>) -> El {
                 "2 · Microphone",
                 s.step == Step::Microphone,
                 Onboard::jump_to_microphone,
-            ),
-            side_chip(
-                p,
-                "step-waiting",
-                "· Almost ready",
-                s.step == Step::Waiting,
-                Onboard::jump_to_download_wait,
             ),
             side_chip(
                 p,

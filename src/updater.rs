@@ -14,8 +14,6 @@
 //! manifest's SHA-256, and (macOS, Windows) the code signature are the
 //! integrity checks.
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-pub mod legacy;
 pub(crate) mod notes;
 #[cfg_attr(target_os = "linux", path = "updater/linux.rs")]
 #[cfg_attr(target_os = "macos", path = "updater/macos.rs")]
@@ -255,7 +253,7 @@ impl Updater {
         let method = platform::method();
         let disabled = if option_env!("HEX_TEST_BUILD") == Some("1") || updates_off_by_env() {
             Some(DesktopUpdateStatus::Unavailable)
-        } else if crate::app_paths::is_local_build() {
+        } else if !has_update_channel() || crate::app_paths::is_local_build() {
             Some(DesktopUpdateStatus::SourceBuild)
         } else if managed_by_policy() {
             Some(DesktopUpdateStatus::Managed)
@@ -482,6 +480,15 @@ impl Updater {
 /// `HEX_DISABLE_UPDATES=1` turns this launch's updater off, as a test build
 /// has it: no checks, no network, nothing offered. For copies of Hex that
 /// must stay quiet, such as benchmarks (docs/perf.md).
+/// Whether this build has a release channel to update from. This fork has
+/// none: the channels in [`ORIGIN`] publish upstream Hex, which transcribes
+/// locally, so taking an update from them would replace this build with a
+/// different program. Every build is treated as a source build and never
+/// checks, downloads, or installs an update.
+fn has_update_channel() -> bool {
+    false
+}
+
 fn updates_off_by_env() -> bool {
     std::env::var_os("HEX_DISABLE_UPDATES").is_some_and(|value| value == "1")
 }

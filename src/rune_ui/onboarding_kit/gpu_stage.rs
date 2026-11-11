@@ -15,16 +15,14 @@ use super::fireworks::{self, is_fireworks_mark};
 
 pub(crate) const KEY_COUNT: usize = 64;
 const FIRST_MARK: u32 = 0x4800_0008;
-const HUD_COUNT: u32 = 5;
+const HUD_COUNT: u32 = 3;
 
 pub(crate) fn hud_mark(key: &str) -> u32 {
     FIRST_MARK
         + match key {
-            "download-hud" => 0,
-            "waiting-hud" => 1,
-            "onboard-dot-hud" => 2,
-            "try-dot-hud" => 3,
-            "game-dot-hud" => 4,
+            "onboard-dot-hud" => 0,
+            "try-dot-hud" => 1,
+            "game-dot-hud" => 2,
             _ => panic!("unknown onboarding HUD: {key}"),
         }
 }

@@ -24,7 +24,7 @@ use crate::dictation::vocabulary::{self, VocabularyEntry};
 
 /// The wire version of [`ControlRequest`] and [`ControlResponse`]. A change
 /// that breaks either shape increments it.
-pub const CONTROL_VERSION: u32 = 4;
+pub const CONTROL_VERSION: u32 = 5;
 
 /// What a capture command does. Commands are idempotent: starting while
 /// recording or stopping while idle changes nothing and succeeds.
@@ -67,7 +67,7 @@ pub enum ScrawlCaptureAction {
 #[serde(rename_all = "kebab-case")]
 pub enum Pane {
     Settings,
-    /// Settings with the transcription model picker open.
+    /// Settings at Transcription: the language and the ElevenLabs API key.
     Models,
     #[value(alias = "replacements")]
     Modes,
@@ -126,24 +126,19 @@ pub enum ControlCommand {
         values: serde_json::Map<String, serde_json::Value>,
     },
     ModelList,
+    /// Sets the language Scribe is told to expect. `model` is `scribe_v3`.
     ModelUse {
         model: String,
         #[serde(default)]
         language: Option<String>,
     },
-    ModelInstall {
-        model: String,
-        #[serde(default)]
-        language: Option<String>,
-    },
-    ModelCancel,
     WindowShow {
         #[serde(default)]
         pane: Option<Pane>,
     },
     WindowHide,
     /// Replay the first-run onboarding in the window (dev, test, and local
-    /// builds); settings, history, models, and permissions stay.
+    /// builds); settings, history, the API key, and permissions stay.
     OnboardingReset,
     /// Open the window on a playground story (Labs).
     WindowStory {
@@ -236,6 +231,11 @@ pub enum ControlReply {
     Models {
         models: Vec<ModelInfo>,
     },
+    /// `hex model status`: the model as the `hex` that answered would use it.
+    Model(Box<ModelInfo>),
+    /// `hex key status`: the API key in use, by its source and last four
+    /// characters. No reply ever carries the key.
+    ApiKey(ApiKeyStatus),
     Vocabulary {
         entries: Vec<VocabularyEntry>,
     },
@@ -650,12 +650,77 @@ pub struct MeetingReport {
 pub struct ModelReport {
     pub id: String,
     pub name: String,
+    /// The language Scribe is told to expect: an ISO 639 code, or `auto`.
     pub language: String,
-    pub installed: bool,
-    /// The model being downloaded or loaded, if any.
-    pub preparing: Option<String>,
-    pub downloaded_bytes: u64,
+    /// The ElevenLabs API key the running Hex sends audio with; `None`
+    /// when none is set, and nothing can be transcribed.
+    pub api_key: Option<ApiKeyReport>,
+    /// Why the language could not be applied, if it could not.
     pub error: Option<String>,
+}
+
+/// Where an API key comes from.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApiKeySource {
+    /// `ELEVENLABS_API_KEY`, which overrides a saved key.
+    Environment,
+    /// The owner-only key file `hex key set` and Settings write.
+    Saved,
+}
+
+/// An API key as every reply shows it: where it comes from and its last
+/// four characters, never the key.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ApiKeyReport {
+    pub source: ApiKeySource,
+    /// `••••abcd`.
+    pub redacted: String,
+}
+
+impl From<&crate::transcription::scribe::key::ApiKey> for ApiKeyReport {
+    fn from(key: &crate::transcription::scribe::key::ApiKey) -> Self {
+        use crate::transcription::scribe::key::{Source, redacted};
+        Self {
+            source: match key.source {
+                Source::Environment => ApiKeySource::Environment,
+                Source::File => ApiKeySource::Saved,
+            },
+            redacted: redacted(&key.secret),
+        }
+    }
+}
+
+/// The API key this process would send audio with, for a report.
+pub fn api_key_report() -> Option<ApiKeyReport> {
+    crate::transcription::scribe::key::current()
+        .as_ref()
+        .map(ApiKeyReport::from)
+}
+
+/// `hex key status`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ApiKeyStatus {
+    /// The key in use; `None` when none is set.
+    pub api_key: Option<ApiKeyReport>,
+    /// The owner-only file `hex key set` saves to, whether or not it exists.
+    pub key_file: Option<std::path::PathBuf>,
+}
+
+/// `StatusReport::model` for the running Hex: its selection, the API key it
+/// sends audio with, and why the selection could not be applied, if so.
+pub fn model_report(
+    selection: &crate::transcription::models::TranscriptionSelection,
+    error: Option<String>,
+) -> ModelReport {
+    let model = crate::transcription::models::definition(selection.model);
+    ModelReport {
+        id: model.id.as_str().into(),
+        name: model.name.into(),
+        language: model.language_for(&selection.language).into(),
+        api_key: api_key_report(),
+        error,
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -667,11 +732,12 @@ pub struct FeatureReport {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct PermissionReport {
-    /// Every permission granted and the selected model installed.
+    /// Every permission granted and an ElevenLabs API key set.
     pub ready: bool,
     /// ready, needs-request, needs-settings, or needs-restart.
     pub microphone: String,
     pub accessibility: String,
+    /// Whether transcription can be asked for: an ElevenLabs API key is set.
     pub transcription_model: bool,
 }
 
@@ -681,202 +747,103 @@ pub struct WindowReport {
     pub pane: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// The model as `hex model list` and `hex model status` show it. There is
+/// one: every transcript comes from ElevenLabs Scribe, over HTTPS.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModelInfo {
+    /// `scribe_v3`, the id `hex model use` and the local API take.
     pub id: String,
     pub name: String,
-    pub languages: Vec<String>,
-    pub size: String,
-    pub installed: bool,
+    /// The realtime model its live sessions use.
+    pub live: String,
     pub selected: bool,
-    pub streams: bool,
-    /// How transcription takes the vocabulary: `prompt` (Whisper,
-    /// Qwen3-ASR), `bias` (Parakeet, with Labs › Vocabulary biasing), or
-    /// `none`.
-    pub vocabulary: String,
-    /// Deprecated: whether the model reads the vocabulary as its prompt,
-    /// which is what recognition hints became. Use `vocabulary`.
-    pub supports_recognition_hints: bool,
-    /// Where the file is or comes from: `download` (Hex downloads it),
-    /// `hex` (Hex's own download), `imported` (Hex's copy of a file you
-    /// added), or `found: owner/name@abcdef1` (another app's download in the
-    /// Hugging Face cache, used where it is).
-    #[serde(default)]
-    pub source: String,
+    /// The language Scribe is told to expect: an ISO 639 code, or `auto`.
+    pub language: String,
+    /// The API key audio is sent with, where this answer was made; `None`
+    /// when none is set.
+    pub api_key: Option<ApiKeyReport>,
+    /// Where audio is sent.
+    pub api_url: String,
 }
 
-/// Where `model`'s file is or comes from, as `hex model list` and the local
-/// API say it: `found: owner/name@abcdef1`, `imported`, `hex`, or `download`.
-pub fn model_source(
-    model: &crate::transcription::models::ModelDefinition,
-    language: &str,
-) -> String {
-    use crate::transcription::found_models::describe;
-    use crate::transcription::models::{is_installed, model_path};
-    let installed = is_installed(model, language);
-    let here = model_path(model)
-        .ok()
-        .filter(|_| installed)
-        .and_then(|path| describe(&path));
-    match (model.id.is_custom(), here) {
-        (true, Some(origin)) => format!("found: {origin} (not tested by Hex)"),
-        (false, Some(origin)) => format!("found: {origin}"),
-        (true, None) => "imported".into(),
-        (false, None) if installed => "hex".into(),
-        (false, None) => "download".into(),
-    }
-}
-
-/// Every model `hex model` can name, with what this Mac has installed.
+/// Every model `hex model` can name: Scribe, with the language `selection`
+/// asks it for and the API key this process has.
 pub fn model_infos(
     selection: &crate::transcription::models::TranscriptionSelection,
 ) -> Vec<ModelInfo> {
-    use crate::transcription::found_models;
-    use crate::transcription::models::VocabularyUse;
-    // Listing models looks for ones already on this computer: headers only.
-    let found = found_models::scan();
-    let source = |model| model_source(model, &selection.language);
-    let mut infos: Vec<ModelInfo> = crate::transcription::models::all_models()
+    let api_key = api_key_report();
+    let api_url = crate::transcription::scribe::base_url();
+    crate::transcription::models::all_models()
         .into_iter()
-        .filter(|model| model.available())
         .map(|model| ModelInfo {
-            source: source(model),
             id: model.id.as_str().into(),
             name: model.name.into(),
-            languages: model.languages.iter().map(|&code| code.into()).collect(),
-            size: model.size_label(),
-            installed: crate::transcription::models::is_installed(model, &selection.language),
+            live: model.live.into(),
             selected: model.id == selection.model,
-            streams: model.streams,
-            vocabulary: match model.vocabulary_use() {
-                VocabularyUse::Prompt => "prompt",
-                VocabularyUse::Bias => "bias",
-                VocabularyUse::None => "none",
-            }
-            .into(),
-            supports_recognition_hints: model.vocabulary_use() == VocabularyUse::Prompt,
+            language: model.language_for(&selection.language).into(),
+            api_key: api_key.clone(),
+            api_url: api_url.clone(),
         })
-        .collect();
-    // Compatible files that aren't catalog models and aren't in use yet:
-    // `hex model use` takes their id and checks them in full first.
-    for model in found.into_iter().filter(|found| {
-        found.catalog.is_none() && !crate::transcription::custom_models::uses_path(&found.path)
-    }) {
-        let Some(sha256) = &model.blob_sha256 else {
-            continue;
-        };
-        infos.push(ModelInfo {
-            id: format!("custom-{}", &sha256[..16]),
-            name: model.name.clone(),
-            languages: model.languages.clone(),
-            size: format!("{} MB", model.bytes / 1_000_000),
-            installed: true,
-            selected: false,
-            streams: false,
-            vocabulary: if matches!(model.architecture.as_str(), "whisper" | "qwen3_asr") {
-                "prompt"
-            } else if model.architecture == "parakeet" {
-                "bias"
-            } else {
-                "none"
-            }
-            .into(),
-            supports_recognition_hints: matches!(
-                model.architecture.as_str(),
-                "whisper" | "qwen3_asr"
-            ),
-            source: format!("found: {} (not tested by Hex)", model.source()),
-        });
-    }
-    infos
+        .collect()
 }
 
-/// The selection `hex model use` or `install` asks for: a known, available
-/// model, and a language it supports (the model's best match for the
-/// current language when none is given).
+/// The selection `hex model use` asks for: `scribe_v3`, the only model, and
+/// a language it takes (the saved one when none is given).
 pub fn model_selection(
     settings: &crate::app_settings::AppSettings,
     model: &str,
     language: Option<&str>,
 ) -> Result<crate::transcription::models::TranscriptionSelection, ControlError> {
-    use crate::transcription::custom_models::{self, Status};
-    use crate::transcription::models::TranscriptionModelId;
-    let parsed = model.parse::<TranscriptionModelId>().ok();
-    // A compatible file found on this computer becomes usable here: hashed
-    // in full once (against the hub's blob name) and recorded in place.
-    if let Some(TranscriptionModelId::Custom(id)) = parsed
-        && !custom_models::is_registered(id)
-        && let Some(found) = crate::transcription::found_models::scan()
-            .into_iter()
-            .find(|found| {
-                found.catalog.is_none()
-                    && found
-                        .blob_sha256
-                        .as_deref()
-                        .is_some_and(|sha256| id.as_str().ends_with(&sha256[..16]))
-            })
-    {
-        custom_models::adopt_in_place(
-            &found.path,
-            found.blob_sha256.as_deref(),
-            &found.source(),
-            &std::sync::atomic::AtomicBool::new(false),
-        )
-        .map_err(|error| ControlError::new("model-unavailable", format!("{error:#}")))?;
-    }
-    // A known import says why it can't be used rather than that it's unknown.
-    if let Some(TranscriptionModelId::Custom(id)) = parsed
-        && custom_models::is_registered(id)
-    {
-        let why = match custom_models::status(id) {
-            Status::Ready => None,
-            Status::Missing => Some("its file is missing; import it again or remove it"),
-            Status::Changed => {
-                Some("its file changed since it was imported; import it again or remove it")
-            }
-        };
-        if let Some(why) = why {
-            return Err(ControlError::new(
-                "model-unavailable",
-                format!("`{model}` can't be used: {why}"),
-            ));
-        }
-    }
-    if parsed == Some(TranscriptionModelId::ParakeetUltra) && !crate::labs::parakeet_ultra() {
-        return Err(ControlError::new(
-            "model-unavailable",
-            format!(
-                "`{model}` can't be used: turn on Labs › Parakeet Ultra: hex labs on parakeet-ultra"
-            ),
-        ));
-    }
-    let id = parsed
-        .filter(|id| crate::transcription::models::definition(*id).available())
-        .ok_or_else(|| {
-            ControlError::new(
-                "unknown-model",
-                format!("unknown model `{model}`; run `hex model list` for the ids"),
-            )
-        })?;
-    // The model's own remembered language, as the menu bar picks it; only
-    // the language can be overridden.
-    let mut selection = settings.transcription_for_model(id);
-    if let Some(language) = language {
-        selection.language = language.into();
-    }
-    let definition = crate::transcription::models::definition(id);
-    crate::transcription::models::validate(&selection).map_err(|error| {
-        let supported = if definition.languages.contains(&"*") {
-            "any language code Hex knows (en, de, fr, ja, …)".to_owned()
-        } else {
-            definition.languages.join(", ")
-        };
+    use crate::transcription::models::{
+        MODELS, TranscriptionModelId, TranscriptionSelection, definition, validate,
+    };
+    let id = model.trim().parse::<TranscriptionModelId>().map_err(|_| {
+        let only = MODELS[0].id.as_str();
         ControlError::new(
-            "invalid-value",
-            format!("{error}; {} supports {supported}", definition.name),
+            "unknown-model",
+            format!("unknown model `{model}`; the only model is `{only}` (ElevenLabs Scribe)"),
         )
     })?;
+    let selection = TranscriptionSelection {
+        model: id,
+        language: match language {
+            Some(language) => language.trim().to_ascii_lowercase(),
+            // A language saved by an older Hex that Scribe can't be told
+            // falls back to detection, as the app does.
+            None => definition(id)
+                .language_for(&settings.transcription.language)
+                .to_owned(),
+        },
+    };
+    validate(&selection).map_err(|error| ControlError::new("invalid-value", error.to_string()))?;
     Ok(selection)
+}
+
+/// What `hex model use` answers once `selection` is in use (`changed`), or
+/// when it already was.
+pub fn model_use_message(
+    selection: &crate::transcription::models::TranscriptionSelection,
+    changed: bool,
+) -> String {
+    let name = crate::transcription::models::definition(selection.model).name;
+    let adverb = if changed { "now" } else { "already" };
+    if selection.language == crate::transcription::models::AUTO_LANGUAGE {
+        format!("{name} {adverb} detects the language")
+    } else {
+        format!(
+            "{name} {adverb} expects {}",
+            language_label(&selection.language)
+        )
+    }
+}
+
+/// A language as replies name it: `German (de)`, or the code alone when Hex
+/// has no name for it.
+pub fn language_label(code: &str) -> String {
+    match crate::transcription::models::language_name(code) {
+        name if name == code => code.to_owned(),
+        name => format!("{name} ({code})"),
+    }
 }
 
 /// Refuses to stop Hex while it records, unless forced. `capture` is the
@@ -1015,7 +982,7 @@ mod tests {
         assert!(check_flags(CaptureAction::Stop, false, true).is_err());
         assert_eq!(
             serde_json::from_str::<ControlRequest>(
-                r#"{"version":4,"command":"dictation","action":"stop"}"#
+                r#"{"version":5,"command":"dictation","action":"stop"}"#
             )
             .unwrap()
             .command,
@@ -1031,7 +998,7 @@ mod tests {
     #[test]
     fn cancel_parses_and_takes_no_flags() {
         let cancel = serde_json::from_str::<ControlRequest>(
-            r#"{"version":4,"command":"dictation","action":"cancel"}"#,
+            r#"{"version":5,"command":"dictation","action":"cancel"}"#,
         )
         .unwrap();
         let ControlCommand::Dictation { action, .. } = cancel.command else {
@@ -1092,14 +1059,9 @@ mod tests {
             },
             ControlCommand::ModelList,
             ControlCommand::ModelUse {
-                model: "parakeet_v3".into(),
+                model: "scribe_v3".into(),
                 language: Some("pl".into()),
             },
-            ControlCommand::ModelInstall {
-                model: "parakeet_v2".into(),
-                language: None,
-            },
-            ControlCommand::ModelCancel,
             ControlCommand::WindowShow {
                 pane: Some(Pane::History),
             },
@@ -1127,7 +1089,7 @@ mod tests {
             round_trip_request(command);
         }
         let request: ControlRequest =
-            serde_json::from_str(r#"{"version":4,"command":"vocabulary-add","term":"Rune"}"#)
+            serde_json::from_str(r#"{"version":5,"command":"vocabulary-add","term":"Rune"}"#)
                 .unwrap();
         assert_eq!(
             request.command,
@@ -1182,15 +1144,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"version": 4, "command": "meeting-record", "title": "Standup"})
+            serde_json::json!({"version": 5, "command": "meeting-record", "title": "Standup"})
         );
         // Optional fields may be left out.
         let request: ControlRequest =
-            serde_json::from_str(r#"{"version":4,"command":"quit"}"#).unwrap();
+            serde_json::from_str(r#"{"version":5,"command":"quit"}"#).unwrap();
         assert_eq!(request.command, ControlCommand::Quit { force: false });
-        assert!(serde_json::from_str::<ControlRequest>(r#"{"version":4,"command":"x"}"#).is_err());
+        assert!(serde_json::from_str::<ControlRequest>(r#"{"version":5,"command":"x"}"#).is_err());
         let capture: ControlRequest =
-            serde_json::from_str(r#"{"version":4,"command":"scrawl-capture","action":"stop"}"#)
+            serde_json::from_str(r#"{"version":5,"command":"scrawl-capture","action":"stop"}"#)
                 .unwrap();
         assert_eq!(
             capture.command,
@@ -1199,7 +1161,7 @@ mod tests {
             }
         );
         let send: ControlRequest = serde_json::from_str(
-            r#"{"version":4,"command":"scrawl-capture-send","capture":"latest"}"#,
+            r#"{"version":5,"command":"scrawl-capture-send","capture":"latest"}"#,
         )
         .unwrap();
         assert_eq!(
@@ -1229,7 +1191,17 @@ mod tests {
                     available: true,
                 }],
             },
-            ControlReply::Models { models: vec![] },
+            ControlReply::Models {
+                models: model_infos(&Default::default()),
+            },
+            ControlReply::Model(Box::new(model_infos(&Default::default()).remove(0))),
+            ControlReply::ApiKey(ApiKeyStatus {
+                api_key: Some(ApiKeyReport {
+                    source: ApiKeySource::Saved,
+                    redacted: "••••cdef".into(),
+                }),
+                key_file: Some("/tmp/hex/elevenlabs.key".into()),
+            }),
             ControlReply::Vocabulary {
                 entries: vec![VocabularyEntry {
                     term: "cappuccino".into(),
@@ -1291,13 +1263,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"version": 4, "status": "transcript", "text": "Ship it."})
+            serde_json::json!({"version": 5, "status": "transcript", "text": "Ship it."})
         );
         let json =
             serde_json::to_value(ControlResponse::from(ControlReply::error("busy", "x"))).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"version": 4, "status": "error", "code": "busy", "message": "x"})
+            serde_json::json!({"version": 5, "status": "error", "code": "busy", "message": "x"})
         );
     }
 
@@ -1350,39 +1322,117 @@ mod tests {
     }
 
     #[test]
-    fn model_selection_keeps_the_remembered_language_and_validates_it() {
+    fn model_selection_takes_only_scribe_and_a_language_it_can_be_told() {
         use crate::transcription::models::{TranscriptionModelId as Id, TranscriptionSelection};
         let settings = crate::app_settings::AppSettings {
             transcription: TranscriptionSelection {
-                model: Id::ParakeetV3,
-                language: "en".into(),
-            },
-            transcription_recents: vec![TranscriptionSelection {
-                model: Id::WhisperLargeV3Turbo,
+                model: Id::ScribeV3,
                 language: "de".into(),
-            }],
+            },
             ..Default::default()
         };
         let pick = |model, language| model_selection(&settings, model, language);
-        let remembered = pick("whisper_large_v3_turbo", None).unwrap();
-        assert_eq!(remembered.language, "de");
-        let french = pick("whisper_large_v3_turbo", Some("fr")).unwrap();
-        assert_eq!(french.language, "fr");
-        // Whisper's wildcard takes any language Hex knows, not any string.
-        for (model, language) in [
-            ("whisper_large_v3_turbo", "klingon"),
-            ("sense_voice_small", "de"),
-        ] {
+        assert_eq!(pick("scribe_v3", None).unwrap().language, "de");
+        assert_eq!(pick("scribe_v3", Some("fr")).unwrap().language, "fr");
+        assert_eq!(pick("scribe_v3", Some(" YUE ")).unwrap().language, "yue");
+        assert_eq!(pick("scribe_v3", Some("auto")).unwrap().language, "auto");
+        for language in ["klingon", "en-US", ""] {
             assert_eq!(
-                pick(model, Some(language)).unwrap_err().code,
+                pick("scribe_v3", Some(language)).unwrap_err().code,
                 "invalid-value",
-                "{model} {language}"
+                "{language:?}"
             );
         }
+        // A model Hex used to run on this computer is named as unknown, with
+        // the one id that works.
+        for model in ["parakeet_v3", "whisper_large_v3_turbo", "apple_speech", ""] {
+            let error = pick(model, None).unwrap_err();
+            assert_eq!(error.code, "unknown-model", "{model:?}");
+            assert!(error.message.contains("`scribe_v3`"), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn a_saved_language_scribe_cannot_be_told_falls_back_to_auto() {
+        let mut settings = crate::app_settings::AppSettings::default();
+        settings.transcription.language = "zh-Hant".into();
+        let selection = model_selection(&settings, "scribe_v3", None).unwrap();
+        assert_eq!(selection.language, "auto");
+        assert_eq!(model_infos(&settings.transcription)[0].language, "auto");
+    }
+
+    #[test]
+    fn the_model_list_is_scribe_with_its_language_and_no_key() {
+        let selection = crate::transcription::models::TranscriptionSelection {
+            language: "pl".into(),
+            ..Default::default()
+        };
+        let models = model_infos(&selection);
+        let [model] = models.as_slice() else {
+            panic!("one model, got {models:?}");
+        };
+        assert_eq!(model.id, "scribe_v3");
+        assert_eq!(model.name, "Scribe v3");
+        assert_eq!(model.live, crate::transcription::scribe::live::MODEL);
+        assert!(model.selected);
+        assert_eq!(model.language, "pl");
+        // Unit tests never read this computer's key.
+        assert_eq!(model.api_key, None);
+        assert!(model.api_url.starts_with("http"), "{}", model.api_url);
+        let report = model_report(&selection, None);
         assert_eq!(
-            pick("apple_speech", None).unwrap_err().code,
-            "unknown-model"
+            (report.id.as_str(), report.language.as_str()),
+            ("scribe_v3", "pl")
         );
+        assert_eq!(report.api_key, None);
+    }
+
+    #[test]
+    fn a_key_is_reported_by_its_source_and_tail_only() {
+        use crate::transcription::scribe::key::{ApiKey, Source};
+        let report = ApiKeyReport::from(&ApiKey {
+            secret: "sk_0123456789abcdef".into(),
+            source: Source::File,
+        });
+        assert_eq!(report.source, ApiKeySource::Saved);
+        let json =
+            serde_json::to_string(&ControlResponse::from(ControlReply::ApiKey(ApiKeyStatus {
+                api_key: Some(report),
+                key_file: Some("/tmp/hex/elevenlabs.key".into()),
+            })))
+            .unwrap();
+        assert!(!json.contains("0123456789"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({
+                "version": 5,
+                "status": "api-key",
+                "api_key": {"source": "saved", "redacted": "••••cdef"},
+                "key_file": "/tmp/hex/elevenlabs.key",
+            })
+        );
+        let environment = ApiKeyReport::from(&ApiKey {
+            secret: "sk_0123456789abcdef".into(),
+            source: Source::Environment,
+        });
+        assert_eq!(
+            serde_json::to_value(environment.source).unwrap(),
+            "environment"
+        );
+    }
+
+    /// Commands that only served downloads are gone: an older `hex` that
+    /// sends one is told its version, not that the command is malformed.
+    #[test]
+    fn download_commands_are_no_longer_part_of_the_protocol() {
+        for command in ["model-install", "model-cancel"] {
+            let request = format!(r#"{{"version":5,"command":"{command}","model":"scribe_v3"}}"#);
+            assert!(
+                serde_json::from_str::<ControlRequest>(&request).is_err(),
+                "{command}"
+            );
+        }
+        const { assert!(CONTROL_VERSION > 4, "version 4 had the download commands") };
     }
 
     #[test]

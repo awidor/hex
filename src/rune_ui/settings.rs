@@ -18,7 +18,6 @@ use crate::desktop::host::{
 };
 use crate::desktop::i18n::{tr, tr_fill};
 use crate::dictation::ShortcutMode;
-use crate::transcription::models::{self as transcription_models, ModelPreparationStage};
 
 mod grants;
 
@@ -658,9 +657,10 @@ pub(super) fn listener_card(ui: &Ui, p: Paint) -> (String, El) {
         }) => trigger.clone(),
         _ => ui.settings.dictation_hotkey.keycaps().join("+"),
     };
-    let no_model = super::general::missing_model(ui).is_some();
+    // Without a key nothing can be transcribed: say so, where Enable is.
+    let no_key = !ui.api_key.is_set();
     let hint = match (running, ui.settings.shortcut_mode) {
-        _ if no_model => tr("Hex can't dictate until a speech model is installed").to_string(),
+        _ if no_key => tr("Hex can't dictate until an ElevenLabs API key is set").to_string(),
         _ if !ui.records_shortcuts() => {
             tr("Ready anywhere · Use your desktop's shortcuts to dictate").to_string()
         }
@@ -728,7 +728,7 @@ pub(super) fn listener_card(ui: &Ui, p: Paint) -> (String, El) {
         .py(8.0)
         .gap(12.0)
         .center_y()
-        .child(status_dot(if running && !no_model {
+        .child(status_dot(if running && !no_key {
             p.success()
         } else {
             p.muted()
@@ -749,7 +749,7 @@ pub(super) fn listener_card(ui: &Ui, p: Paint) -> (String, El) {
                     text(hint)
                         .key("hint")
                         .font(DESCRIPTION)
-                        .color(if no_model { p.danger() } else { p.muted() })
+                        .color(if no_key { p.danger() } else { p.muted() })
                         .wrap(),
                 )
                 .children(failure.map(|(failure, color)| {
@@ -906,8 +906,8 @@ pub(super) fn poll_input_sources(ui: &mut Ui, clock: f64) -> bool {
     changed
 }
 
-/// One row per enabled input source: "Don't switch" or an installed model,
-/// then a language that model supports, as the Language row offers it.
+/// One row per enabled input source: "Don't switch" or the language its
+/// dictations are transcribed in.
 pub(super) fn input_source_rows(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<El> {
     ui.platform
         .input_sources
@@ -922,22 +922,18 @@ pub(super) fn input_source_rows(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<E
                 .cloned();
             let source_id = source.id.clone();
             let key = format!("input-source{index}");
-            let model_key = format!("input-source-model{index}");
-            let language_key = format!("input-source-language{index}");
-            super::speech_model::setting(
+            let select_key = format!("input-source-language{index}");
+            super::speech_language::setting(
                 ui,
                 p,
-                super::speech_model::SpeechRow {
+                super::speech_language::LanguageRow {
                     key: &key,
-                    model_key: &model_key,
-                    language_key: &language_key,
+                    select_key: &select_key,
                     title: &source.name,
                     description: None,
                     choice: mapped,
-                    model_menu: Menu::InputSourceModel(index),
-                    language_menu: Menu::InputSourceLanguage(index),
+                    menu: Menu::InputSourceLanguage(index),
                 },
-                |model, fallback| source.language_for(model, fallback),
                 move |ui, choice| {
                     ui.update(|settings| match choice {
                         Some(choice) => {
@@ -958,28 +954,6 @@ pub(super) fn input_source_rows(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<E
             )
         })
         .collect()
-}
-
-/// The speech model row's description: preparation progress or its error.
-pub(super) fn transcription_status(ui: &Ui, p: Paint) -> Option<(String, rune::Color)> {
-    let transcription = &ui.view.as_ref()?.transcription;
-    if let Some(error) = &transcription.error {
-        return Some((error.clone(), p.danger()));
-    }
-    let Some(model) = transcription.preparing else {
-        return super::model_import::selection_notice(ui).map(|notice| (notice, p.warning()));
-    };
-    let name = transcription_models::definition(model).name;
-    let stage = match transcription.preparation_stage {
-        Some(ModelPreparationStage::Verifying) => tr("Verifying model").to_string(),
-        Some(ModelPreparationStage::Loading) => tr("Loading model").to_string(),
-        _ => format!(
-            "{} {:.0} MB",
-            tr("Downloading"),
-            transcription.downloaded_bytes as f64 / 1_000_000.0
-        ),
-    };
-    Some((format!("{name} · {stage}"), p.accent()))
 }
 
 /// What a recorder shows; each change rolls up into it from below.
