@@ -12,7 +12,9 @@ Hyprland, Sway, niri, i3/X11) describes code inherited from upstream Hex that
 was not run here. Against the real ElevenLabs service only the command line
 and the two request paths were run (see
 [features/transcription.md](features/transcription.md#verified-against-elevenlabs));
-the app itself was never launched after the change.
+the app was installed and launched on KDE Plasma once (window, shortcuts from
+the portal, listener Enabled, clips transcribed through the running service's
+local API), but a spoken dictation and its paste were not exercised.
 
 Audio uses ALSA, including PipeWire systems with ALSA compatibility. The
 window draws with Vulkan (the Rune UI renders through wgpu), so it needs a

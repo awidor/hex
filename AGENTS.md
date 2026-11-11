@@ -25,9 +25,11 @@ code, copy, or docs that say or imply otherwise.
   on Linux (the golden tests only run there), look at every changed image,
   and keep them with the change.
 - Platforms: developed on Linux (KDE Wayland), where it compiles, its unit
-  tests pass, and the `hex` command line was run against a local fake
-  ElevenLabs server. The app itself (window, shortcuts, microphone, paste) was
-  never launched after the change. The Windows code is type-checked by cross
+  tests pass, and the app was installed with `scripts/install-linux.sh` and launched on KDE Plasma (Wayland)
+  on 2026-11-11: the window opened, KDE's portal granted the shortcuts, the
+  listener reported Enabled, and the running service transcribed speech clips
+  sent to its local API with the saved key. A
+  dictation spoken into the microphone and pasted was not exercised. The Windows code is type-checked by cross
   compilation only and has never been run. The macOS code was edited without
   being compiled or run. Say this plainly
   wherever platform support is described, and never claim a Windows or macOS

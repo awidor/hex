@@ -639,9 +639,14 @@ On 2026-11-11, on Linux, with a key restricted to Speech to Text:
 
 ## Not Verified
 
-- The app was never launched after the change: the window, shortcuts, the
-  microphone path, pasting, onboarding, and a dictation from key press to
-  pasted text are untested on every OS.
+- A dictation from key press to pasted text: the shortcut, the microphone
+  path, pasting, and the first-run onboarding were not exercised by a person.
+  The app itself was installed with `scripts/install-linux.sh` and launched on KDE Plasma (Wayland)
+  on 2026-11-11: the window opened, KDE's portal granted the shortcuts, the
+  listener reported Enabled, and the running service transcribed speech clips
+  sent to its local API with the saved key
+  (2.9 s of speech in about 0.45 to 0.5 s, 9.8 s in about 0.85 s, as its own
+  log timed the requests).
 - What `no_verbatim`, `numbers_format`, and keyterms do to a transcript (they
   are accepted; their effect was not inspected), the real answers for spent
   quota and rate limits, and meetings, captures, and `/streams` against the

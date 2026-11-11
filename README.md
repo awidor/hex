@@ -7,9 +7,9 @@ through the [ElevenLabs Scribe](https://elevenlabs.io/speech-to-text) cloud API
 instead of speech models on the computer.
 
 It is developed on Linux (KDE Plasma on Wayland): there it compiles, its unit
-tests pass, and the `hex` command line was run against a local fake ElevenLabs
-server. The app itself has not been launched since the change (see
-[Not verified](#not-verified)). The Windows and macOS code from upstream is
+tests pass, it installs and starts, and the installed app transcribes through
+the real ElevenLabs service. A dictation spoken into the microphone and pasted
+has not been tried yet (see [Not verified](#not-verified)). The Windows and macOS code from upstream is
 still in the tree, but in this fork the Windows code has only been type-checked
 by cross compilation and never run, and the macOS code was edited without being
 compiled or run.
@@ -129,10 +129,12 @@ relying on these numbers.
   `scripts/scribe-latency.py` repeats the measurement; each run is billed.
   Details are in
   [docs/features/transcription.md](docs/features/transcription.md#verified-against-elevenlabs).
-- The app was never launched after the change, on any OS: the window, the
-  shortcuts, the microphone path, pasting, and a real first run are untested.
-  What was run: the unit tests, the rendered UI scenes, and the `hex` command
-  line against a local fake ElevenLabs server.
+- A spoken dictation: holding the shortcut, the microphone path, and pasting
+  were not exercised, and nobody walked through the first-run onboarding. The
+  app was installed with `scripts/install-linux.sh` and launched on KDE Plasma (Wayland)
+  on 2026-11-11: the window opened, KDE's portal granted the shortcuts, the
+  listener reported Enabled, and the running service transcribed speech clips
+  sent to its local API with the saved key.
 - Windows: type-checked by cross compilation only, never run.
 - macOS: edited without being compiled or run.
 
