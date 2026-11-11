@@ -46,9 +46,26 @@ safe_user_directory() {
   if [ "$(stat -c %u "$path")" != "$(id -u)" ]; then
     fail "Hex requires a user-owned directory: $path"
   fi
-  if find "$path" -maxdepth 0 -perm /022 -print -quit | grep -q .; then
-    fail "Hex refuses a group- or world-writable directory: $path"
+  if find "$path" -maxdepth 0 -perm /002 -print -quit | grep -q .; then
+    fail "Hex refuses a world-writable directory: $path"
   fi
+  # A umask of 002 leaves directories group-writable. That is harmless when
+  # the group is this user's own with nobody else in it, and refused when
+  # another account could write there.
+  if find "$path" -maxdepth 0 -perm /020 -print -quit | grep -q . && ! private_group "$path"; then
+    fail "Hex refuses a directory other users can write: $path (run: chmod g-w $path)"
+  fi
+}
+
+# Whether the directory's group is this user's primary group and no other
+# account belongs to it, as a member or as its own primary group.
+private_group() {
+  gid=$(stat -c %g "$1")
+  [ "$gid" = "$(id -g)" ] || return 1
+  members=$(getent group "$gid" | cut -d: -f4)
+  [ -z "$members" ] || [ "$members" = "$(id -un)" ] || return 1
+  others=$(getent passwd | awk -F: -v gid="$gid" -v uid="$(id -u)" '$4 == gid && $3 != uid' | wc -l)
+  [ "$others" -eq 0 ]
 }
 
 managed_directory() {
