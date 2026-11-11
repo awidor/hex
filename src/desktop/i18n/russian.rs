@@ -1283,6 +1283,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Sends these terms to ElevenLabs with each dictation so it favors them", "Отправляет эти термины в ElevenLabs с каждой диктовкой, чтобы он отдавал им предпочтение"),
     ("Use in transcription", "Использовать при расшифровке"),
     ("Transcription uses {read} of {total} terms; ElevenLabs doesn't take the rest", "Расшифровка использует {read} из {total} терминов; остальные ElevenLabs не принимает"),
+    ("While Final text is Batch, each dictation is sent to ElevenLabs twice, roughly doubling your usage", "Пока «Итоговый текст» установлен в «Пакетно», каждая диктовка отправляется в ElevenLabs дважды, что примерно удваивает расход"),
+    ("{} is on in Labs, so each dictation is sent to ElevenLabs twice, roughly doubling your usage. Live sends it once", "В Labs включено «{}», поэтому каждая диктовка отправляется в ElevenLabs дважды, что примерно удваивает расход. «В реальном времени» отправляет её один раз"),
 ];
 
 #[cfg(test)]

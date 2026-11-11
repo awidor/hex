@@ -27,16 +27,19 @@ pub(super) fn rows(ui: &Ui, p: Paint, layer: &mut Vec<El>, query: &str) -> Vec<C
     let sent = tr("Audio you dictate is sent to ElevenLabs for transcription");
     rows.extend_described(tr("ElevenLabs API key"), Some(sent), key_rows(ui, p, sent));
     rows.push(tr("Language"), language_row(ui, p, layer));
-    let final_text = final_text_note(settings.final_text);
+    let (final_text, final_text_color) = match doubled_usage(ui) {
+        Some(warning) => (warning, p.warning()),
+        None => (final_text_note(settings.final_text).to_string(), p.muted()),
+    };
     rows.push_described(
         tr("Final text"),
-        Some(final_text),
-        icon_row(
+        Some(&final_text),
+        icon_described_row(
             p,
             "final-text",
             &CHECKS,
             tr("Final text"),
-            Some(final_text),
+            Some((final_text.clone(), final_text_color)),
             pick_select(
                 ui,
                 p,
@@ -97,6 +100,24 @@ pub(super) fn rows(ui: &Ui, p: Paint, layer: &mut Vec<El>, query: &str) -> Vec<C
         ),
     );
     rows.into_rows()
+}
+
+/// The warning that replaces Final text's note while a lab that shows live
+/// words has each dictation sent to ElevenLabs twice.
+fn doubled_usage(ui: &Ui) -> Option<String> {
+    use crate::labs::Feature;
+    // Live typing exists on a Wayland session only, as its Labs card does.
+    let lab = crate::labs::doubling_usage(&ui.settings, |feature| {
+        feature != Feature::LiveTyping || ui.platform.wayland
+    })?;
+    let name = match lab {
+        Feature::LiveTyping => tr("Live typing"),
+        _ => tr("Live text"),
+    };
+    Some(tr_fill(
+        "{} is on in Labs, so each dictation is sent to ElevenLabs twice, roughly doubling your usage. Live sends it once",
+        name,
+    ))
 }
 
 /// What each Final text choice trades.

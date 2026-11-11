@@ -147,7 +147,8 @@ pub(in crate::rune_ui) fn page(ui: &Ui, p: Paint) -> El {
 fn matches(row: &Row, query: &str) -> bool {
     query.is_empty()
         || [row.title, row.about, group::name(row.group)]
-            .iter()
+            .into_iter()
+            .chain(row.warning)
             .any(|copy| copy.to_lowercase().contains(query))
 }
 
@@ -314,7 +315,8 @@ fn tile(p: Paint, icon: &'static Icon, size: f32) -> El {
 }
 
 /// One lab as a card: tile, name and tags on one line, up to two lines of
-/// description, its switch, and while on any settings of its own.
+/// description, a warning of what it costs, its switch, and while on any
+/// settings of its own.
 /// `featured` cards sit under New in Labs, so they carry no New tag.
 fn card(ui: &Ui, p: Paint, entry: &Row, new: bool, featured: bool) -> El {
     let c = &p.k.c;
@@ -358,6 +360,15 @@ fn card(ui: &Ui, p: Paint, entry: &Row, new: bool, featured: bool) -> El {
                 .color(p.muted())
                 .max_lines(2),
         );
+    if let Some(warning) = entry.warning {
+        copy = copy.child(
+            text(warning)
+                .key("warning")
+                .font(DESCRIPTION)
+                .color(p.warning())
+                .wrap(),
+        );
+    }
     if let Some(extras) = extras(ui, p, entry) {
         copy = copy.child(extras.mt(8.0));
     }

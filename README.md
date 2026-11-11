@@ -101,7 +101,9 @@ transcribed by `scribe_v3`. With `live`, the audio is streamed to the realtime
 model `scribe_v3_live` while you speak and its text is pasted; if that session
 fails, the whole clip is transcribed by the batch model instead. A realtime
 session is also opened when Labs › Live text or Live typing shows the words as
-you speak.
+you speak. With `batch`, such a dictation is sent to ElevenLabs twice (streamed
+for the words shown, then uploaded whole), which roughly doubles the usage;
+Hex warns of this on those two Labs cards, on Final text, and in `hex labs`.
 
 When a transcription fails for a reason the audio could survive (no network, a
 timeout, an ElevenLabs error, a rate limit, a missing or refused key, no
@@ -115,7 +117,9 @@ ElevenLabs bills the key's account for the audio it receives. From its
 published pricing in November 2026: Scribe v3 (batch) about $0.20 per hour of
 audio and Scribe v3 Live about $0.22 per hour. Silence is billed like speech.
 Keyterm prompting costs extra, so the vocabulary is sent as keyterms only
-while Labs › Vocabulary biasing is on. Check ElevenLabs' current prices before
+while Labs › Vocabulary biasing is on. Labs › Live text or Live typing with
+Final text on `batch` bills each dictation on both models, about $0.42 per
+hour of audio. Check ElevenLabs' current prices before
 relying on these numbers.
 
 ## Not verified

@@ -28,10 +28,11 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 │                                        a stable build never feeds it; with the macOS driver installed it keeps the pane with Uninstall alone
 ├── Playground (Dev) yes  labs.playground                        a Playground sidebar item and ⇧⌘D open the story browser
 ├── Live text       no    labs.live_text                         provisional words beside the HUD while dictating, from a `scribe_v3_live` session opened for each
-│                                        capture and billed for all it hears (transcription.md#what-is-sent-where)
+│                                        capture and billed for all it hears (transcription.md#what-is-sent-where); while Final text is Batch the
+│                                        clip is uploaded too, and the card warns that usage roughly doubles (transcription.md#final-text)
 ├── Failure notices no    labs.failure_notices                   when a dictation fails, its explanation sits beside the HUD for about 6 s, or until the next capture starts
 ├── Live typing     no    labs.live_typing                       (Linux Wayland) provisional words as an underlined input-method preedit in the focused field, from the same
-│                                        live session; the final text is committed there instead of pasted
+│                                        live session; the final text is committed there instead of pasted; the card carries the same warning
 ├── Settings search no    labs.settings_search                  a search field atop General filters its rows, Advanced's included
 ├── Appearance      no    labs.appearance + labs.appearance_theme (system/light/dark, default system)  the main window is forced light or dark instead of following the system; the onboarding HUD preview and the Sounds sheet's HUD replay inside the window, and every overlay window, keep following the OS. On Windows the title bar follows too, through its background and light/dark mode; Windows 10 has no caption colour, so DWM keeps its own light or dark caption background (builds before 19041 keep the OS caption) while its text and buttons follow
 ├── Release notes link no labs.release_notes_link               the sidebar footer links upstream Hex's notes for this build's version number: its dev changelog for a
@@ -2230,7 +2231,10 @@ vocabulary list itself (rewriting and search), and Linux's Terminal paste.
   OS; see [Streaming Finish](dictation.md#streaming-finish)). The words come
   from a `scribe_v3_live` session opened for the dictation, which ElevenLabs
   bills for all it hears; they are provisional unless Final text is Live
-  ([transcription.md](transcription.md#what-is-sent-where)). Off macOS the
+  ([transcription.md](transcription.md#what-is-sent-where)). While Final text
+  is Batch the whole clip is uploaded as well, so the card (and Live typing's)
+  warns that each dictation is sent twice, roughly doubling the usage
+  ([transcription.md](transcription.md#final-text)). Off macOS the
   line is placed with the HUD's own edge placement (`OverlayHandle::place`),
   so with the HUD at the bottom it sits above the pill and the Windows
   taskbar rather than under the pill (#797; not yet observed on Windows).

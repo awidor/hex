@@ -283,6 +283,9 @@ struct Row {
     icon: &'static Icon,
     title: &'static str,
     about: &'static str,
+    /// What turning it on costs under the current settings, shown under the
+    /// description in the warning colour.
+    warning: Option<&'static str>,
     on: bool,
     /// Can't be switched: on while an installed Hex Microphone driver needs
     /// it, off under an organization's lock.
@@ -309,6 +312,9 @@ fn rows(ui: &Ui) -> Vec<Row> {
             icon: icon.unwrap_or_else(|| group::icon(group)),
             title,
             about,
+            warning: feature.doubles_usage(settings).then(|| {
+                tr("While Final text is Batch, each dictation is sent to ElevenLabs twice, roughly doubling your usage")
+            }),
             on: feature.on(settings),
             locked: false,
             group,
@@ -811,6 +817,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
             } else {
                 tr("Record your screen, draw on it, and talk over it with a shortcut")
             },
+            warning: None,
             on: !locked && ui.settings.capture.enabled,
             locked,
             group: Group::Annotate,

@@ -83,6 +83,7 @@ pub fn run(command: Option<&LabsCommand>) -> Result<()> {
             crate::control::ControlReply::Error { message, .. } => Err(eyre!("{message}")),
             _ => {
                 println!("Turned {} {state}.", feature.name());
+                warn_of_doubled_usage(feature, on, &settings);
                 Ok(())
             }
         };
@@ -95,7 +96,18 @@ pub fn run(command: Option<&LabsCommand>) -> Result<()> {
     feature.set(&mut settings, on);
     settings.save()?;
     println!("Turned {} {state}.", feature.name());
+    warn_of_doubled_usage(feature, on, &settings);
     Ok(())
+}
+
+/// Says so when the lab just turned on has every dictation sent twice.
+fn warn_of_doubled_usage(feature: Feature, on: bool, settings: &AppSettings) {
+    if on && feature.doubles_usage(settings) {
+        eprintln!(
+            "warning: {}. `hex settings set scribe.final_text live` sends it once.",
+            super::DOUBLED_USAGE
+        );
+    }
 }
 
 /// The feature `name` names, if this OS has it and `reaches` admits it.
@@ -143,11 +155,20 @@ fn list(settings: &AppSettings) -> String {
                 "off"
             },
             feature.audience().name(),
-            feature.description(),
+            described(feature, settings),
             feature.settings_key(),
         ));
     }
     out
+}
+
+/// The feature's description, with what it costs under `settings`.
+fn described(feature: Feature, settings: &AppSettings) -> String {
+    if feature.doubles_usage(settings) {
+        format!("{}. {}", feature.description(), super::DOUBLED_USAGE)
+    } else {
+        feature.description().to_string()
+    }
 }
 
 /// `hex experiments …`, from before Labs.

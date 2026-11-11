@@ -1280,6 +1280,8 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Sends these terms to ElevenLabs with each dictation so it favors them", "Envia estes termos à ElevenLabs a cada ditado para que ela os favoreça"),
     ("Use in transcription", "Usar na transcrição"),
     ("Transcription uses {read} of {total} terms; ElevenLabs doesn't take the rest", "A transcrição usa {read} de {total} termos; a ElevenLabs não aceita os demais"),
+    ("While Final text is Batch, each dictation is sent to ElevenLabs twice, roughly doubling your usage", "Enquanto Texto final estiver em Em lote, cada ditado é enviado ao ElevenLabs duas vezes, o que praticamente dobra o seu uso"),
+    ("{} is on in Labs, so each dictation is sent to ElevenLabs twice, roughly doubling your usage. Live sends it once", "{} está ativado no Labs, então cada ditado é enviado ao ElevenLabs duas vezes, o que praticamente dobra o seu uso. Ao vivo envia uma vez"),
 ];
 
 #[cfg(test)]

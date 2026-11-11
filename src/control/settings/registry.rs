@@ -268,7 +268,8 @@ pub(super) const KEYS: &[Key] = &[
         Kind::Choice(&["batch", "live"]),
         "The text a dictation pastes: batch (the whole clip sent at release, the most accurate) \
          or live (the live session's text, the fastest; the whole clip is still sent when the \
-         session fails)",
+         session fails). With batch, labs.live_text and labs.live_typing have each dictation \
+         sent to ElevenLabs twice",
     ),
     key(
         "vocabulary_boost",
@@ -294,7 +295,8 @@ pub(super) const KEYS: &[Key] = &[
     key(
         "labs.live_text",
         Kind::Bool,
-        "Labs: provisional words beside the HUD while dictating",
+        "Labs: provisional words beside the HUD while dictating; while scribe.final_text is \
+         batch, each dictation is sent to ElevenLabs twice, roughly doubling your usage",
     ),
     key(
         "labs.failure_notices",
@@ -304,7 +306,7 @@ pub(super) const KEYS: &[Key] = &[
     key(
         "labs.live_typing",
         Kind::Bool,
-        "Labs: provisional words in the focused text field as an underlined input-method preedit, and the final text typed there instead of pasted (Linux Wayland)",
+        "Labs: provisional words in the focused text field as an underlined input-method preedit, and the final text typed there instead of pasted (Linux Wayland); while scribe.final_text is batch, each dictation is sent to ElevenLabs twice, roughly doubling your usage",
     ),
     key(
         "labs.settings_search",

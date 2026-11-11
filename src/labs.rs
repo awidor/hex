@@ -32,11 +32,13 @@ mod description;
 mod feature;
 mod gates;
 mod group;
+mod usage;
 
 pub use self::cli::{LabsCommand, run, run_retired_experiments};
 pub use self::feature::Feature;
 pub use self::gates::*;
 pub use self::group::Group;
+pub use self::usage::{DOUBLED_USAGE, doubling_usage};
 
 /// Where people send feedback on Labs features.
 pub const FEEDBACK_URL: &str = "https://github.com/anomalyco/hex/issues/new";

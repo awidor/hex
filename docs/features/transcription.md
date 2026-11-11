@@ -297,6 +297,19 @@ Settings › General › Transcription › Final text  // transcribe.final-text
 │       never asked for the final text (it still commits a long segment at
 │       a pause, which only settles the words shown); the batch request
 │       decides the text (source=offline), so the audio is sent twice
+│       ├── Warned of, in the warning colour, while it applies:
+│       │   ├── Labs › Live text and Live typing cards, on or off: "While
+│       │   │   Final text is Batch, each dictation is sent to ElevenLabs
+│       │   │   twice, roughly doubling your usage"
+│       │   ├── Final text's own note, while such a lab is on: "<lab> is on
+│       │   │   in Labs, so each dictation is sent to ElevenLabs twice,
+│       │   │   roughly doubling your usage. Live sends it once"
+│       │   └── `hex labs` (in the list, and on stderr after `hex labs on`)
+│       ├── Not warned of: the first run's practice field and a local API
+│       │   client that asks for partials, which open the same session
+│       └── Checks: labs/usage.rs; rune_ui/tests/panes.rs
+│           a_lab_that_shows_live_words_warns_of_doubled_usage_while_final_text_is_batch,
+│           final_text_warns_while_live_text_has_each_dictation_sent_twice
 └── Live -> "Fastest: uses the live model's text"
     ├── The session's committed text is the transcript (source=stream); no
     │   second upload

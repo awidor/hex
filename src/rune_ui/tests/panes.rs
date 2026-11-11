@@ -2190,6 +2190,74 @@ fn a_labs_card_shows_its_description_and_its_switch_turns_it_on() {
     assert!(!feature.on(&rt.state.settings), "and off");
 }
 
+/// The warning line on a lab's card, if it shows one.
+fn card_warning(rt: &Runtime<Ui>, card: &str) -> Option<(String, rune::Color)> {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.path.contains(card) && e.path.ends_with("/warning") && !e.exiting)
+        .and_then(|e| Some((e.text?, e.text_color?)))
+}
+
+#[test]
+fn a_lab_that_shows_live_words_warns_of_doubled_usage_while_final_text_is_batch() {
+    use crate::transcription::scribe::FinalText;
+    let mut rt = runtime("mac-labs", true, (980.0, 4000.0));
+    unfold_labs(&mut rt);
+    assert_eq!(rt.state.settings.scribe.final_text, FinalText::Batch);
+    // Off: the warning is there before the lab is turned on.
+    rt.update(|ui, _| ui.settings.labs.live_text = false);
+    refresh(&mut rt);
+    let warning = rune_theme_opencode::kit(true).c.warning.fg;
+    assert_eq!(
+        card_warning(&rt, "lab-card-live-text"),
+        Some((crate::labs::DOUBLED_USAGE.to_string(), warning)),
+    );
+    assert_eq!(
+        card_warning(&rt, "lab-card-vocabulary-biasing"),
+        None,
+        "only the labs that open a live session warn"
+    );
+    rt.update(|ui, _| ui.settings.scribe.final_text = FinalText::Live);
+    refresh(&mut rt);
+    assert_eq!(
+        card_warning(&rt, "lab-card-live-text"),
+        None,
+        "Final text Live sends each dictation once"
+    );
+}
+
+#[test]
+fn final_text_warns_while_live_text_has_each_dictation_sent_twice() {
+    use crate::transcription::scribe::FinalText;
+    let note = |rt: &Runtime<Ui>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.path.contains("final-text") && e.path.ends_with("/description"))
+            .and_then(|e| Some((e.text?, e.text_color?)))
+            .expect("Final text has a description")
+    };
+    let mut rt = runtime("mac-settings", true, (980.0, 2400.0));
+    let kit = rune_theme_opencode::kit(true);
+    assert_eq!(
+        note(&rt),
+        (
+            "Most accurate: the whole clip is transcribed when you release".to_string(),
+            kit.c.text_muted
+        ),
+    );
+    rt.update(|ui, _| ui.settings.labs.live_text = true);
+    refresh(&mut rt);
+    let (warning, color) = note(&rt);
+    assert_eq!(
+        warning,
+        "Live text is on in Labs, so each dictation is sent to ElevenLabs twice, roughly doubling your usage. Live sends it once"
+    );
+    assert_eq!(color, kit.c.warning.fg);
+    rt.update(|ui, _| ui.settings.scribe.final_text = FinalText::Live);
+    refresh(&mut rt);
+    assert_eq!(note(&rt).0, "Fastest: uses the live model's text");
+}
+
 #[test]
 fn caps_lock_light_shows_its_choices_on_its_card_while_on() {
     let mut rt = runtime("mac-labs", true, (980.0, 4000.0));
