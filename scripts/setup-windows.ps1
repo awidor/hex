@@ -55,27 +55,6 @@ if (-not (Test-Tool "rustup")) {
 }
 $script:RustupPath = (Get-Command "rustup" -ErrorAction Stop).Source
 
-if (-not (Test-Tool "cmake")) {
-    Write-Host "Installing CMake for the current user..."
-    Invoke-WingetInstall -Id "Kitware.CMake" -ExtraArguments @("--scope", "user")
-}
-
-$arm64 = $env:PROCESSOR_ARCHITECTURE -eq "ARM64"
-if (-not $arm64) {
-    # The x64 build decodes on the GPU through ggml's Vulkan backend.
-    $vulkanSdk = [Environment]::GetEnvironmentVariable("VULKAN_SDK", "Machine")
-    if ([string]::IsNullOrWhiteSpace($vulkanSdk)) {
-        Write-Host "Installing the Vulkan SDK..."
-        Invoke-WingetInstall -Id "KhronosGroup.VulkanSDK"
-        $vulkanSdk = [Environment]::GetEnvironmentVariable("VULKAN_SDK", "Machine")
-    }
-    if ([string]::IsNullOrWhiteSpace($vulkanSdk)) {
-        throw "The Vulkan SDK installed but VULKAN_SDK is not set; open a new terminal and rerun."
-    }
-    $env:VULKAN_SDK = $vulkanSdk
-    Write-Host "Using Vulkan SDK: $vulkanSdk"
-}
-
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 $hasCppTools = $false
 if (Test-Path -LiteralPath $vswhere) {
@@ -89,16 +68,8 @@ if (-not $hasCppTools) {
     Write-Host "Installing Visual Studio Build Tools with the C++ workload..."
     Invoke-WingetInstall -Id "Microsoft.VisualStudio.2022.BuildTools" -ExtraArguments @(
         "--override",
-        "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --includeRecommended"
+        "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
     )
-}
-if ($arm64) {
-    # ggml's ARM CPU backend refuses MSVC; build the native core with clang-cl.
-    $env:CC = "clang-cl"
-    $env:CXX = "clang-cl"
-    $env:CMAKE_GENERATOR = "Ninja"
-    $env:TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF"
-    Write-Host "ARM64: building with clang-cl and Ninja from a Developer PowerShell for VS."
 }
 
 Invoke-Rustup -Arguments @("toolchain", "install", "stable", "--profile", "minimal")

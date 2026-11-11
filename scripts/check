@@ -20,7 +20,7 @@ packages=(--workspace)
 if [[ "$(uname -s)" == Darwin ]]; then
     # zbus depends on the crates.io `hex`, so the root package is named with its
     # version. Not the full `cargo pkgid`: its path URL names this checkout,
-    # which matches nothing once HiveMind runs cargo in a copy on another Mac.
+    # which matches nothing once cargo runs in a copy on another Mac.
     pkgid="$(cargo pkgid)"
     packages=(-p "hex@${pkgid##*[#@]}" -p scrawl-router -p scrawl-capture -p capture-core)
 fi
@@ -41,7 +41,7 @@ python3 scripts/check-nix-git-pins.py || exit 14
 
 if [[ $# -eq 0 ]]; then
     stage "clippy"
-    cargo clippy --locked "${packages[@]}" --all-targets --features onnx-benchmark -- -D warnings || exit 11
+    cargo clippy --locked "${packages[@]}" --all-targets -- -D warnings || exit 11
 fi
 
 if command -v cargo-nextest >/dev/null 2>&1; then

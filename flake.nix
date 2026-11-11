@@ -1,5 +1,5 @@
 {
-  description = "HEX local-first voice dictation";
+  description = "Hex voice dictation through ElevenLabs Scribe (personal fork of anomalyco/hex)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

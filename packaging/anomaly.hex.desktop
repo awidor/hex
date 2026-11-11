@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Hex
-Comment=Local voice dictation
+Comment=Voice dictation
 Exec=@HEX_BIN@
 Icon=anomaly.hex
 Terminal=false

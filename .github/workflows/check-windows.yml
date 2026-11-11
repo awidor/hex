@@ -1,34 +1,28 @@
 name: Check Windows
 
-# The full Windows suite (x64 with Vulkan and ARM64: tests, clippy, the
-# no-Visual-C++-runtime check). It runs where it matters: Release's check and
-# stable channels call it on the candidate commit and publish nothing until it
-# passes, and anyone can run it by hand. Pull requests only compile x64
-# (compile.yml).
+# The full Windows suite (x64 and ARM64: tests, clippy, the
+# no-Visual-C++-runtime check), on every pull request and by hand. It needs
+# no secret.
 on:
-  workflow_call:
-    inputs:
-      sha:
-        description: The commit to test
-        required: true
-        type: string
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A new push to a pull request cancels its stale run.
+concurrency:
+  group: check-windows-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   x64:
-    name: x64 (Vulkan)
+    name: x64
     runs-on: windows-latest
     timeout-minutes: 90
-    env:
-      # Portable CPU kernels: without this, ggml tunes to the runner's CPU.
-      TRANSCRIBE_CMAKE_ARGS: -DGGML_NATIVE=OFF
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
@@ -38,19 +32,6 @@ jobs:
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
         with:
           tool: cargo-nextest
-      - name: Install the Vulkan SDK
-        uses: humbletim/install-vulkan-sdk@30ba978f977e81b72d091fc8888feb1fb26f9aff # v1.2
-        with:
-          version: 1.4.309.0
-          cache: true
-      - name: Install SPIRV-Headers for the Vulkan backend
-        shell: pwsh
-        run: |
-          vcpkg install spirv-headers:x64-windows
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install spirv-headers failed" }
-          $prefix = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -replace '\\','/'
-          $combined = if ($env:CMAKE_PREFIX_PATH) { "$prefix;$env:CMAKE_PREFIX_PATH" } else { $prefix }
-          Add-Content $env:GITHUB_ENV "CMAKE_PREFIX_PATH=$combined"
       - run: cargo fmt --check
       - run: cargo clippy --release --all-targets -- -D warnings
       - run: cargo nextest run --release --profile ci
@@ -65,8 +46,9 @@ jobs:
           if ($redist) { throw "hex.exe imports Visual C++ runtime DLLs: $redist" }
           # The Vulkan loader comes with the graphics driver: imported at load
           # time, a missing or Vulkan 1.0 one stops Hex before main (#1240).
+          # The window opens it itself, only when it draws with Vulkan.
           $static = ($imports -join "`n") -split 'delay load dependencies' | Select-Object -First 1
-          if ($static -match 'vulkan-1\.dll') { throw "hex.exe imports vulkan-1.dll at load time instead of delay-loading it" }
+          if ($static -match 'vulkan-1\.dll') { throw "hex.exe imports vulkan-1.dll at load time" }
           # A GUI program, so opening Hex shows no console window (#850).
           $headers = & $dumpbin.FullName /headers target\release\hex.exe
           if (-not ($headers | Select-String -SimpleMatch 'subsystem (Windows GUI)')) { throw "hex.exe is not a Windows GUI program" }
@@ -76,27 +58,12 @@ jobs:
           path: target/release/hex.exe
 
   arm64:
-    name: ARM64 (CPU)
+    name: ARM64
     runs-on: windows-11-arm
     timeout-minutes: 90
-    env:
-      # ggml's ARM CPU backend refuses MSVC, so the native core builds with
-      # clang-cl through Ninja (the cmake crate takes the compiler from CC/CXX).
-      # clang-cl's /openmp needs an LLVM OpenMP runtime, and ggml's own
-      # threadpool is correct under LLVM codegen, so OpenMP stays off.
-      CC: clang-cl
-      CXX: clang-cl
-      CMAKE_C_COMPILER: clang-cl
-      CMAKE_CXX_COMPILER: clang-cl
-      CMAKE_C_COMPILER_TARGET: aarch64-pc-windows-msvc
-      CMAKE_CXX_COMPILER_TARGET: aarch64-pc-windows-msvc
-      CMAKE_GENERATOR: Ninja
-      CL: /EHsc
-      TRANSCRIBE_CMAKE_ARGS: -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          ref: ${{ inputs.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:

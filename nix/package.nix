@@ -2,13 +2,8 @@
   lib,
   rustPlatform,
   pkg-config,
-  cmake,
   python3,
-  shaderc,
-  vulkan-headers,
   vulkan-loader,
-  spirv-headers,
-  openblas,
   alsa-lib,
   alsa-plugins,
   pipewire,
@@ -40,12 +35,11 @@
 let
   buildEnv = {
     OPENSSL_NO_VENDOR = "1";
-    BLA_VENDOR = "OpenBLAS";
   };
   runtimeEnv = {
     LD_LIBRARY_PATH = lib.makeLibraryPath [
+      # The window draws through wgpu, which opens libvulkan at runtime.
       vulkan-loader
-      openblas
       alsa-lib
       wayland
       libxkbcommon
@@ -74,17 +68,9 @@ let
   # computed from. scripts/check-nix-git-pins.py fails a pull request that bumps
   # one without the other, before Nix reports a hash mismatch.
   cargoGitDependencies = {
-    "transcribe-rs-0.3.11" = {
-      rev = "e37c66b6df43af51fde8dec34f98a07aaf09564c";
-      hash = "sha256-MJJiug3LfbKsuHcL2+LJk95+j5kk/MWzb5ihdBlHLmE=";
-    };
     "rune-0.0.1" = {
       rev = "ba5e7c8069a24c36f95ca90a3058083cd468fcd1";
       hash = "sha256-D0zeghVhWooVKQtxObxQDnGdMO0Zgo6uKrCWi7tVHEo=";
-    };
-    "transcribe-cpp-sys-0.4.1" = {
-      rev = "bcb639faa4c74a2300ba19e30360cb2355b1663a";
-      hash = "sha256-1VztJ0VhPTjAuk4J0NT9KapDOqplegpHOqHsTpfHXWc=";
     };
   };
 in
@@ -107,8 +93,6 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ../assets
       ../packaging
       ../macos/HexMicrophoneDriver/Info.plist
-      # Built in: a 2.3.1 install moves itself into this installer's layout.
-      ../.github/release/install-linux.sh
     ];
   };
 
@@ -119,17 +103,12 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   nativeBuildInputs = [
     pkg-config
-    cmake
     python3
-    shaderc
     makeWrapper
     autoAddDriverRunpath
   ];
   buildInputs = [
-    vulkan-headers
     vulkan-loader
-    spirv-headers
-    openblas
     alsa-lib
     openssl
     libxkbcommon
@@ -144,15 +123,15 @@ rustPlatform.buildRustPackage (finalAttrs: {
   ];
 
   # OpenCode HTTP requests run through curl, including in the tests; the
-  # 2.3.1 adoption test runs the Linux installer, which needs flock.
+  # 2.3.1 adoption test (src/updater/legacy.rs) runs an installer script,
+  # which needs flock.
   nativeCheckInputs = [
     curl
     util-linux
   ];
 
-  dontUseCmakeConfigure = true;
   env = buildEnv;
-  # Desktop and installed-model tests are #[ignore]; run the remaining suite.
+  # Desktop tests are #[ignore]; run the remaining suite.
   doCheck = true;
   preCheck = ''
     export HOME="$TMPDIR/hex-test-home"
@@ -185,8 +164,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
   };
 
   meta = {
-    description = "Local-first voice dictation (Linux beta)";
-    homepage = "https://anoma.ly/hex/";
+    description = "Voice dictation through ElevenLabs Scribe (personal fork of anomalyco/hex)";
+    homepage = "https://github.com/awidor/hex";
     license = lib.licenses.mit;
     mainProgram = "hex";
     platforms = [

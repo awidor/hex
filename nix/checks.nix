@@ -26,8 +26,6 @@ let
   declared = home {
     enable = true;
     shortcut = "control+option+space";
-    model = "parakeet_v3";
-    installModel = true;
     settings = {
       sound_effect_volume = 0.4;
       microphone = null;
@@ -36,7 +34,6 @@ let
   };
   declaredSettings = (pkgs.formats.json { }).generate "hex-settings.json" {
     dictation_hotkey = "control+option+space";
-    "transcription.model" = "parakeet_v3";
     "transcription.language" = "de";
     sound_effect_volume = 0.4;
     microphone = null;
@@ -64,17 +61,11 @@ in
     export HOME="$TMPDIR/home"
     mkdir -p "$HOME"
     ${lib.getExe hex} --version
-    ${lib.getExe hex} model status | grep '^missing[[:space:]]'
     touch "$out"
   '';
 
   shell-environment =
-    assert lib.all (name: shell.${name} == hex.${name}) [
-      "BLA_VENDOR"
-      "OPENSSL_NO_VENDOR"
-    ];
-    # OpenBLAS ordering belongs to build.rs, not an injected Nix-only workaround.
-    assert !(hex ? RUSTFLAGS) && !(shell ? RUSTFLAGS);
+    assert shell.OPENSSL_NO_VENDOR == hex.OPENSSL_NO_VENDOR;
     assert lib.all
       (package: builtins.elem "${lib.getLib package}/lib" (lib.splitString ":" shell.LD_LIBRARY_PATH))
       [
@@ -116,16 +107,12 @@ in
     ];
     assert custom.systemd.user.services.hex.Install.WantedBy == [ "sway-session.target" ];
     assert !(enabled.home.activation ? hexSettings);
-    assert !(enabled.systemd.user.services ? hex-model);
     assert lib.hasInfix (builtins.unsafeDiscardStringContext "settings apply ${declaredSettings}") (
       builtins.unsafeDiscardStringContext declared.home.activation.hexSettings.data
     );
     assert lib.elem "reloadSystemd" declared.home.activation.hexSettings.after;
-    assert declared.systemd.user.services.hex-model.Service.Type == "exec";
-    assert declared.systemd.user.services.hex-model.Install.WantedBy == [ "default.target" ];
     pkgs.runCommand "hex-module-check" { } ''
       bash -n ${enabled.systemd.user.services.hex.Service.ExecStartPre}
-      bash -n ${toString declared.systemd.user.services.hex-model.Service.ExecStart}
       touch "$out"
     '';
 

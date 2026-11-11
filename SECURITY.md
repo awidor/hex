@@ -1,10 +1,7 @@
 # Security
 
-Report vulnerabilities through
-[GitHub private vulnerability reporting](https://github.com/anomalyco/hex/security/advisories/new).
-Do not include secrets, private transcripts, browsing history, or unredacted Hex
-diagnostic logs in a public issue.
-
-Custom command handlers and npm dependencies execute locally with the user's
-normal permissions. They are supervised for lifecycle and bounded IPC, but they
-are not sandboxed.
+This is a personal fork of [anomalyco/hex](https://github.com/anomalyco/hex)
+(MIT licensed). Report a problem specific to this fork through its
+[GitHub issues](https://github.com/awidor/hex/issues); one that also affects
+upstream Hex belongs upstream. Never put an API key, private transcripts, or
+unredacted Hex logs in a public issue.

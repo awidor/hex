@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Captures a clip through a virtual microphone, transcribes it, and pastes it
+# into a focused GTK window, beside Hex's own window. Transcription goes to
+# ElevenLabs Scribe, so ELEVENLABS_API_KEY must be set and each run bills one
+# short clip. The assertions expect the "ask not what your country can do for
+# you" JFK clip.
 if [[ ${1:-} != --inside ]]; then
-  if [[ $# != 3 || $(id -u) == 0 ]]; then
-    echo "Usage: $0 /path/to/hex /path/to/model.gguf /path/to/jfk.wav (non-root)" >&2
+  if [[ $# != 2 || $(id -u) == 0 ]]; then
+    echo "Usage: ELEVENLABS_API_KEY=... $0 /path/to/hex /path/to/jfk.wav (non-root)" >&2
+    exit 1
+  fi
+  if [[ -z ${ELEVENLABS_API_KEY:-} ]]; then
+    echo "Set ELEVENLABS_API_KEY: the test's HOME is empty, so Hex finds no saved key." >&2
     exit 1
   fi
   for command in cc pkg-config pulseaudio pactl paplay xdotool xvfb-run timeout; do
     command -v "$command" >/dev/null
   done
   exec timeout --kill-after=10 300 xvfb-run -a --server-args="-screen 0 1280x900x24 -noreset" \
-    "$0" --inside "$(realpath "$1")" "$(realpath "$2")" "$(realpath "$3")"
+    "$0" --inside "$(realpath "$1")" "$(realpath "$2")"
 fi
 shift
 binary=$1
-model=$2
-audio=$3
+audio=$2
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)
 work=$(mktemp -d)
 listener=
@@ -47,15 +55,13 @@ trap 'exit 143' TERM
 export HOME="$work/home" XDG_RUNTIME_DIR="$work/runtime"
 export HEX_APPLICATION_SUPPORT_DIR="$work/support" NO_COLOR=1
 export PULSE_SERVER="unix:$work/pulse" PULSE_SOURCE=hex-fixture.monitor
-# The window uses software Vulkan on Xvfb; only inference uses the CPU in this fixture.
-export GDK_BACKEND=x11 GGML_VK_VISIBLE_DEVICES=""
+# The window uses software Vulkan on Xvfb.
+export GDK_BACKEND=x11
 unset WAYLAND_DISPLAY VK_ICD_FILENAMES
 mkdir -m 700 "$HOME" "$XDG_RUNTIME_DIR" "$HEX_APPLICATION_SUPPORT_DIR"
-mkdir "$HEX_APPLICATION_SUPPORT_DIR/models"
 # This GTK target uses Ctrl-V. Omitting the preference from an existing settings
 # file deliberately selects the legacy terminal Ctrl-Shift-V behavior.
 printf '{"sound_effects":false,"paste_with_shift":false,"migrations":["streaming-english-model"]}\n' > "$HEX_APPLICATION_SUPPORT_DIR/settings.json"
-ln -s "$model" "$HEX_APPLICATION_SUPPORT_DIR/models/$(basename "$model")"
 printf 'pcm.!default { type pulse server "%s" }\n' "$PULSE_SERVER" > "$HOME/.asoundrc"
 pulseaudio -n --daemonize=no --use-pid-file=no --exit-idle-time=-1 \
   --load="module-native-protocol-unix socket=$work/pulse auth-anonymous=1" \
@@ -74,7 +80,7 @@ window=$(xdotool search --sync --name '^Hex Wayland Test$' | head -n 1)
 xdotool windowfocus --sync "$window"
 "$binary" service >"$work/listener.log" 2>&1 &
 listener=$!
-echo 'Waiting for the model and virtual microphone...'
+echo 'Waiting for the virtual microphone...'
 for ((attempt = 0; attempt < 1200; attempt++)); do
   kill -0 "$listener"
   if grep -q 'Hex dictation is ready' "$work/listener.log"; then break; fi
@@ -107,25 +113,9 @@ dictate() {
 }
 dictate 1
 printf 'Captured, transcribed, and pasted: %s\n' "$(<"$work/pasted.txt")"
-# The CPU never streams by default, so that dictation took the whole-clip path.
-grep -Eq 'transcribed Linux dictation.*source.{0,32}offline' "$work/listener.log"
-kill -TERM "$listener"
-wait "$listener"
-# Force a live stream on the CPU to exercise capture-time feeding, the finish,
-# and (when the stream lags behind real time) the whole-clip fallback.
-HEX_STREAMING=1 "$binary" service >"$work/stream.log" 2>&1 &
-listener=$!
-for ((attempt = 0; attempt < 1200; attempt++)); do
-  kill -0 "$listener"
-  if grep -q 'Hex dictation is ready' "$work/stream.log"; then break; fi
-  sleep 0.05
-done
-grep -q 'streaming transcription is available' "$work/stream.log"
-dictate 2
-grep -E 'transcribed Linux dictation.*source.{0,32}(stream|fallback)' "$work/stream.log"
 kill -TERM "$listener"
 wait "$listener"
 listener=
 outputs=$(pactl list short source-outputs)
 test -z "$outputs"
-echo 'Linux dictation (whole clip and live stream) beside the window and orderly shutdown passed.'
+echo 'Linux dictation beside the window and orderly shutdown passed.'

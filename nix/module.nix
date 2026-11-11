@@ -9,7 +9,7 @@ let
 in
 {
   options.programs.hex = {
-    enable = lib.mkEnableOption "Hex local voice dictation";
+    enable = lib.mkEnableOption "Hex voice dictation";
     package = lib.mkOption {
       type = lib.types.package;
       description = "Hex package to install.";

@@ -2,16 +2,54 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-. "$root/scripts/macos-signing.sh"
-# HEX_TEST_BUILD=1 builds the CI test app: ad-hoc signed, under its own
-# name and bundle ID so it installs beside the released Hex and never
-# touches its permissions; it never checks for updates.
+
+# Prints only the selected identity, so the caller can capture it without
+# mixing diagnostics into codesign arguments.
+hex_codesign_identity() {
+  team_id=$1
+  identity=${HEX_CODESIGN_IDENTITY:-}
+  if [ -z "$identity" ]; then
+    identity=$(security find-identity -v -p codesigning | sed -n "s/.*\"\(Developer ID Application:.*($team_id)\)\"/\1/p" | head -1)
+  fi
+  if [ -z "$identity" ]; then
+    echo "No Developer ID signing identity found for team $team_id. Set HEX_CODESIGN_IDENTITY." >&2
+    return 1
+  fi
+  case "$identity" in
+    "Developer ID Application:"*"($team_id)") ;;
+    *)
+      echo "Signing identity is not a Developer ID Application identity for team $team_id." >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$identity"
+}
+
+hex_version() {
+  printf '%s\n' "${HEX_VERSION:-$(cargo metadata --no-deps --format-version 1 --manifest-path "$1/Cargo.toml" | jq -r '.packages[] | select(.name == "hex") | .version')}"
+}
+
+# CFBundleVersion: the run number of a dev build (0.0.0-dev-N), else from
+# X.Y.Z (a prerelease shares its release's number).
+hex_build_number() {
+  if [ -n "${HEX_BUILD_NUMBER:-}" ]; then
+    printf '%s\n' "$HEX_BUILD_NUMBER"
+    return
+  fi
+  case "$1" in
+    0.0.0-dev-[0-9]*) printf '%s\n' "${1#0.0.0-dev-}" ;;
+    *) printf '%s\n' "${1%%-*}" | awk -F. '{ print ($1 * 10000) + ($2 * 100) + $3 }' ;;
+  esac
+}
+
+# HEX_TEST_BUILD=1 builds the test app: ad-hoc signed, under its own name
+# and bundle ID so it installs beside Hex and never touches its permissions;
+# it never checks for updates.
 # HEX_LOCAL_BUILD=1 marks a build made from a checkout for its owner's own
 # machine (Developer ID signed as usual): it shows "Local build · updates off"
 # with its commit and never checks for or offers updates.
-# HEX_RELEASE_UNSIGNED=1 builds the release app (Hex, anomaly.hex) ad-hoc
-# signed: the Release workflow's build job, which holds no credentials. Its
-# sign-macos job signs it with the Developer ID (.github/release/sign-macos.sh).
+# HEX_RELEASE_UNSIGNED=1 builds Hex (anomaly.hex) ad-hoc signed, for a
+# machine that holds no Developer ID.
 if [ "${HEX_RELEASE_UNSIGNED:-}" = 1 ]; then
   team_id=
   identity=-
@@ -51,8 +89,8 @@ sign() {
 }
 
 export MACOSX_DEPLOYMENT_TARGET=15.0
-# Cargo may run through a wrapper that does not forward the environment (Kit's
-# HiveMind-backed cargo), so build-time variables also travel as --config.
+# Cargo may run through a wrapper that does not forward the environment, so
+# build-time variables also travel as --config.
 env_args=()
 if [ -z "${HEX_COMMIT:-}" ] && { [ "${HEX_LOCAL_BUILD:-}" = 1 ] || [ "${HEX_TEST_BUILD:-}" = 1 ]; }; then
   HEX_COMMIT=$(git -C "$root" rev-parse --short=7 HEAD 2>/dev/null || true)
@@ -110,6 +148,6 @@ sign "$bundle/Contents/Library/HexMicrophone.driver"
 # entitlement; anything it touches is attributed to Hex, its responsible
 # process.
 sign --identifier "$bundle_id.scrawl-helper" "$bundle/Contents/MacOS/scrawl-helper"
-sign --entitlements "$root/.github/release/hex.entitlements" "$bundle"
+sign --entitlements "$root/packaging/macos/hex.entitlements" "$bundle"
 codesign --verify --deep --strict --verbose=2 "$bundle"
 echo "$bundle"
