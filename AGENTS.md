@@ -17,7 +17,10 @@ code, copy, or docs that say or imply otherwise.
   (`has_update_channel` in `src/updater.rs`), because upstream's channels
   would replace this fork with upstream Hex. Installs come from a checkout
   (`scripts/install-linux.sh`).
-- Work on `scribe`. Do not push, open pull requests, or merge unless asked.
+- Work on `scribe`, and push it to `origin` (`awidor/hex`) after every
+  commit, so the work is never only on this computer. Never push to
+  `upstream` (`anomalyco/hex`). Do not open pull requests or merge unless
+  asked.
   CI is `compile.yml`, `check-linux.yml`, `check-macos.yml`, and
   `check-windows.yml`, on pull requests and by hand only.
 - Any change to what the window draws regenerates the goldens in the same
