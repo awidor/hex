@@ -36,7 +36,7 @@ meeting sends the other participants' audio to ElevenLabs too.
 
 Nothing is published from this fork: no downloads, packages, releases, or
 automatic updates. Install it from a checkout of this repository (branch
-`scribe`), as your desktop user. You need a stable Rust toolchain and the
+`dev`), as your desktop user. You need a stable Rust toolchain and the
 libraries listed in [docs/linux.md](docs/linux.md#dependencies).
 
 ```sh

@@ -4,7 +4,7 @@
 ## This fork
 
 This is a personal fork of [anomalyco/hex](https://github.com/anomalyco/hex)
-(MIT) on branch `scribe`. Upstream Hex transcribes with speech models on the
+(MIT) on branch `dev`. Upstream Hex transcribes with speech models on the
 computer; this fork has none. Every transcript comes from the ElevenLabs
 Scribe cloud API, so audio leaves the computer on every dictation, meeting
 chunk, capture narration, History "Transcribe again", local-API request, and
@@ -17,8 +17,9 @@ code, copy, or docs that say or imply otherwise.
   (`has_update_channel` in `src/updater.rs`), because upstream's channels
   would replace this fork with upstream Hex. Installs come from a checkout
   (`scripts/install-linux.sh`).
-- Work on `scribe`, and push it to `origin` (`awidor/hex`) after every
-  commit, so the work is never only on this computer. Never push to
+- Work directly on `dev`, the only branch, and push it to `origin`
+  (`awidor/hex`) after every commit, so the work is never only on this
+  computer. Do not create other branches. Never push to
   `upstream` (`anomalyco/hex`). Do not open pull requests or merge unless
   asked.
   CI is `compile.yml`, `check-linux.yml`, `check-macos.yml`, and
